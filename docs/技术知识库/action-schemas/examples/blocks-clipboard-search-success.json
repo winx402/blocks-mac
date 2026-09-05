@@ -1,0 +1,17 @@
+{
+  "ok": true,
+  "action": "blocks.clipboard.search",
+  "result": {
+    "items": [
+      {
+        "id": "clip_mock_1",
+        "kind": "text",
+        "created_at": "2026-07-01T00:00:00Z",
+        "summary": "Mock clipboard item; content redacted."
+      }
+    ],
+    "truncated": false
+  },
+  "warnings": [],
+  "audit_id": "act_1782913000_b385fa516f8c"
+}

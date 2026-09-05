@@ -1,0 +1,18 @@
+{
+  "schema_version": 6, "minimum_host_api_version": 1,
+  "id": "com.blocks.builtin.terminology-guard", "display_name": "Terminology Guard", "version": "1.1.1", "entry_point": "main.js",
+  "capabilities": ["hooks", "ui"], "permissions": { "data": ["translation_content"] },
+  "configuration_fields": [{ "id": "glossary", "type": "text", "title": "Glossary", "detail": "One source=preferred term per line.", "required": true, "maximum_length": 16384, "localizations": { "zh-Hans": { "title": "术语表", "detail": "每行填写 原词=首选译法。" }, "ja": { "title": "用語集", "detail": "1 行につき 元の用語=優先する用語 を入力します。" } } }, { "id": "case_sensitive", "type": "boolean", "title": "Case sensitive", "default": false, "localizations": { "zh-Hans": { "title": "区分大小写" }, "ja": { "title": "大文字と小文字を区別" } } }],
+  "presentation": {
+    "summary": "Applies your terminology before a translation result is saved.",
+    "purpose": "Keeps product names and preferred terms consistent across translation services.",
+    "trigger": "Runs locally before Blocks commits each translation result.",
+    "examples": ["Replace blocks=Blocks in every translated result."],
+    "data_usage": "Reads translation text and your glossary locally. It does not use the network.",
+    "localizations": {
+      "zh-Hans": { "name": "术语守卫", "summary": "翻译结果保存前按术语表统一用词。", "purpose": "让产品名称和指定术语在不同翻译源之间保持一致。", "trigger": "Blocks 提交每条翻译结果前在本机运行。", "examples": ["设置 blocks=Blocks，统一修正译文中的产品名。"], "data_usage": "仅在本机读取译文和术语表，不访问网络。" },
+      "ja": { "name": "用語ガード", "summary": "翻訳結果の確定前に用語集を適用します。", "purpose": "サービス間で製品名や指定用語を統一します。", "trigger": "各翻訳結果の確定前にローカルで実行します。", "examples": ["指定した製品名に統一します。"], "data_usage": "翻訳文と用語集を端末内で処理します。" }
+    }
+  },
+  "platform": { "host_actions": [], "hooks": [{ "id": "enforce-terms", "event": "translation.will_commit_result", "entry_function": "enforceTerms", "timeout_ms": 500, "failure_policy": "fail_open", "runs_in_background": false }], "actions": [], "ui": [{ "id": "about", "slot": "plugin.page", "root": { "id": "root", "kind": "page", "title": "Terminology Guard", "localizations": { "zh-Hans": { "title": "术语守卫" }, "ja": { "title": "用語ガード" } }, "children": [{ "id": "rule", "kind": "secondary_text", "properties": { "value": "Each replacement is applied locally before the result is committed." }, "localizations": { "zh-Hans": { "text": "每条替换都在译文提交前于本机完成。" }, "ja": { "text": "各置換は翻訳結果の確定前に端末内で適用します。" } } }] } }], "storage": { "kinds": ["key_value"] }, "shared_state": [], "schedules": [] }
+}

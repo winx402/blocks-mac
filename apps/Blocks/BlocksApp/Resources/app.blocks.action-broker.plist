@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>AssociatedBundleIdentifiers</key>
+	<array>
+		<string>app.blocks.app</string>
+	</array>
+	<key>BundleProgram</key>
+	<string>Contents/MacOS/BlocksActionBroker</string>
+	<key>Label</key>
+	<string>app.blocks.action-broker</string>
+	<key>MachServices</key>
+	<dict>
+		<key>app.blocks.action-broker.xpc</key>
+		<true/>
+	</dict>
+	<key>ProcessType</key>
+	<string>Background</string>
+</dict>
+</plist>

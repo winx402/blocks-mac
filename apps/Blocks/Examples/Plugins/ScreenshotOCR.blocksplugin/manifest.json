@@ -1,0 +1,25 @@
+{
+  "schema_version": 4,
+  "id": "com.blocks.examples.screenshot-ocr",
+  "display_name": "Screenshot OCR Follow-up",
+  "version": "1.0.0",
+  "entry_point": "main.js",
+  "capabilities": ["hooks", "actions"],
+  "permissions": {},
+  "configuration_fields": [],
+  "platform": {
+    "host_actions": ["screenshot.ocr"],
+    "hooks": [{
+      "id": "ocr-after-output",
+      "event": "screenshot.output_finished",
+      "entry_function": "afterScreenshot",
+      "timeout_ms": 500,
+      "failure_policy": "fail_open",
+      "runs_in_background": true
+    }],
+    "actions": [],
+    "ui": [],
+    "shared_state": [],
+    "schedules": []
+  }
+}

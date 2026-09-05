@@ -1,0 +1,59 @@
+{
+  "schema_version": 4,
+  "id": "com.blocks.examples.hook-policies",
+  "display_name": "Hook Policies and Shared State",
+  "version": "1.0.0",
+  "entry_point": "main.js",
+  "capabilities": ["hooks", "actions", "ui"],
+  "permissions": {},
+  "configuration_fields": [],
+  "platform": {
+    "hooks": [
+      {
+        "id": "fail-open-example",
+        "event": "app.launched",
+        "entry_function": "observeLaunch",
+        "timeout_ms": 500,
+        "failure_policy": "fail_open",
+        "runs_in_background": true
+      },
+      {
+        "id": "fail-closed-example",
+        "event": "automation.will_execute_shortcut",
+        "entry_function": "reviewShortcut",
+        "timeout_ms": 500,
+        "failure_policy": "fail_closed",
+        "runs_in_background": false
+      },
+      {
+        "id": "shared-state-subscription",
+        "event": "plugin.shared_state_changed",
+        "entry_function": "observeSharedState",
+        "timeout_ms": 500,
+        "failure_policy": "fail_open",
+        "runs_in_background": true
+      }
+    ],
+    "actions": [
+      {
+        "id": "read-counter",
+        "display_name": "Read launch counter",
+        "entry_function": "readCounter"
+      },
+      {
+        "id": "dequeue-event",
+        "display_name": "Dequeue observed event",
+        "entry_function": "dequeueEvent"
+      }
+    ],
+    "ui": [],
+    "storage": { "kinds": ["key_value", "queue"] },
+    "shared_state": [{
+      "id": "public-counter",
+      "schema_version": 1,
+      "schema": { "value": "integer" },
+      "access": "read_write"
+    }],
+    "schedules": []
+  }
+}

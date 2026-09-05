@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blocks.local/schemas/shared/error.schema.json",
+  "title": "Action error",
+  "type": "object",
+  "required": [
+    "code",
+    "message"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "code": {
+      "type": "string",
+      "enum": [
+        "unknown_action",
+        "invalid_input",
+        "requires_confirmation",
+        "permission_denied",
+        "provider_unavailable",
+        "provider_timeout",
+        "provider_invalid_output",
+        "hook_invalid",
+        "hook_not_enabled"
+      ]
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blocks Scrolling Screenshot Fixture</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; min-height: 100%; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
+    body { background: #f3f5f7; color: #15202b; }
+    header {
+      position: fixed;
+      z-index: 5;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 72px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 24px;
+      color: #f8fafc;
+      background: #20252b;
+      border-bottom: 1px solid #38414a;
+    }
+    header strong { font-size: 18px; font-weight: 600; }
+    header span { font-size: 12px; color: #b8c1ca; }
+    aside {
+      position: fixed;
+      z-index: 4;
+      top: 72px;
+      bottom: 0;
+      left: 0;
+      width: 112px;
+      padding: 18px 12px;
+      background: #e3e8ed;
+      border-right: 1px solid #c8d0d8;
+    }
+    aside div { height: 9px; margin: 0 0 14px; border-radius: 3px; background: #a5b1bc; }
+    main { width: 720px; margin: 0 0 0 112px; padding: 92px 24px 80px; }
+    .row {
+      height: 76px;
+      margin: 0 0 12px;
+      padding: 12px 16px;
+      background: #fff;
+      border: 1px solid #d7dde3;
+      border-left: 4px solid #2f80ed;
+      border-radius: 6px;
+      box-shadow: 0 1px 2px rgb(15 23 42 / 8%);
+    }
+    .row:nth-child(3n) { border-left-color: #19a974; }
+    .row:nth-child(3n + 1) { border-left-color: #dd6b20; }
+    .row strong { display: block; font-size: 14px; line-height: 20px; }
+    .row p { margin: 5px 0 0; font-size: 12px; line-height: 18px; color: #56616c; }
+    .pulse {
+      position: fixed;
+      z-index: 6;
+      right: 18px;
+      bottom: 18px;
+      width: 54px;
+      height: 24px;
+      border-radius: 12px;
+      background: #d6dde4;
+      color: #33404c;
+      font: 11px/24px ui-monospace, monospace;
+      text-align: center;
+    }
+    html[data-truth="true"] header { position: absolute; }
+    html[data-truth="true"] aside {
+      position: absolute;
+      background-color: #e3e8ed;
+      background-image: repeating-linear-gradient(
+        to bottom,
+        #a5b1bc 0,
+        #a5b1bc 9px,
+        transparent 9px,
+        transparent 23px
+      );
+      background-position: 12px 18px;
+      background-size: 87px 23px;
+      background-repeat: repeat-y;
+    }
+    html[data-truth="true"] aside div { display: none; }
+    html[data-truth="true"] .pulse { position: absolute; }
+  </style>
+</head>
+<body>
+  <header><strong>长截图真实渲染测试</strong><span>fixed header</span></header>
+  <aside id="sidebar"></aside>
+  <main id="content"></main>
+  <div class="pulse" id="pulse">tick 0</div>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const truthMode = params.get("truth") === "1";
+    document.documentElement.dataset.truth = String(truthMode);
+    const content = document.getElementById("content");
+    for (let index = 1; index <= 40; index += 1) {
+      const row = document.createElement("section");
+      row.className = "row";
+      row.innerHTML = `<strong>条目 ${String(index).padStart(2, "0")}</strong><p>确定性浏览器排版内容 · Alpha ${index * 17} · Beta ${index * 29}</p>`;
+      content.appendChild(row);
+    }
+    const sidebar = document.getElementById("sidebar");
+    for (let index = 0; index < 18; index += 1) sidebar.appendChild(document.createElement("div"));
+    document.getElementById("pulse").textContent = `tick ${params.get("tick") || "0"}`;
+    requestAnimationFrame(() => {
+      scrollTo(0, truthMode ? 0 : Number(params.get("scroll") || 0));
+      document.documentElement.dataset.ready = "true";
+    });
+  </script>
+</body>
+</html>

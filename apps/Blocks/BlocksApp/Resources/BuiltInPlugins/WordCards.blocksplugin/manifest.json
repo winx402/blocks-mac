@@ -1,0 +1,17 @@
+{
+  "schema_version": 6, "minimum_host_api_version": 1,
+  "id": "com.blocks.builtin.word-cards", "display_name": "Word Cards", "version": "1.1.1", "entry_point": "main.js",
+  "capabilities": ["hooks", "actions", "ui"], "permissions": { "data": ["translation_content"] }, "configuration_fields": [{ "id": "review_hour", "type": "number", "title": "Daily reminder hour", "detail": "Uses local 24-hour time, from 0 to 23.", "default": 9, "localizations": { "zh-Hans": { "title": "每日提醒时间", "detail": "使用本地 24 小时制，可填写 0 到 23。" }, "ja": { "title": "毎日の通知時刻", "detail": "端末の 24 時間表記で 0 から 23 を指定します。" } } }],
+  "presentation": {
+    "summary": "Turns translation favorites into a local review queue.",
+    "purpose": "Keeps the original text and a successful translation together for later review.",
+    "trigger": "Adds a card when you favorite a translation and checks the queue on a local schedule.",
+    "examples": ["Favorite a translation, then review its original and translated text later."],
+    "data_usage": "Stores favorite text and review state in the plugin's local storage. It does not use the network.",
+    "localizations": {
+      "zh-Hans": { "name": "单词卡", "summary": "将翻译收藏转换为本地复习队列。", "purpose": "把原文和成功译文保存在一起，方便之后复习。", "trigger": "收藏翻译时创建卡片，并按本地计划检查复习队列。", "examples": ["收藏一次翻译，之后复习对应的原文和译文。"], "data_usage": "将收藏文字和复习状态保存在插件本地存储中，不访问网络。" },
+      "ja": { "name": "単語カード", "summary": "翻訳のお気に入りをローカル復習キューにします。", "purpose": "原文と翻訳を一緒に保存して後で復習できます。", "trigger": "翻訳をお気に入りにするとカードを追加します。", "examples": ["お気に入りの原文と翻訳を後で復習します。"], "data_usage": "端末内のプラグイン領域に保存し、ネットワークは使用しません。" }
+    }
+  },
+  "platform": { "host_actions": ["system.notification"], "hooks": [{ "id": "capture-favorite", "event": "translation.favorite_changed", "entry_function": "captureFavorite", "timeout_ms": 500, "failure_policy": "fail_open", "runs_in_background": true }], "actions": [{ "id": "mark-reviewed", "display_name": "Mark reviewed", "entry_function": "markReviewed" }], "ui": [{ "id": "cards", "slot": "plugin.page", "root": { "id": "root", "kind": "page", "title": "Word Cards", "localizations": { "zh-Hans": { "title": "单词卡" }, "ja": { "title": "単語カード" } }, "children": [{ "id": "queue-status", "kind": "status", "properties": { "value": "No cards due" }, "localizations": { "zh-Hans": { "text": "当前没有待复习卡片" }, "ja": { "text": "復習予定のカードはありません" } } }, { "id": "queue", "kind": "list", "properties": { "items": [] } }, { "id": "review", "kind": "button", "title": "Mark reviewed", "action_id": "mark-reviewed", "localizations": { "zh-Hans": { "title": "标记为已复习" }, "ja": { "title": "復習済みにする" } } }] } }], "storage": { "kinds": ["key_value", "queue"] }, "shared_state": [], "schedules": [{ "id": "review-check", "kind": "interval", "entry_function": "dailyReview", "configuration": { "seconds": 3600 } }] }
+}

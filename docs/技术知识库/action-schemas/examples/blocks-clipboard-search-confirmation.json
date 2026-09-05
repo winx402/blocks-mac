@@ -1,0 +1,19 @@
+{
+  "ok": false,
+  "action": "blocks.clipboard.search",
+  "result": {},
+  "warnings": [],
+  "audit_id": "act_1782913000_4ae6de3ebbaa",
+  "requires_confirmation": {
+    "level": "preview",
+    "reason": "Full clipboard content requires explicit authorization.",
+    "preview": {
+      "query": "",
+      "limit": 10
+    }
+  },
+  "error": {
+    "code": "requires_confirmation",
+    "message": "Confirmation required."
+  }
+}

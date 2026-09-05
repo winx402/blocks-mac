@@ -1,0 +1,20 @@
+// TestFlight / Mac App Store compatibility profile.
+#include "Signing.shared.xcconfig"
+#include? "ReleaseIdentity.local.xcconfig"
+
+BLOCKS_SELECTION_HELPER_DOWNLOAD_URL =
+BLOCKS_RELEASE_PAGE_URL = https:/$()/blocks.orangeforge.top/releases/
+BLOCKS_SUPPORT_URL = https:/$()/blocks.orangeforge.top/support/
+BLOCKS_PRIVACY_URL = https:/$()/blocks.orangeforge.top/privacy/
+
+ARCHS = arm64
+ONLY_ACTIVE_ARCH = NO
+MACOSX_DEPLOYMENT_TARGET = 14.0
+ENABLE_HARDENED_RUNTIME = YES
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) BLOCKS_APP_STORE_BETA
+
+BLOCKS_DISTRIBUTION_CHANNEL = app-store-beta
+BLOCKS_RELEASE_NAME = 0.1.0-testflight
+
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = Apple Distribution

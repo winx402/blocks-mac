@@ -1,0 +1,33 @@
+{
+  "schema_version": "0.1.0",
+  "hook_id": "hook_sensitive_clipboard_review",
+  "name": "Sensitive clipboard review",
+  "description": "Inspect clipboard summaries before saving and suggest blocking likely secrets.",
+  "status": "draft",
+  "trigger": "before_clipboard_item_saved",
+  "created_by": "agent",
+  "runtime": "declarative",
+  "permissions": [
+    "read_clipboard_summary",
+    "block_action"
+  ],
+  "confirmation_level": "destructive_or_hook",
+  "effect": "block",
+  "conditions": [
+    {
+      "field": "summary",
+      "operator": "contains_any",
+      "values": [
+        "api key",
+        "password",
+        "token"
+      ]
+    }
+  ],
+  "suggested_actions": [],
+  "audit": {
+    "log_inputs": false,
+    "log_decision": true,
+    "log_outputs": true
+  }
+}

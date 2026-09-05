@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blocks.local/schemas/actions.catalog.json",
+  "schema_version": "0.1.0",
+  "confirmation_levels": [
+    "preview",
+    "external_transfer",
+    "destructive_or_hook"
+  ],
+  "actions": {
+    "blocks.screenshot.capture": {
+      "risk": "sensitive_local_capture",
+      "input_schema": "actions/blocks.screenshot.capture.input.schema.json",
+      "output_schema": "actions/blocks.screenshot.capture.output.schema.json",
+      "confirmation_rules": [
+        {
+          "when": "dry_run is false",
+          "level": "preview",
+          "reason": "Real screen capture must be visible to the user before execution in this spike."
+        },
+        {
+          "when": "send_to_ai is true",
+          "level": "external_transfer",
+          "reason": "Screenshot content may be transferred to an external provider."
+        }
+      ]
+    },
+    "blocks.clipboard.search": {
+      "risk": "sensitive_local_history",
+      "input_schema": "actions/blocks.clipboard.search.input.schema.json",
+      "output_schema": "actions/blocks.clipboard.search.output.schema.json",
+      "confirmation_rules": [
+        {
+          "when": "include_content is true",
+          "level": "preview",
+          "reason": "Full clipboard content requires explicit authorization."
+        }
+      ]
+    },
+    "blocks.translate.text": {
+      "risk": "possible_external_model_call",
+      "input_schema": "actions/blocks.translate.text.input.schema.json",
+      "output_schema": "actions/blocks.translate.text.output.schema.json",
+      "confirmation_rules": [
+        {
+          "when": "provider is not mock",
+          "level": "external_transfer",
+          "reason": "Non-mock providers may receive user text."
+        },
+        {
+          "when": "source is screenshot or clipboard",
+          "level": "external_transfer",
+          "reason": "Screenshot and clipboard sources are sensitive local context."
+        }
+      ]
+    }
+  }
+}

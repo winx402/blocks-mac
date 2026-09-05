@@ -1,0 +1,17 @@
+{
+  "schema_version": 6, "minimum_host_api_version": 1,
+  "id": "com.blocks.builtin.content-radar", "display_name": "Content Radar", "version": "1.1.1", "entry_point": "main.js",
+  "capabilities": ["hooks", "actions", "ui"], "permissions": { "data": ["clipboard_content"] }, "configuration_fields": [{ "id": "detect_base64", "type": "boolean", "title": "Recognize Base64", "default": true, "localizations": { "zh-Hans": { "title": "识别 Base64" }, "ja": { "title": "Base64 を認識" } } }],
+  "presentation": {
+    "summary": "Recognizes structured values in clipboard history locally.",
+    "purpose": "Identifies JSON, UUID, JWT, Base64, hashes, and colors so they are easier to understand and reuse.",
+    "trigger": "Runs after Blocks saves a text clipboard record.",
+    "examples": ["Marks a JWT as decoded-only and not verified.", "Recognizes a Base64-shaped value without uploading it."],
+    "data_usage": "Analyzes clipboard text locally and does not use the network.",
+    "localizations": {
+      "zh-Hans": { "name": "内容雷达", "summary": "在本机识别剪贴板中的结构化内容。", "purpose": "识别 JSON、UUID、JWT、Base64、哈希和颜色，帮助理解和复用。", "trigger": "在 Blocks 保存文字剪贴板条目后运行。", "examples": ["JWT 会明确标注为仅解码、未验证。", "Base64 形态的内容无需上传即可识别。"], "data_usage": "仅在本机分析剪贴板文字，不访问网络。" },
+      "ja": { "name": "コンテンツレーダー", "summary": "クリップボードの構造化データをローカル解析します。", "purpose": "JSON、UUID、JWT、Base64、ハッシュ、色を識別します。", "trigger": "テキスト履歴の保存後に実行します。", "examples": ["JWT は未検証であることを明示します。"], "data_usage": "端末内で解析し、ネットワークは使用しません。" }
+    }
+  },
+  "platform": { "host_actions": [], "hooks": [{ "id": "inspect-capture", "event": "clipboard.did_persist_capture", "entry_function": "inspectCapture", "timeout_ms": 500, "failure_policy": "fail_open", "runs_in_background": true }], "actions": [{ "id": "clear-findings", "display_name": "Clear findings", "entry_function": "clearFindings" }], "ui": [{ "id": "findings", "slot": "plugin.page", "root": { "id": "root", "kind": "page", "title": "Content Radar", "localizations": { "zh-Hans": { "title": "内容雷达" }, "ja": { "title": "コンテンツレーダー" } }, "children": [{ "id": "status", "kind": "status", "properties": { "value": "Waiting for local content" }, "localizations": { "zh-Hans": { "text": "等待识别本地内容" }, "ja": { "text": "ローカル内容を待っています" } } }, { "id": "history", "kind": "list", "properties": { "items": [] } }, { "id": "clear", "kind": "button", "title": "Clear", "action_id": "clear-findings", "localizations": { "zh-Hans": { "title": "清空结果" }, "ja": { "title": "結果を消去" } } }] } }], "storage": { "kinds": ["key_value"] }, "shared_state": [], "schedules": [] }
+}

@@ -1,0 +1,17 @@
+{
+  "schema_version": 6, "minimum_host_api_version": 2,
+  "id": "com.blocks.builtin.color-collector", "display_name": "Color Collector", "version": "1.1.1", "entry_point": "main.js",
+  "capabilities": ["hooks", "actions", "ui"], "permissions": { "data": ["clipboard_content"] }, "configuration_fields": [],
+  "presentation": {
+    "summary": "Collects color values from clipboard text and screenshot sampling.",
+    "purpose": "Keeps a reusable local palette without adding color tools to the Blocks host itself.",
+    "trigger": "Runs after a color value is copied or when you request screenshot color sampling.",
+    "examples": ["Copy #FF6600 to add it to the palette.", "Pick a pixel from a screenshot and copy its HEX value."],
+    "data_usage": "Stores color values locally and reads only the sampled pixel or clipboard text you approved.",
+    "localizations": {
+      "zh-Hans": { "name": "颜色收藏册", "summary": "收藏剪贴板颜色值和截图取色结果。", "purpose": "在插件中维护可复用的本地调色板，不向 Blocks 主程序加入专属业务逻辑。", "trigger": "复制颜色值后，或主动发起截图取色时运行。", "examples": ["复制 #FF6600 后加入调色板。", "从截图选取像素并复制 HEX。"], "data_usage": "仅在本机保存颜色值，并读取你批准的剪贴板文字或取样像素。" },
+      "ja": { "name": "カラーパレット", "summary": "クリップボードと画面採色から色を集めます。", "purpose": "再利用できるローカルパレットを管理します。", "trigger": "色文字のコピー後、または画面採色時に実行します。", "examples": ["#FF6600 をコピーして追加します。"], "data_usage": "許可された文字や採色結果だけを端末内に保存します。" }
+    }
+  },
+  "platform": { "host_actions": ["screenshot.color_sample.begin", "clipboard.copy_text"], "hooks": [{ "id": "restore-palette", "event": "app.launched", "entry_function": "restorePalette", "timeout_ms": 500, "failure_policy": "fail_open", "runs_in_background": true }, { "id": "collect-color", "event": "clipboard.did_persist_capture", "entry_function": "collectColor", "timeout_ms": 500, "failure_policy": "fail_open", "runs_in_background": true }, { "id": "collect-sample", "event": "plugin.host_action_completed", "entry_function": "collectSample", "timeout_ms": 500, "failure_policy": "fail_open", "runs_in_background": true }], "actions": [{ "id": "pick-color", "display_name": "Pick color from screenshot", "entry_function": "pickColor" }, { "id": "copy-latest", "display_name": "Copy latest color", "entry_function": "copyLatest" }], "ui": [{ "id": "palette", "slot": "plugin.page", "root": { "id": "root", "kind": "page", "title": "Color Collector", "localizations": { "zh-Hans": { "title": "颜色收藏册" }, "ja": { "title": "カラーパレット" } }, "children": [{ "id": "palette-status", "kind": "status", "properties": { "value": "No colors collected" }, "localizations": { "zh-Hans": { "text": "尚未收藏颜色" }, "ja": { "text": "保存された色はありません" } } }, { "id": "palette-list", "kind": "list", "properties": { "items": [] } }, { "id": "pick", "kind": "button", "title": "Pick from screenshot", "action_id": "pick-color", "localizations": { "zh-Hans": { "title": "从屏幕取色" }, "ja": { "title": "画面から色を取得" } } }, { "id": "copy", "kind": "button", "title": "Copy latest", "action_id": "copy-latest", "localizations": { "zh-Hans": { "title": "复制最近颜色" }, "ja": { "title": "最新の色をコピー" } } }] } }], "storage": { "kinds": ["key_value", "document"] }, "shared_state": [], "schedules": [] }
+}

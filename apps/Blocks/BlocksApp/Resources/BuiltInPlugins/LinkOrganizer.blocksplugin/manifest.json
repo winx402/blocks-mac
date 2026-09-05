@@ -1,0 +1,18 @@
+{
+  "schema_version": 6, "minimum_host_api_version": 1,
+  "id": "com.blocks.builtin.link-organizer", "display_name": "Link Organizer", "version": "1.1.1", "entry_point": "main.js",
+  "capabilities": ["hooks", "ui"], "permissions": { "data": ["clipboard_content"] },
+  "configuration_fields": [{ "id": "remove_tracking", "type": "boolean", "title": "Remove known tracking parameters", "default": true, "localizations": { "zh-Hans": { "title": "移除常见跟踪参数" }, "ja": { "title": "既知の追跡パラメータを除去" } } }],
+  "presentation": {
+    "summary": "Removes known tracking parameters from links before pasting.",
+    "purpose": "Creates a cleaner pasted URL while keeping the original URL in clipboard history.",
+    "trigger": "Runs only when a URL is pasted through Blocks.",
+    "examples": ["Removes utm_source and fbclid while preserving the rest of the link."],
+    "data_usage": "Processes URL text locally and does not contact the destination website.",
+    "localizations": {
+      "zh-Hans": { "name": "链接整理", "summary": "粘贴前移除网址中的常见跟踪参数。", "purpose": "输出更干净的网址，同时在剪贴板历史中保留原始链接。", "trigger": "仅在通过 Blocks 粘贴网址时运行。", "examples": ["移除 utm_source、fbclid 等参数，保留其余链接内容。"], "data_usage": "仅在本机处理网址文字，不访问目标网站。" },
+      "ja": { "name": "リンク整理", "summary": "貼り付け前に既知の追跡パラメータを除去します。", "purpose": "履歴に元 URL を残したまま、きれいな URL を貼り付けます。", "trigger": "Blocks 経由で URL を貼り付ける時だけ実行します。", "examples": ["utm_source や fbclid を除去します。"], "data_usage": "端末内で URL を処理し、サイトには接続しません。" }
+    }
+  },
+  "platform": { "host_actions": [], "hooks": [{ "id": "clean-link-before-paste", "event": "clipboard.will_write_pasteboard", "entry_function": "organizeLink", "timeout_ms": 500, "failure_policy": "fail_open", "runs_in_background": false }], "actions": [], "ui": [{ "id": "about", "slot": "plugin.page", "root": { "id": "root", "kind": "page", "title": "Link Organizer", "localizations": { "zh-Hans": { "title": "链接整理" }, "ja": { "title": "リンク整理" } }, "children": [{ "id": "policy", "kind": "secondary_text", "properties": { "value": "Only known tracking parameters are removed. The clipboard history record remains unchanged." }, "localizations": { "zh-Hans": { "text": "仅移除已知跟踪参数，剪贴板历史中的原始链接保持不变。" }, "ja": { "text": "既知の追跡パラメータだけを除去し、履歴の元 URL は変更しません。" } } }] } }], "storage": { "kinds": ["key_value"] }, "shared_state": [], "schedules": [] }
+}

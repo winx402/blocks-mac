@@ -1,0 +1,153 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "selectionHelper.accessibility" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Accessibility" } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "アクセシビリティ" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "辅助功能" } }
+      }
+    },
+    "selectionHelper.accessibility.permissionRequired" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Permission required" } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "権限が必要です" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "需要辅助功能权限" } }
+      }
+    },
+    "selectionHelper.accessibility.ready" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Ready" } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "準備完了" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已就绪" } }
+      }
+    },
+    "selectionHelper.accessibility.request" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Request Permission" } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "権限を許可" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请求授权" } }
+      }
+    },
+    "selectionHelper.connection.failed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Local connection failed: %@" } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "ローカル接続に失敗しました：%@" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "本机连接失败：%@" } }
+      }
+    },
+    "selectionHelper.connection.ready" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Local connection ready" } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "ローカル接続の準備ができました" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "本机连接已就绪" } }
+      }
+    },
+    "selectionHelper.connection.starting" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Starting local connection…" } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "ローカル接続を開始しています…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在启动本机连接…" } }
+      }
+    },
+    "selectionHelper.detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This helper reads only the text selection requested by Blocks. It does not access the clipboard or network." } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "このヘルパーは Blocks が要求した選択テキストだけを読み取ります。クリップボードやネットワークにはアクセスしません。" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "此助手只读取积木工具请求的选中文字，不访问剪贴板或网络。" } }
+      }
+    },
+    "selectionHelper.launchAtLogin" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Open at login" } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "ログイン時に開く" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "登录时打开" } }
+      }
+    },
+    "selectionHelper.pairing" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pairing" } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "ペアリング" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "配对" } }
+      }
+    },
+    "selectionHelper.pairing.code" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Enter this code in Blocks" } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "このコードを Blocks に入力してください" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请在积木工具中输入此配对码" } }
+      }
+    },
+    "selectionHelper.pairing.paired" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Paired" } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "ペアリング済み" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已配对" } }
+      }
+    },
+    "selectionHelper.pairing.reset" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Reset Pairing" } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "ペアリングをリセット" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "重置配对" } }
+      }
+    },
+    "selectionHelper.pairing.reset.accessibilityHint" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Disconnects Blocks and generates a new pairing code." } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "Blocks とのペアリングを解除し、新しいペアリングコードを生成します。" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "将断开与积木工具的配对，并生成新的配对码。" } }
+      }
+    },
+    "selectionHelper.pairing.reset.confirmation.action" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Reset Pairing" } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "ペアリングをリセット" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "重置配对" } }
+      }
+    },
+    "selectionHelper.pairing.reset.confirmation.cancel" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Cancel" } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "キャンセル" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "取消" } }
+      }
+    },
+    "selectionHelper.pairing.reset.confirmation.message" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This immediately disconnects Blocks and creates a new pairing code. It cannot be undone; pair Blocks again with the new code." } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "Blocks との接続を直ちに解除し、新しいペアリングコードを作成します。この操作は元に戻せません。新しいコードで Blocks をもう一度ペアリングしてください。" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "此操作会立即断开与积木工具的配对，并创建新的配对码，且无法撤销。请使用新配对码重新连接积木工具。" } }
+      }
+    },
+    "selectionHelper.pairing.reset.confirmation.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Reset pairing?" } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "ペアリングをリセットしますか？" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "要重置配对吗？" } }
+      }
+    },
+    "selectionHelper.pairing.reset.error" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pairing could not be reset. Your current pairing was kept; try again." } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "ペアリングをリセットできませんでした。現在のペアリングは保持されています。もう一度試してください。" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "无法重置配对，当前配对已保留。请重试。" } }
+      }
+    },
+    "selectionHelper.recheck" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Recheck" } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "再確認" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "重新检测" } }
+      }
+    },
+    "selectionHelper.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Blocks Selection Helper" } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "Blocks 選択翻訳アシスタント" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "积木工具划词翻译助手" } }
+      }
+    }
+  },
+  "version" : "1.0"
+}

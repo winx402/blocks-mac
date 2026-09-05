@@ -1,0 +1,19 @@
+{
+  "ok": false,
+  "action": "blocks.screenshot.capture",
+  "result": {},
+  "warnings": [],
+  "audit_id": "act_1782913000_3e75dbbd0d31",
+  "requires_confirmation": {
+    "level": "preview",
+    "reason": "Real screen capture must be visible to the user before execution in this spike.",
+    "preview": {
+      "mode": "region",
+      "send_to_ai": false
+    }
+  },
+  "error": {
+    "code": "requires_confirmation",
+    "message": "Confirmation required."
+  }
+}

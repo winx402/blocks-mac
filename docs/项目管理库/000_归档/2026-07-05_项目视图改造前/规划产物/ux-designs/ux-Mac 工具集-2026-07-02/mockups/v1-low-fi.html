@@ -1,0 +1,519 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>奇点 AI 工具箱 V1 UX Low-Fi</title>
+  <style>
+    :root {
+      --bg: #f4f5f2;
+      --surface: #ffffff;
+      --surface-raised: #fbfbfa;
+      --surface-subtle: #f8f8f5;
+      --text: #1f2428;
+      --muted: #6f777d;
+      --line: #d9ddd7;
+      --line-strong: #b9c0ba;
+      --accent: #2e7d6f;
+      --accent-soft: #e0f1ed;
+      --warning: #b7791f;
+      --warning-soft: #fff4d7;
+      --danger: #b64747;
+      --danger-soft: #fae7e7;
+      --info: #5b6fa8;
+      --info-soft: #eceff9;
+      --shadow: 0 18px 42px rgba(31, 36, 40, 0.14);
+      color-scheme: light;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 13px;
+      line-height: 1.45;
+      letter-spacing: 0;
+    }
+
+    .page {
+      max-width: 1220px;
+      margin: 0 auto;
+      padding: 28px;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      gap: 20px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    h1, h2, h3, p { margin: 0; }
+
+    h1 {
+      font-size: 24px;
+      font-weight: 680;
+      line-height: 1.22;
+    }
+
+    h2 {
+      font-size: 17px;
+      font-weight: 680;
+    }
+
+    h3 {
+      font-size: 12px;
+      font-weight: 590;
+      color: var(--muted);
+      text-transform: uppercase;
+    }
+
+    .note {
+      max-width: 560px;
+      color: var(--muted);
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 18px;
+      margin-top: 22px;
+    }
+
+    .span-2 { grid-column: span 2; }
+
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      min-height: 260px;
+    }
+
+    .panel.plain {
+      box-shadow: none;
+    }
+
+    .panel-head {
+      min-height: 46px;
+      padding: 11px 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(#ffffff, #fafaf8);
+    }
+
+    .panel-body {
+      padding: 14px;
+    }
+
+    .row, .toolbar, .tabs, .split, .footer-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .split { align-items: stretch; }
+
+    .toolbar { flex-wrap: wrap; }
+
+    .button, .chip, .key, .field, .tab {
+      border: 1px solid var(--line);
+      background: var(--surface-raised);
+      border-radius: 6px;
+      padding: 6px 9px;
+      white-space: nowrap;
+    }
+
+    .button.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #ffffff;
+    }
+
+    .button.warning {
+      background: var(--warning-soft);
+      border-color: var(--warning);
+      color: #5f3d00;
+    }
+
+    .button.danger {
+      background: var(--danger-soft);
+      border-color: var(--danger);
+      color: var(--danger);
+    }
+
+    .chip {
+      font-size: 11px;
+      color: var(--muted);
+      background: var(--surface-subtle);
+    }
+
+    .chip.info {
+      color: var(--info);
+      background: var(--info-soft);
+      border-color: #cbd3ee;
+    }
+
+    .key {
+      min-width: 92px;
+      text-align: center;
+      font-family: "SF Mono", ui-monospace, Menlo, monospace;
+      font-size: 12px;
+    }
+
+    .field {
+      flex: 1;
+      color: var(--muted);
+      background: #fff;
+    }
+
+    .screen {
+      height: 220px;
+      border: 1px dashed var(--line-strong);
+      border-radius: 7px;
+      background:
+        linear-gradient(90deg, rgba(46, 125, 111, 0.08) 1px, transparent 1px),
+        linear-gradient(rgba(46, 125, 111, 0.08) 1px, transparent 1px),
+        #f6f7f4;
+      background-size: 24px 24px;
+      position: relative;
+    }
+
+    .selection {
+      position: absolute;
+      left: 84px;
+      top: 52px;
+      width: 250px;
+      height: 116px;
+      border: 2px solid var(--accent);
+      background: rgba(46, 125, 111, 0.08);
+    }
+
+    .selection span {
+      position: absolute;
+      right: 8px;
+      bottom: 6px;
+      color: var(--accent);
+      font-family: "SF Mono", ui-monospace, Menlo, monospace;
+      font-size: 11px;
+    }
+
+    .preview {
+      min-height: 168px;
+      border: 1px solid var(--line);
+      background: var(--surface-subtle);
+      border-radius: 7px;
+      display: grid;
+      place-items: center;
+      color: var(--muted);
+    }
+
+    .list {
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      overflow: hidden;
+      flex: 1;
+      min-width: 0;
+    }
+
+    .item {
+      display: grid;
+      grid-template-columns: 72px 1fr 80px;
+      gap: 8px;
+      padding: 9px 10px;
+      border-bottom: 1px solid var(--line);
+      background: #fff;
+    }
+
+    .item:last-child { border-bottom: none; }
+    .item.active { background: var(--accent-soft); }
+
+    .detail {
+      width: 42%;
+      min-width: 260px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 12px;
+      background: var(--surface-raised);
+    }
+
+    .muted { color: var(--muted); }
+    .mono { font-family: "SF Mono", ui-monospace, Menlo, monospace; font-size: 12px; }
+
+    .confirm {
+      margin-top: 12px;
+      border: 1px solid var(--warning);
+      background: var(--warning-soft);
+      border-radius: 8px;
+      padding: 12px;
+    }
+
+    .confirm.danger {
+      border-color: var(--danger);
+      background: var(--danger-soft);
+    }
+
+    .settings {
+      display: grid;
+      grid-template-columns: 220px 1fr;
+      min-height: 360px;
+    }
+
+    .sidebar {
+      background: var(--surface-subtle);
+      border-right: 1px solid var(--line);
+      padding: 12px;
+    }
+
+    .nav {
+      padding: 8px 9px;
+      border-radius: 6px;
+      margin-bottom: 4px;
+      color: var(--muted);
+    }
+
+    .nav.active {
+      background: var(--accent-soft);
+      color: var(--text);
+    }
+
+    .settings-detail {
+      padding: 16px;
+    }
+
+    .setting-row {
+      display: grid;
+      grid-template-columns: 1fr auto auto;
+      gap: 10px;
+      align-items: center;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .translate-pair {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .text-box {
+      min-height: 150px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 10px;
+      background: #fff;
+    }
+
+    @media (max-width: 860px) {
+      .grid { grid-template-columns: 1fr; }
+      .span-2 { grid-column: span 1; }
+      .split, .translate-pair, .settings { display: block; }
+      .detail { width: 100%; margin-top: 12px; }
+      .sidebar { border-right: none; border-bottom: 1px solid var(--line); }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header>
+      <div>
+        <h1>奇点 AI 工具箱 V1 UX Low-Fi</h1>
+        <p class="muted">线框参考。正式契约以 DESIGN.md 与 EXPERIENCE.md 为准。</p>
+      </div>
+      <p class="note">目标气质：Mac 原生感、轻量、高密度、低打扰。AI、provider 和 hook 只嵌入具体工具流程。</p>
+    </header>
+
+    <section class="grid">
+      <article class="panel">
+        <div class="panel-head">
+          <h2>Screenshot Selection</h2>
+          <div class="tabs">
+            <span class="tab">Region</span>
+            <span class="tab">Window</span>
+            <span class="tab">Fullscreen</span>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="screen">
+            <div class="selection"><span>1280 x 720</span></div>
+          </div>
+          <div class="footer-actions" style="margin-top: 12px;">
+            <span class="key">Option + A</span>
+            <span class="button">Retake</span>
+            <span class="button">Cancel</span>
+          </div>
+        </div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-head">
+          <h2>Screenshot Result</h2>
+          <span class="chip info">audit: act_...</span>
+        </div>
+        <div class="panel-body">
+          <div class="split">
+            <div class="preview" style="flex: 1;">image preview</div>
+            <div class="toolbar" style="width: 136px; align-content: flex-start;">
+              <span class="button primary">Copy</span>
+              <span class="button">Save</span>
+              <span class="button">Drag</span>
+              <span class="button">Pin</span>
+              <span class="button">OCR</span>
+              <span class="button">Translate</span>
+            </div>
+          </div>
+          <div class="confirm">
+            <h3>external_transfer</h3>
+            <p>将发送 OCR 摘要到 Codex CLI。Provider: codex，字符数: 428。</p>
+            <div class="footer-actions" style="margin-top: 10px;">
+              <span class="button">Cancel</span>
+              <span class="button warning">Continue</span>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <article class="panel span-2">
+        <div class="panel-head">
+          <h2>Clipboard History</h2>
+          <div class="toolbar">
+            <span class="chip">Recorder on</span>
+            <span class="key">Option + V</span>
+          </div>
+        </div>
+        <div class="panel-body">
+          <div class="row" style="margin-bottom: 12px;">
+            <div class="field">Search clipboard history...</div>
+            <span class="button">Pause</span>
+          </div>
+          <div class="split">
+            <div class="list">
+              <div class="item active"><strong>RTF</strong><span>Support reply template</span><span class="muted">2m ago</span></div>
+              <div class="item"><strong>Image</strong><span>1200 x 800 PNG</span><span class="muted">8m ago</span></div>
+              <div class="item"><strong>URL</strong><span>example.com</span><span class="muted">1h ago</span></div>
+              <div class="item"><strong>Skipped</strong><span>Password manager excluded</span><span class="muted">1h ago</span></div>
+            </div>
+            <aside class="detail">
+              <h3>Detail Preview</h3>
+              <p><strong>Kind:</strong> Rich text</p>
+              <p><strong>Restorable:</strong> yes, local only</p>
+              <p><strong>Source:</strong> frontmost app candidate</p>
+              <div class="toolbar" style="margin-top: 12px;">
+                <span class="button primary">Paste</span>
+                <span class="button">Copy</span>
+                <span class="button">Pin</span>
+                <span class="button">Group</span>
+                <span class="button">Translate</span>
+                <span class="button">AI</span>
+              </div>
+            </aside>
+          </div>
+        </div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-head">
+          <h2>Translation Panel</h2>
+          <span class="chip info">Provider: BYOK / CLI</span>
+        </div>
+        <div class="panel-body">
+          <div class="toolbar" style="margin-bottom: 12px;">
+            <span class="chip">Source: Selection</span>
+            <span class="chip">Target: 中文</span>
+            <span class="chip">Hotkey: Not set</span>
+          </div>
+          <div class="translate-pair">
+            <div class="text-box">
+              <h3>Original</h3>
+              <p class="muted">selected text / clipboard item / OCR text</p>
+            </div>
+            <div class="text-box">
+              <h3>Translated</h3>
+              <p class="muted">translated result, retry state, provider error state</p>
+            </div>
+          </div>
+          <div class="footer-actions" style="margin-top: 12px;">
+            <span class="button primary">Copy</span>
+            <span class="button">Replace Clipboard</span>
+            <span class="button">Save</span>
+            <span class="button">Retry</span>
+          </div>
+        </div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-head">
+          <h2>Hook Confirmation</h2>
+          <span class="chip">draft</span>
+        </div>
+        <div class="panel-body">
+          <div class="text-box">
+            <h3>before_clipboard_item_saved</h3>
+            <p>Input: Clipboard Item summary</p>
+            <p>Effect: suggest review when sensitive-looking content appears</p>
+            <p>Runtime: not enabled; helper does not run hook by default</p>
+          </div>
+          <div class="confirm danger">
+            <h3>destructive_or_hook</h3>
+            <p>启用前展示影响范围、撤销路径和审计记录。未确认时保持 draft。</p>
+            <div class="footer-actions" style="margin-top: 10px;">
+              <span class="button">Keep Draft</span>
+              <span class="button danger">Enable Hook</span>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <article class="panel plain span-2">
+        <div class="panel-head">
+          <h2>Settings</h2>
+          <span class="chip">sandbox-first</span>
+        </div>
+        <div class="settings">
+          <nav class="sidebar">
+            <div class="nav active">Shortcuts</div>
+            <div class="nav">Permissions & Privacy</div>
+            <div class="nav">Clipboard</div>
+            <div class="nav">Privacy Exclusions</div>
+            <div class="nav">AI Providers</div>
+            <div class="nav">CLI / Agent</div>
+            <div class="nav">Hooks</div>
+            <div class="nav">Data & Audit</div>
+          </nav>
+          <section class="settings-detail">
+            <h2>Shortcuts</h2>
+            <div class="setting-row">
+              <div><strong>Screenshot</strong><br><span class="muted">Capture region, window, fullscreen</span></div>
+              <span class="key">Option + A</span>
+              <span class="button">Edit</span>
+            </div>
+            <div class="setting-row">
+              <div><strong>Clipboard</strong><br><span class="muted">Open history panel</span></div>
+              <span class="key">Option + V</span>
+              <span class="button">Edit</span>
+            </div>
+            <div class="setting-row">
+              <div><strong>Translation</strong><br><span class="muted">Not set by default</span></div>
+              <span class="key">Not set</span>
+              <span class="button primary">Set</span>
+            </div>
+            <div class="confirm" style="margin-top: 14px;">
+              <h3>Conflict warning</h3>
+              <p>快捷键冲突不能静默保存。用户可以取消、重新录入或禁用对应工具快捷键。</p>
+            </div>
+          </section>
+        </div>
+      </article>
+    </section>
+  </main>
+</body>
+</html>

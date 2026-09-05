@@ -1,0 +1,6 @@
+// Copy this file to Signing.local.xcconfig and replace the placeholder locally.
+// Do not commit a real Team ID, certificate reference, provisioning profile, or account detail.
+CODE_SIGN_IDENTITY = Apple Development
+DEVELOPMENT_TEAM = YOUR_TEAM_ID
+// Main App Debug only; do not apply its profile to the independent Helper.
+BLOCKS_MAIN_APP_DEVELOPMENT_PROFILE = YOUR_MAC_APP_DEVELOPMENT_PROFILE_NAME

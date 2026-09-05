@@ -1,0 +1,97 @@
+{
+  "generator": "generate-fixtures.mjs",
+  "browserVersion": "150.0.7871.116",
+  "viewport": {
+    "width": 900,
+    "height": 700
+  },
+  "documentSize": {
+    "width": 900,
+    "height": 3692,
+    "devicePixelRatio": 1
+  },
+  "contentComparisonRect": {
+    "x": 136,
+    "y": 0,
+    "width": 672,
+    "height": 3692
+  },
+  "frames": [
+    {
+      "file": "page-down-00.png",
+      "requestedScrollY": 0,
+      "scrollY": 0,
+      "sha256": "43eef48eea2e3efacc30f15c63ac1867b42a51d745270364f784007f34ddf7e3"
+    },
+    {
+      "file": "page-down-01.png",
+      "requestedScrollY": 310,
+      "scrollY": 310,
+      "sha256": "992fd70f5268608a9d2f726d55338eb60c687d81fa87600c2f6f25370f717fd3"
+    },
+    {
+      "file": "page-down-02.png",
+      "requestedScrollY": 620,
+      "scrollY": 620,
+      "sha256": "6d3d9b98b45045466632c63703bf9478f8ff34780880a67caaf8615aa32569ec"
+    },
+    {
+      "file": "page-down-03.png",
+      "requestedScrollY": 930,
+      "scrollY": 930,
+      "sha256": "ffe26a2b12b619f17472411726532e29685d0830551de2a3ab6c417fe29fb74d"
+    },
+    {
+      "file": "page-down-04.png",
+      "requestedScrollY": 1240,
+      "scrollY": 1240,
+      "sha256": "065006d1e5b3c781e677c2f44744dc1cc6845b457f8b364a17d0924442bd8699"
+    },
+    {
+      "file": "page-down-05.png",
+      "requestedScrollY": 1550,
+      "scrollY": 1550,
+      "sha256": "35e6e374ea23afd9fc6501651d69aff8989faaba78d7b7e142181a949e9ccf60"
+    },
+    {
+      "file": "page-down-06.png",
+      "requestedScrollY": 1860,
+      "scrollY": 1860,
+      "sha256": "9a776a95d647b333f47f837664d0c4e60d659f3dccaf86dc260580abce09e502"
+    },
+    {
+      "file": "page-down-07.png",
+      "requestedScrollY": 2170,
+      "scrollY": 2170,
+      "sha256": "86eb462cb8ccc6ae26e1efc09b0c80fdbe076b4ba52b0fc42b6f0370c6a4c0cb"
+    },
+    {
+      "file": "page-down-08.png",
+      "requestedScrollY": 2480,
+      "scrollY": 2480,
+      "sha256": "522b33ad60dfa70d0acf07f84bc6108d93dcdf28b83406c96e07a25e7adfce68"
+    },
+    {
+      "file": "page-down-09.png",
+      "requestedScrollY": 2736,
+      "scrollY": 2736,
+      "sha256": "64b83407dabe4c455974303b60c2424132a5ee3b971b86fe425006b734e0ec2c"
+    },
+    {
+      "file": "page-down-10.png",
+      "requestedScrollY": 2992,
+      "scrollY": 2992,
+      "sha256": "e8c74c6de9fed756e3f8aef53978afd0b2edb64dabbfd9470a7f528aa3150e3e"
+    },
+    {
+      "file": "page-down-11.png",
+      "requestedScrollY": 9999,
+      "scrollY": 2992,
+      "sha256": "bb04e6e3a607320ac697e828d78f473b1286ca53736e89236878701b0553aa56"
+    }
+  ],
+  "groundTruth": {
+    "file": "ground-truth.png",
+    "sha256": "4067bdd61e33cc690967e53d1faf2bfd08ace0710baa854794f8bf8f6ecd39d3"
+  }
+}

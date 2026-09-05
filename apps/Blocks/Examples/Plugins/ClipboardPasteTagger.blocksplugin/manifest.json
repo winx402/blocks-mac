@@ -1,0 +1,39 @@
+{
+  "schema_version": 4,
+  "id": "com.blocks.examples.clipboard-paste-tagger",
+  "display_name": "Clipboard Paste Tagger",
+  "version": "1.0.0",
+  "entry_point": "main.js",
+  "capabilities": ["hooks", "actions"],
+  "permissions": {
+    "data": ["clipboard_content"]
+  },
+  "configuration_fields": [
+    {
+      "id": "tag_name",
+      "type": "text",
+      "title": "Tag name",
+      "required": true,
+      "default": "Pasted by Blocks",
+      "maximum_length": 48
+    }
+  ],
+  "platform": {
+    "host_actions": ["clipboard.tag.ensure_and_attach"],
+    "hooks": [
+      {
+        "id": "tag-before-paste",
+        "event": "clipboard.will_write_pasteboard",
+        "entry_function": "handlePaste",
+        "timeout_ms": 500,
+        "failure_policy": "fail_open",
+        "runs_in_background": false
+      }
+    ],
+    "actions": [],
+    "ui": [],
+    "storage": { "kinds": ["key_value"] },
+    "shared_state": [],
+    "schedules": []
+  }
+}

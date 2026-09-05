@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "action": "blocks.translate.text",
+  "result": {
+    "source_language": "auto",
+    "target_language": "zh",
+    "text": "[mock:zh] hello"
+  },
+  "warnings": [
+    "mock_translation"
+  ],
+  "audit_id": "act_1782913000_e6ec7ffd6549"
+}

@@ -1,0 +1,25 @@
+// Direct website beta profile. Release packages must be built through
+// script/release/build_direct_beta.sh so this profile cannot be skipped.
+#include "Signing.shared.xcconfig"
+#include? "ReleaseIdentity.local.xcconfig"
+
+BLOCKS_SELECTION_HELPER_DOWNLOAD_URL = https:/$()/downloads.orangeforge.top/beta/0.1.0-beta.1/Blocks-Selection-Helper-0.1.0-beta.1-arm64.dmg
+BLOCKS_RELEASE_PAGE_URL = https:/$()/blocks.orangeforge.top/releases/
+BLOCKS_SUPPORT_URL = https:/$()/blocks.orangeforge.top/support/
+BLOCKS_PRIVACY_URL = https:/$()/blocks.orangeforge.top/privacy/
+
+ARCHS = arm64
+ONLY_ACTIVE_ARCH = NO
+MACOSX_DEPLOYMENT_TARGET = 14.0
+ENABLE_HARDENED_RUNTIME = YES
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) BLOCKS_DIRECT_BETA
+
+BLOCKS_DISTRIBUTION_CHANNEL = direct-beta
+BLOCKS_RELEASE_NAME = 0.1.0-beta.1
+// Shared release identity for the main app and independently packaged Helper.
+MARKETING_VERSION = 0.1.0
+CURRENT_PROJECT_VERSION = 1
+
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = Developer ID Application
+OTHER_CODE_SIGN_FLAGS = --timestamp

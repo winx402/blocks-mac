@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "action": "blocks.screenshot.capture",
+  "result": {
+    "capture_id": "cap_mock",
+    "mode": "region",
+    "image_available": false
+  },
+  "warnings": [
+    "dry_run_only"
+  ],
+  "audit_id": "act_1782913000_181270c76dfd"
+}

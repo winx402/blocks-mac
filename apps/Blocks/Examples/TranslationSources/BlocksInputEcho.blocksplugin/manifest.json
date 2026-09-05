@@ -1,0 +1,29 @@
+{
+  "schema_version": 3,
+  "id": "com.blocks.examples.input-echo",
+  "display_name": "Blocks Input Echo",
+  "version": "1.0.0",
+  "entry_point": "main.js",
+  "capabilities": [
+    "translation"
+  ],
+  "translation": {
+    "accepted_inputs": [
+      "text",
+      "screenshot_image"
+    ],
+    "context_fields": [
+      "input_source",
+      "source_application_bundle_id",
+      "ocr_summary"
+    ],
+    "requires_explicit_source_language": false,
+    "supports_status": true
+  },
+  "permissions": {
+    "data": [
+      "screenshot_image"
+    ]
+  },
+  "configuration_fields": []
+}

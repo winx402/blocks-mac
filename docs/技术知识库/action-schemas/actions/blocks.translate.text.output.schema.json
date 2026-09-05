@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blocks.local/schemas/actions/blocks.translate.text.output.schema.json",
+  "title": "blocks.translate.text output",
+  "type": "object",
+  "required": [
+    "source_language",
+    "target_language",
+    "text"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "source_language": {
+      "type": "string",
+      "minLength": 1
+    },
+    "target_language": {
+      "type": "string",
+      "minLength": 1
+    },
+    "text": {
+      "type": "string"
+    }
+  }
+}

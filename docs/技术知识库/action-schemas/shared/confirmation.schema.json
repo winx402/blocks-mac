@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blocks.local/schemas/shared/confirmation.schema.json",
+  "title": "Action confirmation request",
+  "type": "object",
+  "required": [
+    "level",
+    "reason",
+    "preview"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "level": {
+      "type": "string",
+      "enum": [
+        "preview",
+        "external_transfer",
+        "destructive_or_hook"
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 1
+    },
+    "preview": {
+      "type": "object",
+      "description": "Redacted summary only. Do not include full sensitive content.",
+      "additionalProperties": true
+    }
+  }
+}

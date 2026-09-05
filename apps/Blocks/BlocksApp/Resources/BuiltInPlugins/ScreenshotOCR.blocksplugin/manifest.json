@@ -1,0 +1,17 @@
+{
+  "schema_version": 6, "minimum_host_api_version": 1,
+  "id": "com.blocks.builtin.screenshot-ocr", "display_name": "Screenshot OCR Assistant", "version": "1.1.1", "entry_point": "main.js",
+  "capabilities": ["hooks", "actions", "ui"], "permissions": { "data": ["screenshot_image"] }, "configuration_fields": [],
+  "presentation": {
+    "summary": "Recognizes text after a screenshot is produced.",
+    "purpose": "Runs Apple Vision OCR without delaying screenshot copy, save, or pin operations.",
+    "trigger": "Runs in the background after a successful screenshot output.",
+    "examples": ["Recognize text from a captured dialog and copy it from the plugin page."],
+    "data_usage": "Reads the completed screenshot locally with Apple Vision and does not upload the image.",
+    "localizations": {
+      "zh-Hans": { "name": "截图 OCR 助手", "summary": "截图输出后识别其中的文字。", "purpose": "在不阻塞复制、保存或钉图的情况下运行 Apple Vision OCR。", "trigger": "截图成功输出后在后台运行。", "examples": ["识别对话框截图中的文字，并从插件页面复制。"], "data_usage": "使用 Apple Vision 在本机读取最终截图，不上传图片。" },
+      "ja": { "name": "スクリーンショット OCR", "summary": "スクリーンショット出力後に文字を認識します。", "purpose": "コピーや保存を妨げず Apple Vision OCR を実行します。", "trigger": "出力成功後にバックグラウンドで実行します。", "examples": ["認識結果をプラグインページからコピーできます。"], "data_usage": "Apple Vision を端末内で使用し、画像を送信しません。" }
+    }
+  },
+  "platform": { "host_actions": ["screenshot.ocr", "clipboard.copy_text"], "hooks": [{ "id": "ocr-after-output", "event": "screenshot.output_finished", "entry_function": "afterScreenshot", "timeout_ms": 500, "failure_policy": "fail_open", "runs_in_background": true }, { "id": "ocr-completed", "event": "plugin.host_action_completed", "entry_function": "handleOCRCompletion", "timeout_ms": 500, "failure_policy": "fail_open", "runs_in_background": true }, { "id": "ocr-failed", "event": "plugin.host_action_failed", "entry_function": "handleOCRFailure", "timeout_ms": 500, "failure_policy": "fail_open", "runs_in_background": true }], "actions": [{ "id": "copy-latest", "display_name": "Copy recognized text", "entry_function": "copyLatestOCR" }], "ui": [{ "id": "status", "slot": "plugin.page", "root": { "id": "root", "kind": "page", "title": "Screenshot OCR Assistant", "localizations": { "zh-Hans": { "title": "截图 OCR 助手" }, "ja": { "title": "スクリーンショット OCR" } }, "children": [{ "id": "ocr-status", "kind": "status", "properties": { "value": "Waiting for a screenshot" }, "localizations": { "zh-Hans": { "text": "等待新的截图" }, "ja": { "text": "スクリーンショットを待っています" } } }, { "id": "ocr-preview", "kind": "text", "properties": { "value": "" } }, { "id": "copy", "kind": "button", "title": "Copy recognized text", "action_id": "copy-latest", "localizations": { "zh-Hans": { "title": "复制识别文字" }, "ja": { "title": "認識したテキストをコピー" } } }] } }], "storage": { "kinds": ["key_value"] }, "shared_state": [], "schedules": [] }
+}

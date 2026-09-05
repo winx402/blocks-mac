@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blocks.local/schemas/hooks/hook-manifest.schema.json",
+  "title": "Hook Manifest v0",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "hook_id",
+    "name",
+    "description",
+    "status",
+    "trigger",
+    "created_by",
+    "runtime",
+    "permissions",
+    "confirmation_level",
+    "effect",
+    "audit"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "enum": [
+        "0.1.0"
+      ]
+    },
+    "hook_id": {
+      "type": "string",
+      "pattern": "^hook_[a-z0-9_]+$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "draft",
+        "enabled",
+        "disabled"
+      ]
+    },
+    "trigger": {
+      "type": "string",
+      "enum": [
+        "after_screenshot_captured",
+        "after_ocr_completed",
+        "before_clipboard_item_saved",
+        "before_clipboard_item_pasted",
+        "before_translation_requested",
+        "after_ai_action_completed"
+      ]
+    },
+    "created_by": {
+      "type": "string",
+      "enum": [
+        "user",
+        "agent",
+        "system"
+      ]
+    },
+    "runtime": {
+      "type": "string",
+      "enum": [
+        "declarative"
+      ]
+    },
+    "permissions": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "read_clipboard_summary",
+          "read_clipboard_content",
+          "read_screenshot_metadata",
+          "read_screenshot_image",
+          "suggest_action",
+          "block_action",
+          "modify_content",
+          "external_transfer"
+        ]
+      }
+    },
+    "confirmation_level": {
+      "type": "string",
+      "enum": [
+        "preview",
+        "external_transfer",
+        "destructive_or_hook"
+      ]
+    },
+    "effect": {
+      "type": "string",
+      "enum": [
+        "inspect_only",
+        "suggest_only",
+        "block",
+        "modify",
+        "external_transfer"
+      ]
+    },
+    "conditions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "suggested_actions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "audit": {
+      "type": "object",
+      "required": [
+        "log_inputs",
+        "log_decision",
+        "log_outputs"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "log_inputs": {
+          "type": "boolean"
+        },
+        "log_decision": {
+          "type": "boolean"
+        },
+        "log_outputs": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

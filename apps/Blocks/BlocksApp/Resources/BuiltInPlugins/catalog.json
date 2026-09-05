@@ -1,0 +1,109 @@
+{
+  "catalog_version": "1.1.2",
+  "entries": [
+    {
+      "id": "com.blocks.builtin.smart-tagger",
+      "version": "1.1.1",
+      "category": "clipboard",
+      "symbol_name": "tag.fill",
+      "package_directory": "SmartTagger.blocksplugin",
+      "package_sha256": "1592648f0c78f83748e538f417fa032d88c44bfbce542c52d7994dffa6c7a11d",
+      "localizations": {
+        "en": { "name": "Smart Tagger", "summary": "Tags links, code, JSON, colors, and files using local rules." },
+        "zh-Hans": { "name": "智能贴签", "summary": "使用本地规则为链接、代码、JSON、颜色和文件自动贴签。" },
+        "ja": { "name": "スマートタグ", "summary": "ローカルルールでリンク、コード、JSON、色、ファイルにタグを付けます。" }
+      }
+    },
+    {
+      "id": "com.blocks.builtin.paste-cleaner",
+      "version": "1.1.2",
+      "category": "clipboard",
+      "symbol_name": "wand.and.stars",
+      "package_directory": "PasteCleaner.blocksplugin",
+      "package_sha256": "84bcd2b3631049c38bdfd8fc1ea0c894fae19ca03389e5edd97cc5db746135ef",
+      "localizations": {
+        "en": { "name": "Paste Cleaner", "summary": "Normalizes whitespace and line breaks before a Blocks paste." },
+        "zh-Hans": { "name": "粘贴净化", "summary": "在 Blocks 粘贴前规范空白与换行。" },
+        "ja": { "name": "ペースト整形", "summary": "Blocks の貼り付け前に空白と改行を整えます。" }
+      }
+    },
+    {
+      "id": "com.blocks.builtin.link-organizer",
+      "version": "1.1.1",
+      "category": "clipboard",
+      "symbol_name": "link.badge.plus",
+      "package_directory": "LinkOrganizer.blocksplugin",
+      "package_sha256": "54c7103272ef31ab05c1bdf6c8b14e8ca8a152ac438456478bb0c1157e55685a",
+      "localizations": {
+        "en": { "name": "Link Organizer", "summary": "Removes known tracking parameters while preserving the original record." },
+        "zh-Hans": { "name": "链接整理", "summary": "粘贴时移除已知跟踪参数，并保留原始记录。" },
+        "ja": { "name": "リンク整理", "summary": "元の履歴を保持したまま既知の追跡パラメータを除去します。" }
+      }
+    },
+    {
+      "id": "com.blocks.builtin.content-radar",
+      "version": "1.1.1",
+      "category": "clipboard",
+      "symbol_name": "scope",
+      "package_directory": "ContentRadar.blocksplugin",
+      "package_sha256": "9d6f7f386c913fef2c9181353b1c8db30ea7e04adcac7ce8f7ea270e1c7e461b",
+      "localizations": {
+        "en": { "name": "Content Radar", "summary": "Recognizes JSON, UUID, JWT, Base64, hashes, and colors locally." },
+        "zh-Hans": { "name": "内容雷达", "summary": "本地识别 JSON、UUID、JWT、Base64、哈希和颜色。" },
+        "ja": { "name": "コンテンツレーダー", "summary": "JSON、UUID、JWT、Base64、ハッシュ、色をローカル解析します。" }
+      }
+    },
+    {
+      "id": "com.blocks.builtin.screenshot-ocr",
+      "version": "1.1.1",
+      "category": "screenshot",
+      "symbol_name": "text.viewfinder",
+      "package_directory": "ScreenshotOCR.blocksplugin",
+      "package_sha256": "3f38fb4a4bc2c2388727b20dd0ff70ff3e0651d6dc68660d253d04a5323651d0",
+      "localizations": {
+        "en": { "name": "Screenshot OCR Assistant", "summary": "Runs Apple Vision OCR after screenshot output without blocking it." },
+        "zh-Hans": { "name": "截图 OCR 助手", "summary": "截图输出后异步运行 Apple Vision OCR，不阻塞输出。" },
+        "ja": { "name": "スクリーンショット OCR", "summary": "出力を妨げず Apple Vision OCR を非同期実行します。" }
+      }
+    },
+    {
+      "id": "com.blocks.builtin.terminology-guard",
+      "version": "1.1.1",
+      "category": "translation",
+      "symbol_name": "text.badge.checkmark",
+      "package_directory": "TerminologyGuard.blocksplugin",
+      "package_sha256": "a0da79cbb020426c3717549a007842404cb7e36bee4d53be88c8db847b3d7094",
+      "localizations": {
+        "en": { "name": "Terminology Guard", "summary": "Applies your glossary before translation results are committed." },
+        "zh-Hans": { "name": "术语守卫", "summary": "在翻译结果提交前按术语表统一用词。" },
+        "ja": { "name": "用語ガード", "summary": "翻訳結果の確定前に用語集を適用します。" }
+      }
+    },
+    {
+      "id": "com.blocks.builtin.word-cards",
+      "version": "1.1.1",
+      "category": "productivity",
+      "symbol_name": "rectangle.stack.fill",
+      "package_directory": "WordCards.blocksplugin",
+      "package_sha256": "f5a5f80e624a3ac73f817d804e4484450d5f211af037ebf246f25ca183379033",
+      "localizations": {
+        "en": { "name": "Word Cards", "summary": "Turns translation favorites into a local review queue." },
+        "zh-Hans": { "name": "单词卡", "summary": "将翻译收藏转换为本地复习队列。" },
+        "ja": { "name": "単語カード", "summary": "翻訳のお気に入りをローカル復習キューに変換します。" }
+      }
+    },
+    {
+      "id": "com.blocks.builtin.color-collector",
+      "version": "1.1.1",
+      "category": "productivity",
+      "symbol_name": "paintpalette.fill",
+      "package_directory": "ColorCollector.blocksplugin",
+      "package_sha256": "c2e60cfb91b69f29b7b77b671ff32c9564ec6ac4d5f5936a8fa3c66a91fe3b10",
+      "localizations": {
+        "en": { "name": "Color Collector", "summary": "Collects clipboard colors and requests host-managed screenshot sampling." },
+        "zh-Hans": { "name": "颜色收藏册", "summary": "收藏剪贴板颜色，并调用宿主管理的截图取色。" },
+        "ja": { "name": "カラーパレット", "summary": "クリップボードの色を集め、ホスト管理の画面採色を使います。" }
+      }
+    }
+  ]
+}

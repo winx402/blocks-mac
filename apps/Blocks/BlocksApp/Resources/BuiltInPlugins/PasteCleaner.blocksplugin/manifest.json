@@ -1,0 +1,23 @@
+{
+  "schema_version": 6, "minimum_host_api_version": 1,
+  "id": "com.blocks.builtin.paste-cleaner", "display_name": "Paste Cleaner", "version": "1.1.2", "entry_point": "main.js",
+  "capabilities": ["hooks"], "permissions": { "data": ["clipboard_content"] },
+  "configuration_fields": [
+    { "id": "trim_outer_whitespace", "type": "boolean", "title": "Trim outer whitespace", "default": true, "localizations": { "zh-Hans": { "title": "清理首尾空白" }, "ja": { "title": "前後の空白を除去" } } },
+    { "id": "normalize_line_breaks", "type": "boolean", "title": "Normalize line breaks", "default": true, "localizations": { "zh-Hans": { "title": "统一换行" }, "ja": { "title": "改行を統一" } } },
+    { "id": "collapse_blank_lines", "type": "boolean", "title": "Collapse blank lines", "default": false, "localizations": { "zh-Hans": { "title": "合并重复空行" }, "ja": { "title": "連続する空行をまとめる" } } },
+    { "id": "plain_text_only", "type": "boolean", "title": "Paste as plain text", "default": false, "localizations": { "zh-Hans": { "title": "以纯文本粘贴" }, "ja": { "title": "標準テキストで貼り付け" } } }
+  ],
+  "presentation": {
+    "summary": "Cleans whitespace and line breaks before a Blocks paste.",
+    "purpose": "Makes pasted text consistent while preserving the original clipboard history record.",
+    "trigger": "Runs only when you paste through Blocks.",
+    "examples": ["Converts mixed line endings to standard line breaks.", "Optionally removes repeated blank lines."],
+    "data_usage": "Processes the selected clipboard text locally and does not use the network.",
+    "localizations": {
+      "zh-Hans": { "name": "粘贴净化", "summary": "在 Blocks 粘贴前整理空白和换行。", "purpose": "让粘贴文本更规整，同时保留剪贴板历史中的原始内容。", "trigger": "仅在通过 Blocks 执行粘贴时运行。", "examples": ["统一不同格式的换行。", "可选地合并重复空行。"], "data_usage": "仅在本机处理选中的剪贴板文字，不访问网络。" },
+      "ja": { "name": "ペースト整形", "summary": "Blocks の貼り付け前に空白と改行を整えます。", "purpose": "履歴の原文を保持したまま貼り付けテキストを整えます。", "trigger": "Blocks 経由で貼り付ける時だけ実行します。", "examples": ["改行コードを統一します。"], "data_usage": "端末内で処理し、ネットワークは使用しません。" }
+    }
+  },
+  "platform": { "host_actions": [], "hooks": [{ "id": "clean-before-paste", "event": "clipboard.will_write_pasteboard", "entry_function": "cleanPaste", "timeout_ms": 500, "failure_policy": "fail_open", "runs_in_background": false }], "actions": [], "ui": [], "storage": { "kinds": ["key_value"] }, "shared_state": [], "schedules": [] }
+}

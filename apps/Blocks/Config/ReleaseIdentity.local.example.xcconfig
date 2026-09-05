@@ -1,0 +1,13 @@
+// Copy to ReleaseIdentity.local.xcconfig after phase 0 identity is locked.
+// Never commit a real Team ID, certificate reference, profile, account detail,
+// notary credential, email address, or private URL. The public URLs below are
+// duplicated from the distribution profiles so a local override remains
+// self-documenting; changing them requires updating the tracked profiles too.
+DEVELOPMENT_TEAM = YOUR_TEAM_ID
+// Exact App Store provisioning profile name or UUID. This is intentionally
+// local: release archives must not select a managed profile automatically.
+PROVISIONING_PROFILE_SPECIFIER = YOUR_APP_STORE_PROFILE_NAME_OR_UUID
+BLOCKS_SELECTION_HELPER_DOWNLOAD_URL = https:/$()/downloads.orangeforge.top/beta/0.1.0-beta.1/Blocks-Selection-Helper-0.1.0-beta.1-arm64.dmg
+BLOCKS_RELEASE_PAGE_URL = https:/$()/blocks.orangeforge.top/releases/
+BLOCKS_SUPPORT_URL = https:/$()/blocks.orangeforge.top/support/
+BLOCKS_PRIVACY_URL = https:/$()/blocks.orangeforge.top/privacy/

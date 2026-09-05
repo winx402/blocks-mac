@@ -1,0 +1,124 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="820" viewBox="0 0 1280 820" role="img" aria-labelledby="title desc">
+  <title id="title">剪贴板面板元素关系与卡片层级示意图</title>
+  <desc id="desc">低保真元素关系图，标注剪贴板面板顶部工具层、收藏与标签筛选区、历史卡片数字提示槽、正文摘要主区域和弱化 metadata 区；不代表最终视觉比例。</desc>
+  <defs>
+    <style>
+      .bg { fill: #f6f7f9; }
+      .panel { fill: #ffffff; stroke: #8b949e; stroke-width: 2; }
+      .zone { fill: #f8fafc; stroke: #c7d2da; stroke-width: 1.5; }
+      .card { fill: #ffffff; stroke: #b8c1cc; stroke-width: 1.5; }
+      .slot { fill: #eef4ff; stroke: #5b7cfa; stroke-width: 1.4; stroke-dasharray: 6 5; }
+      .badge { fill: #315bdc; }
+      .badgeText { fill: #ffffff; font: 700 16px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
+      .label { fill: #1f2937; font: 600 15px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
+      .body { fill: #334155; font: 14px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
+      .muted { fill: #64748b; font: 13px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
+      .small { fill: #64748b; font: 12px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
+      .callout { fill: #2454c6; font: 700 14px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
+      .calloutText { fill: #475569; font: 12px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
+      .line { stroke: #2f63d7; stroke-width: 1.8; fill: none; marker-end: url(#arrow); }
+      .chip { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.2; }
+      .chipStar { fill: #fff7ed; stroke: #f59e0b; stroke-width: 1.2; }
+      .accent { fill: #e8f0ff; stroke: #8aa4ff; stroke-width: 1.2; }
+      .divider { stroke: #dbe3ec; stroke-width: 1; }
+    </style>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#2f63d7" />
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1280" height="820" />
+  <text class="label" x="390" y="44" font-size="20">剪贴板面板元素关系与卡片层级示意图（非最终比例）</text>
+  <text class="muted" x="365" y="70">用于 005B PRD：说明区域划分、数字提示槽、正文摘要和弱化 metadata 的位置关系；最终比例以真实 UI/设计稿为准</text>
+
+  <rect class="panel" x="170" y="105" width="900" height="620" rx="18" />
+
+  <!-- Top toolbar -->
+  <rect class="zone" x="195" y="130" width="850" height="76" rx="12" />
+  <text class="small" x="210" y="155">顶部工具层</text>
+  <rect class="chip" x="210" y="166" width="250" height="30" rx="8" />
+  <text class="muted" x="228" y="186">搜索剪贴板内容</text>
+  <rect class="chip" x="475" y="166" width="70" height="30" rx="8" />
+  <text class="muted" x="494" y="186">格式</text>
+  <rect class="chip" x="554" y="166" width="70" height="30" rx="8" />
+  <text class="muted" x="573" y="186">时间</text>
+  <rect class="chip" x="633" y="166" width="70" height="30" rx="8" />
+  <text class="muted" x="652" y="186">来源</text>
+  <rect class="chipStar" x="725" y="166" width="76" height="30" rx="8" />
+  <text class="muted" x="744" y="186">★ 收藏</text>
+  <rect class="chip" x="810" y="166" width="62" height="30" rx="8" />
+  <circle cx="826" cy="181" r="5" fill="#ef4444" />
+  <text class="muted" x="839" y="186">红</text>
+  <rect class="chip" x="880" y="166" width="62" height="30" rx="8" />
+  <circle cx="896" cy="181" r="5" fill="#22c55e" />
+  <text class="muted" x="909" y="186">绿</text>
+  <rect class="chip" x="950" y="166" width="62" height="30" rx="8" />
+  <circle cx="966" cy="181" r="5" fill="#3b82f6" />
+  <text class="muted" x="979" y="186">蓝</text>
+
+  <!-- History list / detailed card -->
+  <rect class="zone" x="195" y="225" width="850" height="470" rx="12" />
+  <text class="small" x="210" y="250">历史列表层</text>
+
+  <rect class="card" x="220" y="268" width="800" height="150" rx="10" />
+  <rect class="slot" x="238" y="286" width="38" height="114" rx="8" />
+  <circle class="badge" cx="257" cy="343" r="14" />
+  <text class="badgeText" x="252" y="349">1</text>
+  <rect class="accent" x="296" y="292" width="34" height="34" rx="7" />
+  <text class="label" x="343" y="310">文本剪贴板条目</text>
+  <text class="body" x="343" y="336">正文摘要主区域显示内容前几行，换行内容从数字槽右侧开始。</text>
+  <text class="body" x="343" y="360">数字徽标不覆盖正文，Cmd 粘贴后列表顺序保持稳定。</text>
+  <text class="muted" x="343" y="391">纯文本</text>
+  <line class="divider" x1="780" y1="292" x2="780" y2="397" />
+  <text class="muted" x="800" y="314">1 分钟前</text>
+  <text class="muted" x="800" y="340">Safari</text>
+  <text class="small" x="800" y="382">128 字符 · ★ · 标签</text>
+
+  <rect class="card" x="220" y="438" width="800" height="96" rx="10" />
+  <rect class="slot" x="238" y="455" width="38" height="62" rx="8" />
+  <circle class="badge" cx="257" cy="486" r="14" />
+  <text class="badgeText" x="252" y="492">2</text>
+  <rect class="accent" x="296" y="464" width="34" height="34" rx="7" />
+  <text class="label" x="343" y="482">URL 条目</text>
+  <text class="body" x="343" y="507">https://example.local/path...</text>
+  <text class="muted" x="800" y="482">5 分钟前</text>
+  <text class="small" x="800" y="510">URL · 来源</text>
+
+  <rect class="card" x="220" y="552" width="800" height="96" rx="10" />
+  <rect class="slot" x="238" y="569" width="38" height="62" rx="8" />
+  <circle class="badge" cx="257" cy="600" r="14" />
+  <text class="badgeText" x="252" y="606">3</text>
+  <rect class="accent" x="296" y="578" width="34" height="34" rx="7" />
+  <text class="label" x="343" y="596">文件条目</text>
+  <text class="body" x="343" y="621">report.pdf</text>
+  <text class="muted" x="800" y="596">12 分钟前</text>
+  <text class="small" x="800" y="624">文件 · 来源</text>
+
+  <!-- Callouts -->
+  <path class="line" d="M120,165 L194,165" />
+  <text class="callout" x="28" y="158">顶部工具层</text>
+  <text class="calloutText" x="28" y="178">搜索 + 普通筛选</text>
+
+  <path class="line" d="M1120,164 L1010,164" />
+  <text class="callout" x="1110" y="156">收藏与标签筛选区</text>
+  <text class="calloutText" x="1110" y="176">收藏固定第一，普通标签用颜色圆点</text>
+
+  <path class="line" d="M118,340 L238,340" />
+  <text class="callout" x="24" y="324">固定数字提示槽</text>
+  <text class="calloutText" x="24" y="344">32pt 槽位始终占位</text>
+  <text class="calloutText" x="24" y="362">不遮挡正文，不造成跳动</text>
+
+  <path class="line" d="M1120,330 L760,330" />
+  <text class="callout" x="1110" y="314">正文摘要主区域</text>
+  <text class="calloutText" x="1110" y="334">正文、URL、文件名等主内容</text>
+  <text class="calloutText" x="1110" y="352">优先在这里呈现</text>
+
+  <path class="line" d="M1120,392 L838,382" />
+  <text class="callout" x="1110" y="392">弱化 metadata 区</text>
+  <text class="calloutText" x="1110" y="412">时间、来源、字数、收藏、标签</text>
+  <text class="calloutText" x="1110" y="430">不得抢正文视觉焦点</text>
+
+  <rect class="zone" x="395" y="742" width="490" height="54" rx="12" />
+  <text class="label" x="438" y="766">Cmd + 数字只粘贴，不改变列表顺序</text>
+  <text class="muted" x="438" y="786">连续 Cmd+1、Cmd+2、Cmd+3 时，数字与内容映射保持稳定</text>
+</svg>

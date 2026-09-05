@@ -1,0 +1,31 @@
+{
+  "schema_version": "0.1.0",
+  "hook_id": "hook_screenshot_ocr_suggestion",
+  "name": "Suggest OCR after screenshot",
+  "description": "After a screenshot is captured, suggest OCR when text-like content is detected by local heuristics.",
+  "status": "draft",
+  "trigger": "after_screenshot_captured",
+  "created_by": "agent",
+  "runtime": "declarative",
+  "permissions": [
+    "read_screenshot_metadata",
+    "suggest_action"
+  ],
+  "confirmation_level": "preview",
+  "effect": "suggest_only",
+  "conditions": [
+    {
+      "field": "image_available",
+      "operator": "equals",
+      "value": true
+    }
+  ],
+  "suggested_actions": [
+    "blocks.ocr.extract"
+  ],
+  "audit": {
+    "log_inputs": false,
+    "log_decision": true,
+    "log_outputs": false
+  }
+}

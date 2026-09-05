@@ -1,0 +1,18 @@
+{
+  "schema_version": 3,
+  "id": "com.blocks.examples.unified-translation-ocr",
+  "display_name": "Unified Translation and OCR Source",
+  "version": "1.0.0",
+  "entry_point": "main.js",
+  "capabilities": ["translation", "ocr"],
+  "translation": {
+    "accepted_inputs": ["text", "screenshot_image"],
+    "context_fields": ["input_source", "ocr_summary"],
+    "requires_explicit_source_language": false,
+    "supports_status": true
+  },
+  "permissions": {
+    "data": ["screenshot_image"]
+  },
+  "configuration_fields": []
+}

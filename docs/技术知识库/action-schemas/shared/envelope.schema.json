@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blocks.local/schemas/shared/envelope.schema.json",
+  "title": "Action envelope",
+  "type": "object",
+  "required": [
+    "ok",
+    "action",
+    "result",
+    "warnings",
+    "audit_id"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "ok": {
+      "type": "boolean"
+    },
+    "action": {
+      "type": "string",
+      "minLength": 1
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "audit_id": {
+      "type": "string",
+      "pattern": "^act_[0-9]+_[a-f0-9]{12}$"
+    },
+    "requires_confirmation": {
+      "$ref": "confirmation.schema.json"
+    },
+    "error": {
+      "$ref": "error.schema.json"
+    }
+  }
+}

@@ -1,0 +1,148 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="520" viewBox="0 0 1600 520" role="img" aria-labelledby="title desc">
+  <title id="title">底部剪贴板面板元素关系示意图</title>
+  <desc id="desc">低保真元素关系图，展示底部横向剪贴板面板的顶部工具栏、横向卡片流、右上角数字提示、正文摘要区和底部 metadata；不代表最终视觉比例。</desc>
+  <defs>
+    <style>
+      .bg { fill: #f6f7f9; }
+      .panel { fill: #101820; stroke: #334155; stroke-width: 2; }
+      .toolbar { fill: #141f28; stroke: #344253; stroke-width: 1.5; }
+      .card { fill: #1d2b36; stroke: #2f6fb7; stroke-width: 1.5; }
+      .cardMuted { fill: #21313e; stroke: #46576a; stroke-width: 1.2; }
+      .content { fill: #2c3d4b; }
+      .chip { fill: #172431; stroke: #405061; stroke-width: 1; }
+      .chipStar { fill: #1f2b28; stroke: #c7942e; stroke-width: 1.2; }
+      .badgeSlot { fill: #172431; stroke: #52616f; stroke-width: 1; stroke-dasharray: 4 4; }
+      .badge { fill: #2f6bff; }
+      .badgeText { fill: #ffffff; font: 700 13px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
+      .label { fill: #0f172a; font: 700 17px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
+      .whiteLabel { fill: #e5edf5; font: 700 13px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
+      .body { fill: #d7e0ea; font: 14px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
+      .muted { fill: #9fb0c0; font: 12px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
+      .callout { fill: #2554c7; font: 700 14px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
+      .calloutText { fill: #475569; font: 12px -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif; }
+      .line { stroke: #2f63d7; stroke-width: 1.8; fill: none; marker-end: url(#arrow); }
+      .note { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.2; }
+    </style>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#2f63d7" />
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="520" />
+  <text class="label" x="540" y="42">底部剪贴板面板元素关系示意图（非最终比例）</text>
+  <text class="calloutText" x="470" y="68">用于说明元素位置关系：顶部工具栏 + 横向历史卡片流 + 右上角数字提示；最终比例需以真实 UI/设计稿确认为准</text>
+
+  <rect class="panel" x="40" y="105" width="1520" height="250" rx="18" />
+
+  <!-- Toolbar -->
+  <rect class="toolbar" x="60" y="120" width="1480" height="42" rx="10" />
+  <text class="muted" x="84" y="146">搜索摘要、来源 App 或类型</text>
+  <rect class="chip" x="580" y="126" width="76" height="28" rx="8" />
+  <text class="muted" x="604" y="145">格式</text>
+  <rect class="chip" x="670" y="126" width="76" height="28" rx="8" />
+  <text class="muted" x="694" y="145">时间</text>
+  <rect class="chip" x="760" y="126" width="76" height="28" rx="8" />
+  <text class="muted" x="784" y="145">来源</text>
+  <rect class="chipStar" x="915" y="126" width="82" height="28" rx="8" />
+  <text class="muted" x="936" y="145">★ 收藏</text>
+  <rect class="chip" x="1010" y="126" width="78" height="28" rx="8" />
+  <circle cx="1028" cy="140" r="5" fill="#ef4444" />
+  <text class="muted" x="1042" y="145">红标</text>
+  <rect class="chip" x="1100" y="126" width="78" height="28" rx="8" />
+  <circle cx="1118" cy="140" r="5" fill="#22c55e" />
+  <text class="muted" x="1132" y="145">绿标</text>
+
+  <!-- Horizontal cards -->
+  <g transform="translate(60,178)">
+    <rect class="cardMuted" x="0" y="0" width="168" height="150" rx="10" />
+    <text class="whiteLabel" x="12" y="28">005C 详情...</text>
+    <circle class="badge" cx="146" cy="22" r="10" />
+    <text class="badgeText" x="143" y="27">1</text>
+    <rect class="content" x="10" y="44" width="148" height="88" rx="8" />
+    <text class="body" x="18" y="75">005C 详情编辑与...</text>
+    <text class="muted" x="12" y="140">上午 2:28 · 文本</text>
+
+    <rect class="cardMuted" x="185" y="0" width="168" height="150" rx="10" />
+    <text class="whiteLabel" x="197" y="28">面板打开...</text>
+    <circle class="badge" cx="331" cy="22" r="10" />
+    <text class="badgeText" x="328" y="27">2</text>
+    <rect class="content" x="195" y="44" width="148" height="88" rx="8" />
+    <text class="body" x="203" y="75">面板打开且用户...</text>
+    <text class="muted" x="197" y="140">上午 2:24 · 文本</text>
+
+    <rect class="card" x="370" y="0" width="168" height="150" rx="10" />
+    <text class="whiteLabel" x="382" y="28">提示只用于...</text>
+    <circle class="badge" cx="516" cy="22" r="10" />
+    <text class="badgeText" x="513" y="27">3</text>
+    <rect class="content" x="380" y="44" width="148" height="88" rx="8" />
+    <text class="body" x="388" y="75">提示只用于快捷键...</text>
+    <text class="muted" x="382" y="140">上午 2:23 · 文本</text>
+
+    <rect class="cardMuted" x="555" y="0" width="168" height="150" rx="10" />
+    <text class="whiteLabel" x="567" y="28">视觉质感...</text>
+    <circle class="badge" cx="701" cy="22" r="10" />
+    <text class="badgeText" x="698" y="27">4</text>
+    <rect class="content" x="565" y="44" width="148" height="88" rx="8" />
+    <text class="body" x="573" y="75">视觉质感与信息密度</text>
+    <text class="muted" x="567" y="140">上午 2:19 · 文本</text>
+
+    <rect class="cardMuted" x="740" y="0" width="168" height="150" rx="10" />
+    <text class="whiteLabel" x="752" y="28">标签筛选</text>
+    <circle class="badge" cx="886" cy="22" r="10" />
+    <text class="badgeText" x="883" y="27">5</text>
+    <rect class="content" x="750" y="44" width="148" height="88" rx="8" />
+    <text class="body" x="758" y="75">标签筛选</text>
+    <text class="muted" x="752" y="140">上午 2:18 · 文本</text>
+
+    <rect class="cardMuted" x="925" y="0" width="168" height="150" rx="10" />
+    <text class="whiteLabel" x="937" y="28">历史条目...</text>
+    <circle class="badge" cx="1071" cy="22" r="10" />
+    <text class="badgeText" x="1068" y="27">6</text>
+    <rect class="content" x="935" y="44" width="148" height="88" rx="8" />
+    <text class="body" x="943" y="75">历史条目必须使用...</text>
+    <text class="muted" x="937" y="140">上午 2:16 · 文本</text>
+
+    <rect class="cardMuted" x="1110" y="0" width="168" height="150" rx="10" />
+    <text class="whiteLabel" x="1122" y="28">005B 面板...</text>
+    <circle class="badge" cx="1256" cy="22" r="10" />
+    <text class="badgeText" x="1253" y="27">7</text>
+    <rect class="content" x="1120" y="44" width="148" height="88" rx="8" />
+    <text class="body" x="1128" y="75">005B 面板 UI 与...</text>
+    <text class="muted" x="1122" y="140">上午 2:15 · 文本</text>
+
+    <rect class="cardMuted" x="1295" y="0" width="168" height="150" rx="10" />
+    <text class="whiteLabel" x="1307" y="28">历史条目</text>
+    <circle class="badge" cx="1441" cy="22" r="10" />
+    <text class="badgeText" x="1438" y="27">8</text>
+    <rect class="content" x="1305" y="44" width="148" height="88" rx="8" />
+    <text class="body" x="1313" y="75">历史条目</text>
+    <text class="muted" x="1307" y="140">上午 2:15 · 文本</text>
+  </g>
+
+  <!-- Callouts -->
+  <path class="line" d="M250,92 L250,122" />
+  <text class="callout" x="155" y="82">顶部工具栏横向排列</text>
+  <text class="calloutText" x="155" y="100">搜索、普通筛选、收藏/标签在同一行</text>
+
+  <path class="line" d="M1110,92 L980,126" />
+  <text class="callout" x="1035" y="82">收藏/标签位于末尾</text>
+  <text class="calloutText" x="1035" y="100">收藏固定第一，普通标签用颜色圆点</text>
+
+  <path class="line" d="M430,388 L454,206" />
+  <rect class="note" x="300" y="385" width="330" height="72" rx="10" />
+  <text class="callout" x="320" y="410">底部布局的数字提示</text>
+  <text class="calloutText" x="320" y="430">固定在卡片右上角，不进入标题文本流</text>
+  <text class="calloutText" x="320" y="448">显隐不改变标题、正文、metadata 的位置</text>
+
+  <path class="line" d="M850,388 L812,254" />
+  <rect class="note" x="720" y="385" width="330" height="72" rx="10" />
+  <text class="callout" x="740" y="410">正文摘要主区域</text>
+  <text class="calloutText" x="740" y="430">卡片中部大块区域展示正文/标题/文件名</text>
+  <text class="calloutText" x="740" y="448">metadata 固定在底部弱化显示</text>
+
+  <path class="line" d="M1250,388 L1215,318" />
+  <rect class="note" x="1125" y="385" width="355" height="72" rx="10" />
+  <text class="callout" x="1145" y="410">Cmd+数字不重排</text>
+  <text class="calloutText" x="1145" y="430">连续 Cmd+1、Cmd+2、Cmd+3 时</text>
+  <text class="calloutText" x="1145" y="448">卡片顺序和数字映射保持稳定</text>
+</svg>

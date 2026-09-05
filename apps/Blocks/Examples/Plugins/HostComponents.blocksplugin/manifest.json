@@ -1,0 +1,67 @@
+{
+  "schema_version": 4,
+  "id": "com.blocks.examples.host-components",
+  "display_name": "Host Components Gallery",
+  "version": "1.0.0",
+  "entry_point": "main.js",
+  "capabilities": ["actions", "ui"],
+  "permissions": {},
+  "configuration_fields": [],
+  "platform": {
+    "hooks": [],
+    "actions": [{
+      "id": "refresh",
+      "display_name": "Refresh component state",
+      "entry_function": "refresh"
+    }],
+    "ui": [{
+      "id": "gallery",
+      "slot": "plugin.page",
+      "root": {
+        "id": "root",
+        "kind": "page",
+        "title": "Host-rendered components",
+        "children": [
+          {
+            "id": "status-card",
+            "kind": "card",
+            "title": "Runtime",
+            "children": [
+              {
+                "id": "status",
+                "kind": "status",
+                "properties": {
+                  "value": "Ready",
+                  "system_image": "checkmark.circle"
+                }
+              },
+              {
+                "id": "message",
+                "kind": "text_field",
+                "title": "Message",
+                "properties": {
+                  "value": "Host-owned input"
+                }
+              },
+              {
+                "id": "refresh-button",
+                "kind": "button",
+                "title": "Refresh",
+                "action_id": "refresh"
+              },
+              {
+                "id": "history",
+                "kind": "list",
+                "properties": {
+                  "items": []
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }],
+    "shared_state": [],
+    "schedules": []
+  }
+}

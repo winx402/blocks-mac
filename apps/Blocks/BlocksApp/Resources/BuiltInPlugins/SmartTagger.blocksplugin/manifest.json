@@ -1,0 +1,35 @@
+{
+  "schema_version": 6,
+  "minimum_host_api_version": 1,
+  "id": "com.blocks.builtin.smart-tagger",
+  "display_name": "Smart Tagger",
+  "version": "1.1.1",
+  "entry_point": "main.js",
+  "capabilities": ["hooks", "actions", "ui"],
+  "permissions": { "data": ["clipboard_content"] },
+  "configuration_fields": [
+    { "id": "tag_links", "type": "boolean", "title": "Tag links", "default": true, "localizations": { "zh-Hans": { "title": "标记链接" }, "ja": { "title": "リンクをタグ付け" } } },
+    { "id": "tag_code", "type": "boolean", "title": "Tag code", "default": true, "localizations": { "zh-Hans": { "title": "标记代码" }, "ja": { "title": "コードをタグ付け" } } },
+    { "id": "tag_json", "type": "boolean", "title": "Tag JSON", "default": true, "localizations": { "zh-Hans": { "title": "标记 JSON" }, "ja": { "title": "JSON をタグ付け" } } },
+    { "id": "tag_colors", "type": "boolean", "title": "Tag colors", "default": true, "localizations": { "zh-Hans": { "title": "标记颜色" }, "ja": { "title": "色をタグ付け" } } },
+    { "id": "tag_files", "type": "boolean", "title": "Tag files", "default": true, "localizations": { "zh-Hans": { "title": "标记文件" }, "ja": { "title": "ファイルをタグ付け" } } }
+  ],
+  "presentation": {
+    "summary": "Tags familiar clipboard content with local rules.",
+    "purpose": "Keeps links, code, JSON, colors, and files easier to find without changing the copied content.",
+    "trigger": "Runs locally after Blocks saves a clipboard record.",
+    "examples": ["A copied URL receives the Link tag.", "A valid JSON object receives the JSON tag."],
+    "data_usage": "Reads the saved clipboard record locally and creates Blocks tags. It does not use the network.",
+    "localizations": {
+      "zh-Hans": { "name": "智能贴签", "summary": "使用本地规则整理常见剪贴板内容。", "purpose": "自动为链接、代码、JSON、颜色和文件添加标签，不修改原内容。", "trigger": "在 Blocks 保存剪贴板条目后于本机运行。", "examples": ["复制网址后自动添加“链接”标签。", "复制有效 JSON 后自动添加“JSON”标签。"], "data_usage": "仅在本机读取已保存的剪贴板条目并创建 Blocks 标签，不访问网络。" },
+      "ja": { "name": "スマートタグ", "summary": "ローカルルールでクリップボードを整理します。", "purpose": "リンク、コード、JSON、色、ファイルにタグを付け、元の内容は変更しません。", "trigger": "Blocks が履歴を保存した後にローカルで実行します。", "examples": ["URL にリンクタグを付けます。"], "data_usage": "保存済み履歴を端末内で読み、ネットワークは使用しません。" }
+    }
+  },
+  "platform": {
+    "host_actions": ["clipboard.tag.ensure_and_attach"],
+    "hooks": [{ "id": "classify-capture", "event": "clipboard.did_persist_capture", "entry_function": "classifyCapture", "timeout_ms": 500, "failure_policy": "fail_open", "runs_in_background": true }],
+    "actions": [],
+    "ui": [{ "id": "status", "slot": "plugin.page", "root": { "id": "root", "kind": "page", "title": "Smart Tagger", "localizations": { "zh-Hans": { "title": "智能贴签" }, "ja": { "title": "スマートタグ" } }, "children": [{ "id": "description", "kind": "secondary_text", "properties": { "value": "Rules run locally after a clipboard record is saved." }, "localizations": { "zh-Hans": { "text": "Blocks 保存剪贴板条目后，规则会在本机自动运行。" }, "ja": { "text": "Blocks が履歴を保存した後、ローカルでルールを実行します。" } } }] } }],
+    "storage": { "kinds": ["key_value"] }, "shared_state": [], "schedules": []
+  }
+}

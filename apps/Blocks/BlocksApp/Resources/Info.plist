@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>Blocks for Mac</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Blocks for Mac</string>
+	<key>CFBundlePackageType</key>
+	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>BLOCKS_SELECTION_HELPER_DOWNLOAD_URL</key>
+	<string>$(BLOCKS_SELECTION_HELPER_DOWNLOAD_URL)</string>
+	<key>BLOCKS_DISTRIBUTION_CHANNEL</key>
+	<string>$(BLOCKS_DISTRIBUTION_CHANNEL)</string>
+	<key>BLOCKS_RELEASE_NAME</key>
+	<string>$(BLOCKS_RELEASE_NAME)</string>
+	<key>BLOCKS_RELEASE_PAGE_URL</key>
+	<string>$(BLOCKS_RELEASE_PAGE_URL)</string>
+	<key>BLOCKS_SUPPORT_URL</key>
+	<string>$(BLOCKS_SUPPORT_URL)</string>
+	<key>BLOCKS_PRIVACY_URL</key>
+	<string>$(BLOCKS_PRIVACY_URL)</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Blocks for Mac reads screen content only when you explicitly start a capture.</string>
+</dict>
+</plist>

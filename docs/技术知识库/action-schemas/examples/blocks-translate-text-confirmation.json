@@ -1,0 +1,20 @@
+{
+  "ok": false,
+  "action": "blocks.translate.text",
+  "result": {},
+  "warnings": [],
+  "audit_id": "act_1782913000_59a883578975",
+  "requires_confirmation": {
+    "level": "external_transfer",
+    "reason": "Non-mock providers may receive user text.",
+    "preview": {
+      "provider": "codex",
+      "source": "manual",
+      "characters": 5
+    }
+  },
+  "error": {
+    "code": "requires_confirmation",
+    "message": "Confirmation required."
+  }
+}

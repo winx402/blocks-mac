@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://blocks.local/schemas/actions/blocks.screenshot.capture.input.schema.json",
+  "title": "blocks.screenshot.capture input",
+  "type": "object",
+  "required": [
+    "mode"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "mode": {
+      "type": "string",
+      "enum": [
+        "region",
+        "window",
+        "fullscreen"
+      ]
+    },
+    "dry_run": {
+      "type": "boolean",
+      "default": true
+    },
+    "send_to_ai": {
+      "type": "boolean",
+      "default": false
+    }
+  }
+}
