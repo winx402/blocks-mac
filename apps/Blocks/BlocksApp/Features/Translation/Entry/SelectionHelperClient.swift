@@ -712,6 +712,19 @@ final class SelectionHelperClient: @unchecked Sendable {
     private let bootstrapKeyStore: any SelectionHelperBootstrapKeyCreating
     private let connection: any SelectionHelperLoopbackConnecting
     private let applicationLocator: SelectionHelperApplicationLocator
+    /// Synchronous loopback IPC is intentionally isolated from UI/MainActor
+    /// work. This gate rejects a concurrent hint instead of accumulating a
+    /// queue of stale paste targets.
+    private let pasteTargetInspectionQueue = DispatchQueue(
+        label: "app.blocks.selection-helper.paste-target-inspection",
+        qos: .userInitiated
+    )
+    private let pasteTargetInspectionTimeoutQueue = DispatchQueue(
+        label: "app.blocks.selection-helper.paste-target-inspection-timeout",
+        qos: .userInitiated
+    )
+    private let pasteTargetInspectionLock = NSLock()
+    private var pasteTargetInspectionInFlight = false
 
     init(
         keyStore: any SelectionHelperSharedKeyStoring =
@@ -892,6 +905,79 @@ final class SelectionHelperClient: @unchecked Sendable {
                 return .failure(.incompatibleVersion)
             }
             return .success(health)
+        }
+    }
+
+    /// Best-effort optional enhancement for paste admission. It never launches
+    /// or pairs the Helper; callers must treat nil and unknown as the regular
+    /// paste path.
+    func inspectPasteTargetIfAvailable(
+        request: SelectionHelperPasteTargetRequest,
+        timeout: TimeInterval = 0.15
+    ) async -> SelectionHelperPasteTargetInspection? {
+        guard request.isValid,
+              beginPasteTargetInspection() else {
+            return nil
+        }
+        let deadline = SelectionHelperPasteTargetInspectionDeadline(
+            timeout: timeout
+        )
+        return await withCheckedContinuation { continuation in
+            let completion = SelectionHelperPasteTargetInspectionCompletion(
+                continuation: continuation
+            )
+            pasteTargetInspectionTimeoutQueue.asyncAfter(
+                deadline: .now() + deadline.remainingDuration
+            ) {
+                completion.resolve(nil)
+            }
+            pasteTargetInspectionQueue.async { [weak self] in
+                guard let self else {
+                    completion.resolve(nil)
+                    return
+                }
+                defer {
+                    self.endPasteTargetInspection()
+                }
+                guard deadline.hasRemainingTime,
+                      let key = self.keyStore.load(),
+                      deadline.hasRemainingTime,
+                      !self.hasInstallationConflict,
+                      deadline.hasRemainingTime else {
+                    completion.resolve(nil)
+                    return
+                }
+                guard let health = self.optionalHealth(
+                    keyData: key,
+                    timeout: deadline.remainingTimeInterval
+                ), health.capabilities.contains(
+                    BlocksSelectionHelperProtocol
+                        .pasteTargetInspectionCapability
+                ), deadline.hasRemainingTime else {
+                    completion.resolve(nil)
+                    return
+                }
+                let remaining = deadline.remainingTimeInterval
+                guard remaining > 0,
+                      case let .success(response) = self.sendAuthenticated(
+                        SelectionHelperCommand(
+                            kind: .inspectPasteTarget,
+                            pasteTargetRequest: request
+                        ),
+                        keyData: key,
+                        timeout: remaining
+                      ),
+                      let inspection = response.pasteTargetInspection,
+                      inspection.requestID == request.requestID,
+                      inspection.targetPID == request.targetPID,
+                      inspection.targetBundleIdentifier
+                        == request.targetBundleIdentifier,
+                      deadline.hasRemainingTime else {
+                    completion.resolve(nil)
+                    return
+                }
+                completion.resolve(inspection)
+            }
         }
     }
 
@@ -1091,6 +1177,40 @@ final class SelectionHelperClient: @unchecked Sendable {
         }
     }
 
+    private func optionalHealth(
+        keyData: Data,
+        timeout: TimeInterval
+    ) -> SelectionHelperHealth? {
+        guard timeout > 0,
+              case let .success(response) = sendAuthenticated(
+                SelectionHelperCommand(kind: .health),
+                keyData: keyData,
+                timeout: timeout
+              ),
+              let health = response.health,
+              health.protocolVersion >=
+                BlocksSelectionHelperProtocol.minimumCompatibleVersion,
+              health.protocolVersion <=
+                BlocksSelectionHelperProtocol.version else {
+            return nil
+        }
+        return health
+    }
+
+    private func beginPasteTargetInspection() -> Bool {
+        pasteTargetInspectionLock.withLock {
+            guard !pasteTargetInspectionInFlight else { return false }
+            pasteTargetInspectionInFlight = true
+            return true
+        }
+    }
+
+    private func endPasteTargetInspection() {
+        pasteTargetInspectionLock.withLock {
+            pasteTargetInspectionInFlight = false
+        }
+    }
+
     private func sendAuthenticated(
         _ command: SelectionHelperCommand,
         keyData: Data,
@@ -1101,6 +1221,7 @@ final class SelectionHelperClient: @unchecked Sendable {
     > {
         let requestID =
             command.captureRequest?.requestID
+            ?? command.pasteTargetRequest?.requestID
             ?? command.cancellationRequestID
             ?? UUID().uuidString
         do {
@@ -1180,6 +1301,67 @@ final class SelectionHelperClient: @unchecked Sendable {
              .internalFailure:
             .agentConnectionFailed
         }
+    }
+}
+
+/// One-shot continuation gate. The timeout path may return the caller while a
+/// legacy Keychain/locator/connection implementation is still blocked on the
+/// inspection queue, so only the first terminal result is observable.
+private final class SelectionHelperPasteTargetInspectionCompletion:
+    @unchecked Sendable
+{
+    private let lock = NSLock()
+    private var continuation:
+        CheckedContinuation<SelectionHelperPasteTargetInspection?, Never>?
+
+    init(
+        continuation: CheckedContinuation<
+            SelectionHelperPasteTargetInspection?,
+            Never
+        >
+    ) {
+        self.continuation = continuation
+    }
+
+    func resolve(_ value: SelectionHelperPasteTargetInspection?) {
+        let continuation = lock.withLock {
+            defer { self.continuation = nil }
+            return self.continuation
+        }
+        continuation?.resume(returning: value)
+    }
+}
+
+private struct SelectionHelperPasteTargetInspectionDeadline {
+    private static let maximumTimeout: TimeInterval = 0.15
+    private let deadlineUptimeNanoseconds: UInt64
+
+    init(timeout: TimeInterval) {
+        let normalized: TimeInterval
+        if timeout.isFinite, timeout > 0 {
+            normalized = min(timeout, Self.maximumTimeout)
+        } else {
+            normalized = Self.maximumTimeout
+        }
+        let durationNanoseconds = UInt64(
+            (normalized * 1_000_000_000).rounded(.up)
+        )
+        deadlineUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+            &+ durationNanoseconds
+    }
+
+    var hasRemainingTime: Bool {
+        DispatchTime.now().uptimeNanoseconds < deadlineUptimeNanoseconds
+    }
+
+    var remainingTimeInterval: TimeInterval {
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now < deadlineUptimeNanoseconds else { return 0 }
+        return TimeInterval(deadlineUptimeNanoseconds - now) / 1_000_000_000
+    }
+
+    var remainingDuration: DispatchTimeInterval {
+        .nanoseconds(Int(remainingTimeInterval * 1_000_000_000))
     }
 }
 

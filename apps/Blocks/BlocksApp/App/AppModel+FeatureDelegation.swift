@@ -128,7 +128,7 @@ extension AppModel {
 
     func refreshPermissionState() {
         permissionCoordinator.refreshPermissionState()
-        clipboardCoordinator.retryPendingPasteIfPossible()
+        clipboardCoordinator.pastePermissionStateDidRefresh()
     }
 
     func openScreenRecordingSettings() { permissionCoordinator.openScreenRecordingSettings() }

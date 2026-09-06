@@ -27,7 +27,7 @@ def has_partial_failure_after_clipboard_write(source: str) -> bool:
         "func copyToPasteboard(",
         "try await pasteboardWriter.write(",
         "func dispatchPaste(",
-        "accessibilityTrusted(promptForAccessibility)",
+        "eventPostingAccess(promptForAccessibility)",
         "waitForStableTargetFrontmost",
         "pasteboardLease.changeCount",
     )
@@ -35,7 +35,7 @@ def has_partial_failure_after_clipboard_write(source: str) -> bool:
         all(token in source for token in required)
         and source.index("func copyToPasteboard(") < source.index("try await pasteboardWriter.write(")
         and source.index("try await pasteboardWriter.write(") < source.index("func dispatchPaste(")
-        and source.index("func dispatchPaste(") < source.index("accessibilityTrusted(promptForAccessibility)")
+        and source.index("func dispatchPaste(") < source.index("eventPostingAccess(promptForAccessibility)")
     )
 
 
@@ -45,7 +45,7 @@ def partial_failure_negative_fixture() -> bool:
         (
             "struct ClipboardAutoPastePartialFailure {}",
             "func copyToPasteboard() { try await pasteboardWriter.write() }",
-            "func dispatchPaste() { accessibilityTrusted(promptForAccessibility); waitForStableTargetFrontmost(); _ = pasteboardLease.changeCount }",
+            "func dispatchPaste() { eventPostingAccess(promptForAccessibility); waitForStableTargetFrontmost(); _ = pasteboardLease.changeCount }",
         )
     )
     return has_partial_failure_after_clipboard_write(fixture) and not has_partial_failure_after_clipboard_write(

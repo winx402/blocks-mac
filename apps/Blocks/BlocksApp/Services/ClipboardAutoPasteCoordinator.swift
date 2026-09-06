@@ -83,6 +83,19 @@ enum ClipboardPasteTargetEligibility {
         )
     }
 
+    static func frontmostVisibleWindowID(
+        processIdentifier: pid_t,
+        windowInfo: [[String: Any]]? = nil
+    ) -> CGWindowID? {
+        let windows = windowInfo ?? (CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] ?? [])
+        return windows.first(where: {
+            ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == processIdentifier
+                && isVisibleLayerZeroWindow($0)
+        }).flatMap { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value }
+    }
+
     private static func eligibleApplicationWithoutWindowCheck(
         _ application: NSRunningApplication?
     ) -> NSRunningApplication? {
@@ -196,15 +209,25 @@ enum ClipboardPasteFailureReason: String, Equatable {
 struct ClipboardPasteTarget: Hashable {
     let bundleIdentifier: String?
     let processIdentifier: pid_t
+    let launchDate: Date?
 
     init(_ application: NSRunningApplication) {
         bundleIdentifier = application.bundleIdentifier
         processIdentifier = application.processIdentifier
+        launchDate = application.launchDate
+    }
+
+    init(bundleIdentifier: String?, processIdentifier: pid_t, launchDate: Date?) {
+        self.bundleIdentifier = bundleIdentifier
+        self.processIdentifier = processIdentifier
+        self.launchDate = launchDate
     }
 
     var runningApplication: NSRunningApplication? {
         guard let application = NSRunningApplication(processIdentifier: processIdentifier),
               application.bundleIdentifier == bundleIdentifier,
+              let launchDate,
+              application.launchDate == launchDate,
               !application.isTerminated else {
             return nil
         }
@@ -248,10 +271,29 @@ struct ClipboardPasteFocusIdentity: Equatable {
 
 struct ClipboardPasteFocusSnapshot {
     let target: ClipboardPasteTarget
+    /// Window-server routing identity. AX availability is separate evidence,
+    /// not a prerequisite for a user-requested paste into this window.
+    let windowID: CGWindowID?
     let focusedWindow: AXUIElement?
     let focusedElement: AXUIElement?
     let focusedSemantics: ClipboardAXEditableSemantics?
     let focusedIdentity: ClipboardPasteFocusIdentity?
+
+    init(
+        target: ClipboardPasteTarget,
+        focusedWindow: AXUIElement? = nil,
+        focusedElement: AXUIElement? = nil,
+        focusedSemantics: ClipboardAXEditableSemantics? = nil,
+        focusedIdentity: ClipboardPasteFocusIdentity? = nil,
+        windowID: CGWindowID? = nil
+    ) {
+        self.target = target
+        self.windowID = windowID
+        self.focusedWindow = focusedWindow
+        self.focusedElement = focusedElement
+        self.focusedSemantics = focusedSemantics
+        self.focusedIdentity = focusedIdentity
+    }
 
     var runningApplication: NSRunningApplication? {
         target.runningApplication
@@ -812,12 +854,13 @@ final class ClipboardPasteboardWriter {
 final class ClipboardAutoPasteCoordinator {
     private static let pasteFallbackMaxWait: TimeInterval = 0.35
     private static let pasteFallbackRetryInterval: TimeInterval = 0.035
-    private static let pasteFocusAncestorLimit = 6
     private static let logger = Logger(subsystem: "app.blocks.app", category: "clipboard-paste")
     private let pasteboardWriter: ClipboardPasteboardWriter
     private let frontmostApplicationProvider: @MainActor () -> NSRunningApplication?
     private let focusSnapshotProvider: @MainActor (NSRunningApplication) -> ClipboardPasteTargetContext
-    private let accessibilityTrusted: @MainActor (Bool) -> Bool
+    private let eventPostingAccess: @MainActor (Bool) -> Bool
+    private static let optionalHelperClient = SelectionHelperClient()
+    private let optionalTargetInspection: @MainActor (ClipboardPasteTargetContext) async -> SelectionHelperPasteTargetEditability
     private let pasteShortcutFactory: @MainActor () throws -> (keyDown: CGEvent, keyUp: CGEvent)
     private let pasteShortcutPoster: @MainActor ((keyDown: CGEvent, keyUp: CGEvent)) -> Void
 
@@ -826,24 +869,30 @@ final class ClipboardAutoPasteCoordinator {
         pasteboard: ClipboardPasteboardWriting? = nil,
         changeSuppressor: ClipboardPasteboardChangeSuppressor? = nil,
         frontmostApplication: @escaping @MainActor () -> NSRunningApplication? = {
-            let reportedApplication = NSWorkspace.shared.frontmostApplication
-            if let application = ClipboardPasteTargetEligibility.eligibleApplication(
-                reportedApplication
-            ) {
-                return application
-            }
-            guard ClipboardPasteTargetEligibility.shouldUseVisibleWindowFallback(
-                after: reportedApplication
-            ) else {
-                return nil
-            }
-            return ClipboardPasteTargetEligibility.frontmostVisibleEligibleApplication()
+            ClipboardPasteTargetEligibility.eligibleApplication(
+                NSWorkspace.shared.frontmostApplication
+            )
         },
         focusSnapshot: @escaping @MainActor (NSRunningApplication) -> ClipboardPasteTargetContext = {
             ClipboardAutoPasteCoordinator.capturePasteTargetContext(application: $0)
         },
-        accessibilityTrusted: @escaping @MainActor (Bool) -> Bool = {
-            ClipboardAutoPasteCoordinator.systemAccessibilityTrusted(prompt: $0)
+        eventPostingAccess: @escaping @MainActor (Bool) -> Bool = {
+            ClipboardAutoPasteCoordinator.systemEventPostingAccess(prompt: $0)
+        },
+        optionalTargetInspection: @escaping @MainActor (ClipboardPasteTargetContext) async -> SelectionHelperPasteTargetEditability = { context in
+            guard DistributionChannel.current.supportsSelectionHelper,
+                  let bundle = context.target.bundleIdentifier else { return .unknown }
+            let request = SelectionHelperPasteTargetRequest(
+                requestID: UUID().uuidString,
+                targetPID: context.target.processIdentifier,
+                targetBundleIdentifier: bundle
+            )
+            guard let result = await ClipboardAutoPasteCoordinator.optionalHelperClient
+                .inspectPasteTargetIfAvailable(request: request, timeout: 0.15),
+                  result.requestID == request.requestID,
+                  result.targetPID == request.targetPID,
+                  result.targetBundleIdentifier == request.targetBundleIdentifier else { return .unknown }
+            return result.editability
         },
         pasteShortcutFactory: @escaping @MainActor () throws -> (keyDown: CGEvent, keyUp: CGEvent) = {
             try ClipboardAutoPasteCoordinator.makePasteShortcut()
@@ -864,7 +913,8 @@ final class ClipboardAutoPasteCoordinator {
         }
         frontmostApplicationProvider = frontmostApplication
         focusSnapshotProvider = focusSnapshot
-        self.accessibilityTrusted = accessibilityTrusted
+        self.eventPostingAccess = eventPostingAccess
+        self.optionalTargetInspection = optionalTargetInspection
         self.pasteShortcutFactory = pasteShortcutFactory
         self.pasteShortcutPoster = pasteShortcutPoster
     }
@@ -876,32 +926,11 @@ final class ClipboardAutoPasteCoordinator {
 
     static func capturePasteTargetContext(application: NSRunningApplication) -> ClipboardPasteTargetContext {
         let target = ClipboardPasteTarget(application)
-        guard AXIsProcessTrusted() else {
-            logger.info("capture target=\(target.bundleIdentifier ?? "unknown", privacy: .public) accessibility=denied")
-            return ClipboardPasteFocusSnapshot(
-                target: target,
-                focusedWindow: nil,
-                focusedElement: nil,
-                focusedSemantics: nil,
-                focusedIdentity: nil
-            )
-        }
-
-        let applicationElement = AXUIElementCreateApplication(application.processIdentifier)
-        let focusedWindow = Self.axElementAttribute(kAXFocusedWindowAttribute as CFString, from: applicationElement)
-        let focusedElement = Self.axElementAttribute(kAXFocusedUIElementAttribute as CFString, from: applicationElement)
-        let focusedIdentity = focusedElement.map(Self.focusIdentity(for:))
-        let focusedSemantics = focusedElement.map(Self.editableSemantics(for:))
-        logger.info(
-            "capture target=\(target.bundleIdentifier ?? "unknown", privacy: .public) window=\(focusedWindow != nil, privacy: .public) element=\(focusedElement != nil, privacy: .public) role=\(focusedIdentity?.role ?? "missing", privacy: .public) stable=\(focusedIdentity?.hasStableIdentifier == true, privacy: .public) accepted=\(focusedSemantics?.acceptsPaste(allowUnknownRole: true) == true, privacy: .public)"
+        let windowID = ClipboardPasteTargetEligibility.frontmostVisibleWindowID(
+            processIdentifier: application.processIdentifier
         )
-        return ClipboardPasteFocusSnapshot(
-            target: target,
-            focusedWindow: focusedWindow,
-            focusedElement: focusedElement,
-            focusedSemantics: focusedSemantics,
-            focusedIdentity: focusedIdentity
-        )
+        logger.info("capture target=\(target.bundleIdentifier ?? "unknown", privacy: .public) route=window-preserving windowID=\(windowID ?? 0) launchIdentity=\(target.launchDate != nil)")
+        return ClipboardPasteFocusSnapshot(target: target, windowID: windowID)
     }
 
     func copyToPasteboard(
@@ -948,10 +977,13 @@ final class ClipboardAutoPasteCoordinator {
         promptForAccessibility: Bool = true,
         operationAllowed: @escaping () -> Bool = { true }
     ) async throws -> PasteResult {
-        guard operationAllowed() else {
+        guard !Task.isCancelled, operationAllowed() else {
             throw partialFailure(.featureDisabled, lease: pasteboardLease)
         }
         try await ensurePasteboardOwnership(pasteboardLease)
+        guard !Task.isCancelled, operationAllowed() else {
+            throw partialFailure(.featureDisabled, lease: pasteboardLease)
+        }
         guard let targetContext,
               let targetApplication = targetContext.runningApplication else {
             Self.logger.info("paste cancelled stage=target-unavailable-after-copy")
@@ -961,19 +993,27 @@ final class ClipboardAutoPasteCoordinator {
         guard targetIdentityMatches(targetApplication, expected: target) else {
             throw partialFailure(.targetApplicationUnavailable, lease: pasteboardLease)
         }
-        guard accessibilityTrusted(promptForAccessibility) else {
+        guard eventPostingAccess(promptForAccessibility) else {
             Self.logger.info("paste cancelled stage=accessibility-denied-after-copy target=\(target.bundleIdentifier ?? "unknown", privacy: .public)")
             throw partialFailure(.accessibilityPermissionRequired, lease: pasteboardLease)
         }
         guard await waitForStableTargetFrontmost(targetApplication, expected: target) else {
             Self.logger.info(
-                "paste cancelled stage=target-not-frontmost target=\(target.bundleIdentifier ?? "unknown", privacy: .public) capturedRole=\(targetContext.focusedIdentity?.role ?? "missing", privacy: .public)"
+                "paste cancelled stage=target-not-frontmost target=\(target.bundleIdentifier ?? "unknown", privacy: .public) windowID=\(targetContext.windowID ?? 0)"
             )
             throw partialFailure(.targetApplicationNotFrontmost, lease: pasteboardLease)
         }
         Self.logger.info(
-            "paste route=preserved-frontmost target=\(target.bundleIdentifier ?? "unknown", privacy: .public) capturedWindow=\(targetContext.focusedWindow != nil, privacy: .public) capturedRole=\(targetContext.focusedIdentity?.role ?? "missing", privacy: .public)"
+            "paste route=window-preserving target=\(target.bundleIdentifier ?? "unknown", privacy: .public) windowID=\(targetContext.windowID ?? 0)"
         )
+        guard focusStillMatchesCapturedTarget(targetContext, targetApplication: targetApplication, expected: target) else {
+            throw partialFailure(.targetApplicationUnavailable, lease: pasteboardLease)
+        }
+        let inspection = await optionalTargetInspection(targetContext)
+        if inspection == .nonEditable {
+            Self.logger.info("paste cancelled stage=helper-confirmed-noneditable")
+            throw partialFailure(.targetApplicationUnavailable, lease: pasteboardLease)
+        }
         guard operationAllowed() else {
             throw partialFailure(.featureDisabled, lease: pasteboardLease)
         }
@@ -1012,6 +1052,9 @@ final class ClipboardAutoPasteCoordinator {
             )
         }
         let isOperationAllowed = operationAllowed()
+        guard eventPostingAccess(false) else {
+            throw partialFailure(.accessibilityPermissionRequired, lease: pasteboardLease)
+        }
         guard isOperationAllowed,
               focusStillMatchesCapturedTarget(
                   targetContext,
@@ -1116,6 +1159,7 @@ final class ClipboardAutoPasteCoordinator {
         guard targetApplication.processIdentifier == target.processIdentifier,
               targetApplication.bundleIdentifier == target.bundleIdentifier,
               !targetApplication.isTerminated,
+              targetApplication.launchDate == target.launchDate,
               let runningApplication = target.runningApplication else {
             return false
         }
@@ -1123,9 +1167,8 @@ final class ClipboardAutoPasteCoordinator {
             && runningApplication.bundleIdentifier == target.bundleIdentifier
     }
 
-    /// A delayed paste must be bound to the actual editable control that had
-    /// focus when the panel opened. Do not infer this from the PID alone: a
-    /// user can change tabs, windows, or controls while the panel is closing.
+    /// Paste into the current caret in the captured window. AX objects may be
+    /// absent or recreated; process lifetime and window identity must match.
     private func focusStillMatchesCapturedTarget(
         _ captured: ClipboardPasteTargetContext,
         targetApplication: NSRunningApplication,
@@ -1134,40 +1177,15 @@ final class ClipboardAutoPasteCoordinator {
         guard targetIdentityMatches(targetApplication, expected: target),
               frontmostApplicationProvider().map({
                   targetIdentityMatches($0, expected: target)
-              }) == true else {
-            Self.logger.info(
-                "paste cancelled stage=focus-revalidation-target-not-frontmost target=\(target.bundleIdentifier ?? "unknown", privacy: .public)"
-            )
+              }) == true,
+              let capturedWindow = captured.windowID, capturedWindow != 0 else {
+            Self.logger.info("paste cancelled stage=routing-target-unverifiable")
             return false
         }
-        guard let capturedWindow = captured.focusedWindow,
-              let capturedElement = captured.focusedElement,
-              let capturedSemantics = captured.focusedSemantics,
-              let capturedIdentity = captured.focusedIdentity,
-              capturedSemantics.acceptsPaste(allowUnknownRole: true) else {
-            Self.logger.info(
-                "paste cancelled stage=captured-focus-unverifiable target=\(target.bundleIdentifier ?? "unknown", privacy: .public)"
-            )
-            return false
-        }
-
         let current = focusSnapshotProvider(targetApplication)
-        guard current.target.processIdentifier == target.processIdentifier,
-              current.target.bundleIdentifier == target.bundleIdentifier,
-              let currentWindow = current.focusedWindow,
-              let currentElement = current.focusedElement,
-              let currentSemantics = current.focusedSemantics,
-              let currentIdentity = current.focusedIdentity,
-              currentSemantics.acceptsPaste(allowUnknownRole: true),
-              CFEqual(capturedWindow, currentWindow),
-              CFEqual(capturedElement, currentElement),
-              capturedSemantics == currentSemantics,
-              capturedIdentity == currentIdentity else {
-            // Only log structural facts; AX text and field labels may contain
-            // user content and must never reach diagnostic output.
-            Self.logger.info(
-                "paste cancelled stage=focus-changed target=\(target.bundleIdentifier ?? "unknown", privacy: .public)"
-            )
+        guard current.target == target,
+              current.windowID == capturedWindow else {
+            Self.logger.info("paste cancelled stage=target-window-changed expectedWindow=\(capturedWindow) actualWindow=\(current.windowID ?? 0)")
             return false
         }
         return true
@@ -1187,124 +1205,12 @@ final class ClipboardAutoPasteCoordinator {
         }
     }
 
-    private static func focusIdentity(for element: AXUIElement) -> ClipboardPasteFocusIdentity {
-        ClipboardPasteFocusIdentity(
-            role: stringAttribute(kAXRoleAttribute as CFString, from: element) ?? "",
-            subrole: stringAttribute(kAXSubroleAttribute as CFString, from: element),
-            identifier: stringAttribute(kAXIdentifierAttribute as CFString, from: element),
-            domIdentifier: stringAttribute("AXDOMIdentifier" as CFString, from: element),
-            chromeAXNodeID: stringAttribute("ChromeAXNodeId" as CFString, from: element)
-        )
-    }
+    var hasEventPostingAccess: Bool { eventPostingAccess(false) }
 
-    private static func stringAttribute(_ attribute: CFString, from element: AXUIElement) -> String? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else {
-            return nil
-        }
-        return value as? String
-    }
-
-    private static func editableSemantics(for element: AXUIElement) -> ClipboardAXEditableSemantics {
-        var roleValue: CFTypeRef?
-        let role: String
-        if AXUIElementCopyAttributeValue(
-            element,
-            kAXRoleAttribute as CFString,
-            &roleValue
-        ) == .success,
-           let roleString = roleValue as? String {
-            role = roleString
-        } else {
-            role = ""
-        }
-
-        let attributeNames = Set(axAttributeNames(for: element))
-        let identity = focusIdentity(for: element)
-        return ClipboardAXEditableSemantics(
-            role: role,
-            enabled: booleanAttribute(kAXEnabledAttribute as CFString, from: element),
-            explicitlyEditable: booleanAttribute(kAXIsEditableAttribute as CFString, from: element) == true,
-            valueSettable: attributeIsSettable(kAXValueAttribute as CFString, on: element),
-            selectedTextSettable: attributeIsSettable(kAXSelectedTextAttribute as CFString, on: element),
-            focusedSettable: attributeIsSettable(kAXFocusedAttribute as CFString, on: element),
-            hasTextContentModel: attributeNames.contains("AXNumberOfCharacters")
-                && attributeNames.contains(kAXValueAttribute as String),
-            hasTextSelectionModel: attributeNames.contains(kAXSelectedTextAttribute as String)
-                && (
-                    attributeNames.contains(kAXSelectedTextRangeAttribute as String)
-                        || attributeNames.contains("AXSelectedTextMarkerRange")
-                ),
-            hasWebAreaAncestor: hasAncestorRole(
-                "AXWebArea",
-                from: element,
-                limit: pasteFocusAncestorLimit
-            ),
-            hasStableWebNodeIdentity: identity.hasStableIdentifier
-        )
-    }
-
-    private static func axAttributeNames(for element: AXUIElement) -> [String] {
-        var names: CFArray?
-        guard AXUIElementCopyAttributeNames(element, &names) == .success else {
-            return []
-        }
-        return names as? [String] ?? []
-    }
-
-    private static func hasAncestorRole(
-        _ expectedRole: String,
-        from element: AXUIElement,
-        limit: Int
-    ) -> Bool {
-        var candidate: AXUIElement? = element
-        for _ in 0...limit {
-            guard let current = candidate else {
-                return false
-            }
-            if stringAttribute(kAXRoleAttribute as CFString, from: current) == expectedRole {
-                return true
-            }
-            candidate = axElementAttribute(kAXParentAttribute as CFString, from: current)
-        }
-        return false
-    }
-
-    private static func booleanAttribute(_ attribute: CFString, from element: AXUIElement) -> Bool? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success else {
-            return nil
-        }
-        return value as? Bool
-    }
-
-    private static func attributeIsSettable(_ attribute: CFString, on element: AXUIElement) -> Bool {
-        var settable: DarwinBoolean = false
-        guard AXUIElementIsAttributeSettable(element, attribute, &settable) == .success else {
-            return false
-        }
-        return settable.boolValue
-    }
-
-    private static func axElementAttribute(_ attribute: CFString, from element: AXUIElement) -> AXUIElement? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success,
-              let value,
-              CFGetTypeID(value) == AXUIElementGetTypeID() else {
-            return nil
-        }
-        return (value as! AXUIElement)
-    }
-
-    private static func systemAccessibilityTrusted(prompt: Bool) -> Bool {
-        if AXIsProcessTrusted() {
-            return true
-        }
-        guard prompt else {
-            return false
-        }
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        return AXIsProcessTrustedWithOptions(options)
+    private static func systemEventPostingAccess(prompt: Bool) -> Bool {
+        if CGPreflightPostEventAccess() { return true }
+        guard prompt else { return false }
+        return CGRequestPostEventAccess()
     }
 
     private static func makePasteShortcut() throws -> (keyDown: CGEvent, keyUp: CGEvent) {

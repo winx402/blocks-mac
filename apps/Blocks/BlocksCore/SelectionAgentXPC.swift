@@ -548,6 +548,10 @@ public enum BlocksSelectionHelperProtocol {
     public static let bootstrapKeychainAccount = "pairing-bootstrap-v1"
     public static let sharedKeychainAccessGroupSuffix =
         ".app.blocks.selection-helper.shared"
+    /// Optional capability. Clients must treat its absence as an unavailable
+    /// enhancement and keep the normal paste path available.
+    public static let pasteTargetInspectionCapability =
+        "paste-target-inspection-v1"
 }
 
 /// Validates newline-delimited Helper request frames before any JSON,
@@ -1029,6 +1033,7 @@ public enum SelectionHelperCommandKind:
 {
     case health
     case capture
+    case inspectPasteTarget
     case permissionStatus
     case requestPermission
     case cancel
@@ -1042,16 +1047,82 @@ public struct SelectionHelperCommand:
 {
     public let kind: SelectionHelperCommandKind
     public let captureRequest: SelectionAgentCaptureRequest?
+    public let pasteTargetRequest: SelectionHelperPasteTargetRequest?
     public let cancellationRequestID: String?
 
     public init(
         kind: SelectionHelperCommandKind,
         captureRequest: SelectionAgentCaptureRequest? = nil,
+        pasteTargetRequest: SelectionHelperPasteTargetRequest? = nil,
         cancellationRequestID: String? = nil
     ) {
         self.kind = kind
         self.captureRequest = captureRequest
+        self.pasteTargetRequest = pasteTargetRequest
         self.cancellationRequestID = cancellationRequestID
+    }
+}
+
+/// A deliberately narrow, read-only request for whether the current focused
+/// control in a foreground target appears editable. The Helper must never read
+/// AXValue/AXSelectedText or change focus while processing it.
+public struct SelectionHelperPasteTargetRequest: Codable, Equatable, Sendable {
+    public let requestID: String
+    public let targetPID: Int32
+    public let targetBundleIdentifier: String
+
+    public init(
+        requestID: String,
+        targetPID: Int32,
+        targetBundleIdentifier: String
+    ) {
+        self.requestID = requestID
+        self.targetPID = targetPID
+        self.targetBundleIdentifier = targetBundleIdentifier
+    }
+
+    public var isValid: Bool {
+        targetPID > 0
+            && !requestID.isEmpty
+            && requestID.utf8.count <=
+                BlocksSelectionCaptureProtocol.maximumRequestIdentifierBytes
+            && !targetBundleIdentifier.isEmpty
+            && targetBundleIdentifier.utf8.count <=
+                BlocksSelectionCaptureProtocol.maximumBundleIdentifierBytes
+    }
+}
+
+public enum SelectionHelperPasteTargetEditability:
+    String,
+    Codable,
+    Equatable,
+    Sendable
+{
+    case editable
+    case nonEditable
+    case unknown
+}
+
+public struct SelectionHelperPasteTargetInspection:
+    Codable,
+    Equatable,
+    Sendable
+{
+    public let requestID: String
+    public let targetPID: Int32
+    public let targetBundleIdentifier: String
+    public let editability: SelectionHelperPasteTargetEditability
+
+    public init(
+        requestID: String,
+        targetPID: Int32,
+        targetBundleIdentifier: String,
+        editability: SelectionHelperPasteTargetEditability
+    ) {
+        self.requestID = requestID
+        self.targetPID = targetPID
+        self.targetBundleIdentifier = targetBundleIdentifier
+        self.editability = editability
     }
 }
 
@@ -1063,16 +1134,40 @@ public struct SelectionHelperHealth:
     public let protocolVersion: Int
     public let helperVersion: String
     public let accessibilityTrusted: Bool
+    public let capabilities: [String]
 
     public init(
         protocolVersion: Int =
             BlocksSelectionHelperProtocol.version,
         helperVersion: String,
-        accessibilityTrusted: Bool
+        accessibilityTrusted: Bool,
+        capabilities: [String] = []
     ) {
         self.protocolVersion = protocolVersion
         self.helperVersion = helperVersion
         self.accessibilityTrusted = accessibilityTrusted
+        self.capabilities = capabilities
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case protocolVersion
+        case helperVersion
+        case accessibilityTrusted
+        case capabilities
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        protocolVersion = try container.decode(Int.self, forKey: .protocolVersion)
+        helperVersion = try container.decode(String.self, forKey: .helperVersion)
+        accessibilityTrusted = try container.decode(
+            Bool.self,
+            forKey: .accessibilityTrusted
+        )
+        capabilities = try container.decodeIfPresent(
+            [String].self,
+            forKey: .capabilities
+        ) ?? []
     }
 }
 
@@ -1082,17 +1177,20 @@ public struct SelectionHelperCommandResponse:
     Sendable
 {
     public let captureResponse: SelectionAgentCaptureResponse?
+    public let pasteTargetInspection: SelectionHelperPasteTargetInspection?
     public let booleanValue: Bool?
     public let health: SelectionHelperHealth?
     public let failureCode: String?
 
     public init(
         captureResponse: SelectionAgentCaptureResponse? = nil,
+        pasteTargetInspection: SelectionHelperPasteTargetInspection? = nil,
         booleanValue: Bool? = nil,
         health: SelectionHelperHealth? = nil,
         failureCode: String? = nil
     ) {
         self.captureResponse = captureResponse
+        self.pasteTargetInspection = pasteTargetInspection
         self.booleanValue = booleanValue
         self.health = health
         self.failureCode = failureCode

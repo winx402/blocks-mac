@@ -4316,6 +4316,56 @@ final class ScreenshotAppStateTests: XCTestCase {
         XCTAssertNil(tracker.contextForInvocation())
     }
 
+    func testPinnedClipboardPanelFreezesLatestExternalWindowAtPasteGesture() async throws {
+        let application = NSRunningApplication.current
+        var windowID: CGWindowID = 41
+        var targetAvailable = true
+        let tracker = ClipboardExternalTargetTracker(
+            frontmostApplication: { targetAvailable ? application : nil },
+            frontmostVisibleApplication: { targetAvailable ? application : nil },
+            eligibleApplication: { $0 },
+            captureContext: { ClipboardPasteFocusSnapshot(target: ClipboardPasteTarget($0), windowID: windowID) },
+            observesActivations: false
+        )
+        let presenter = ClipboardHistoryPanelPresenter(
+            presentationCoordinator: BlocksFloatingPanelPresentationCoordinator(),
+            externalTargetTracker: tracker,
+            eligiblePasteTarget: { $0 != nil }
+        )
+        let closed = expectation(description: "pinned target fixture closes")
+        let store = ClipboardStore(repository: nil)
+        // The presenter deliberately keeps only a weak detail-store owner.
+        defer { withExtendedLifetime(store) {} }
+        _ = presenter.present(
+            clipboardStore: store,
+            notificationState: BlocksNotificationPresentationState(),
+            actions: ClipboardPanelActions(
+                pasteQuickRecord: { _ in }, pasteRecord: { _ in }, translateRecord: { _ in },
+                copyRecordAsPlainText: { _ in }, deleteHistoryItem: { _ in true },
+                toggleFavorite: { _ in }, setTagFilter: { _ in }
+            ),
+            position: .bottom,
+            invocationContext: ClipboardPanelInvocationContext(
+                id: UUID(), source: .floatingPanel, openedAt: Date(),
+                targetContext: tracker.contextForInvocation()
+            ),
+            openMainWindow: {}, openSettings: {}, onClosed: { _ in closed.fulfill() }
+        )
+        presenter.pinStateForTesting.setPinned(true)
+        XCTAssertEqual(presenter.targetContextForPaste()?.windowID, 41)
+        windowID = 42
+        let frozen = presenter.targetContextForPaste()
+        XCTAssertEqual(frozen?.windowID, 42)
+        windowID = 43
+        XCTAssertEqual(frozen?.windowID, 42, "A started request must not follow later target changes")
+        targetAvailable = false
+        XCTAssertNil(presenter.targetContextForPaste(), "Do not reuse the stale pinned target")
+        presenter.pinStateForTesting.setPinned(false)
+        presenter.close()
+        await fulfillment(of: [closed], timeout: 1)
+        drainAppKitAnimationTransactions()
+    }
+
     func testOrdinaryClipboardPanelKeepsItsInvocationTargetFrozen() async throws {
         let application = NSRunningApplication.current
         let targetContext = ClipboardPasteFocusSnapshot(
@@ -4474,7 +4524,7 @@ final class ScreenshotAppStateTests: XCTestCase {
                 changeSuppressor: ClipboardPasteboardChangeSuppressor(),
                 frontmostApplication: { application },
                 focusSnapshot: { _ in focus },
-                accessibilityTrusted: { _ in accessibilityGranted },
+                eventPostingAccess: { _ in accessibilityGranted },
                 pasteShortcutFactory: makePasteShortcutForTesting,
                 pasteShortcutPoster: { _ in pasteShortcutCount += 1 }
             )
@@ -4497,9 +4547,8 @@ final class ScreenshotAppStateTests: XCTestCase {
             targetContext: focus,
             promptForAccessibility: true
         ))
-        for _ in 0..<200 where retryAction == nil {
-            await Task.yield()
-        }
+        let initialPasteTask = try XCTUnwrap(coordinator.pasteTask)
+        await initialPasteTask.value
         XCTAssertEqual(pasteboard.writeCallCount, 1)
         XCTAssertEqual(mutationCount.currentValue, 1)
         XCTAssertEqual(
@@ -4509,7 +4558,7 @@ final class ScreenshotAppStateTests: XCTestCase {
         XCTAssertNotNil(retryAction)
 
         accessibilityGranted = true
-        retryAction?()
+        coordinator.retryPendingPasteIfPossible() // Explicit retry, not a permission refresh.
         for _ in 0..<200 where pasteShortcutCount == 0 {
             try await Task.sleep(for: .milliseconds(5))
         }
@@ -4584,7 +4633,7 @@ final class ScreenshotAppStateTests: XCTestCase {
                 changeSuppressor: ClipboardPasteboardChangeSuppressor(),
                 frontmostApplication: { application },
                 focusSnapshot: { _ in target },
-                accessibilityTrusted: { _ in accessibilityGranted },
+                eventPostingAccess: { _ in accessibilityGranted },
                 pasteShortcutFactory: makePasteShortcutForTesting,
                 pasteShortcutPoster: { _ in pasteShortcutCount += 1 }
             ),
@@ -4626,7 +4675,7 @@ final class ScreenshotAppStateTests: XCTestCase {
         )
 
         accessibilityGranted = true
-        retryAction?()
+        coordinator.retryPendingPasteIfPossible() // Explicit retry, not a permission refresh.
         let retryTask = try XCTUnwrap(coordinator.pasteTask)
         await retryTask.value
 
@@ -5301,7 +5350,7 @@ final class ScreenshotAppStateTests: XCTestCase {
                 broker: broker,
                 frontmostApplication: { .current },
                 focusSnapshot: { _ in target },
-                accessibilityTrusted: { _ in true },
+                eventPostingAccess: { _ in true },
                 pasteShortcutFactory: makePasteShortcutForTesting,
                 pasteShortcutPoster: { _ in postedShortcutCount += 1 }
             ),
@@ -5364,7 +5413,7 @@ final class ScreenshotAppStateTests: XCTestCase {
                 broker: broker,
                 frontmostApplication: { .current },
                 focusSnapshot: { _ in target },
-                accessibilityTrusted: { _ in true },
+                eventPostingAccess: { _ in true },
                 pasteShortcutFactory: makePasteShortcutForTesting,
                 pasteShortcutPoster: { _ in postedShortcutCount += 1 }
             ),
@@ -5460,7 +5509,7 @@ final class ScreenshotAppStateTests: XCTestCase {
                 broker: broker,
                 frontmostApplication: { .current },
                 focusSnapshot: { _ in target },
-                accessibilityTrusted: { _ in true },
+                eventPostingAccess: { _ in true },
                 pasteShortcutFactory: makePasteShortcutForTesting,
                 pasteShortcutPoster: { _ in postedShortcutCount += 1 }
             ),
@@ -21577,7 +21626,7 @@ final class ScreenshotAppStateTests: XCTestCase {
                 broker: broker,
                 frontmostApplication: { .current },
                 focusSnapshot: { _ in target },
-                accessibilityTrusted: { _ in true },
+                eventPostingAccess: { _ in true },
                 pasteShortcutFactory: makePasteShortcutForTesting,
                 pasteShortcutPoster: { _ in postedPasteShortcutCount += 1 }
             )
@@ -21793,6 +21842,94 @@ final class ScreenshotAppStateTests: XCTestCase {
         XCTAssertEqual(presenter.shutdownCount, 1)
     }
 
+    func testAutoPasteCancelledDuringLeaseValidationDoesNotPromptOrPost() async throws {
+        let broker = ControlledPlainTextCopyBroker(blockValidation: true)
+        let application = NSRunningApplication.current
+        let target = ClipboardPasteFocusSnapshot(target: ClipboardPasteTarget(application), windowID: 92_001)
+        var permissionChecks = 0
+        var posts = 0
+        let coordinator = ClipboardAutoPasteCoordinator(
+            broker: broker,
+            frontmostApplication: { application },
+            focusSnapshot: { _ in target },
+            eventPostingAccess: { _ in permissionChecks += 1; return false },
+            optionalTargetInspection: { _ in .unknown },
+            pasteShortcutPoster: { _ in posts += 1 }
+        )
+        let task = Task { @MainActor in
+            try? await coordinator.dispatchPaste(targetContext: target, pasteboardLease: .init(changeCount: 1))
+        }
+        try await broker.waitUntilValidationStarted()
+        task.cancel()
+        await broker.releaseValidation()
+        _ = await task.value
+        XCTAssertEqual(permissionChecks, 0)
+        XCTAssertEqual(posts, 0)
+    }
+
+    func testAutoPasteWithoutAXOrHelperPastesIntoCapturedWindow() async throws {
+        let application = NSRunningApplication.current
+        let target = ClipboardPasteFocusSnapshot(
+            target: ClipboardPasteTarget(application), windowID: 92_001
+        )
+        XCTAssertNil(target.focusedWindow)
+        XCTAssertNil(target.focusedElement)
+        try await assertAutoPasteFocusAllowed(target, application: application, changeCount: 39)
+    }
+
+    func testAutoPasteRejectsReusedPIDWithDifferentLaunchIdentity() async throws {
+        let application = NSRunningApplication.current
+        let captured = ClipboardPasteFocusSnapshot(
+            target: ClipboardPasteTarget(
+                bundleIdentifier: application.bundleIdentifier,
+                processIdentifier: application.processIdentifier,
+                launchDate: application.launchDate?.addingTimeInterval(-10)
+            ),
+            windowID: 92_001
+        )
+        try await assertAutoPasteFocusRejected(
+            captured: captured,
+            revalidated: makeEditablePasteFocusContext(application: application),
+            application: application
+        )
+    }
+
+    func testPasteWindowIdentityUsesFirstVisibleWindowForTheExactProcess() {
+        func window(_ pid: Int, _ id: Int, layer: Int = 0, alpha: Double = 1) -> [String: Any] {
+            [kCGWindowOwnerPID as String: pid, kCGWindowNumber as String: id,
+             kCGWindowLayer as String: layer, kCGWindowAlpha as String: alpha,
+             kCGWindowBounds as String: ["Width": 400, "Height": 300]]
+        }
+        let windows = [window(91, 1), window(92, 2, layer: 20), window(92, 3, alpha: 0), window(92, 4), window(92, 5)]
+        XCTAssertEqual(ClipboardPasteTargetEligibility.frontmostVisibleWindowID(processIdentifier: 92, windowInfo: windows), 4)
+        XCTAssertNil(ClipboardPasteTargetEligibility.frontmostVisibleWindowID(processIdentifier: 93, windowInfo: windows))
+    }
+
+    func testPastePermissionRefreshDoesNotReplayOrRewritePendingRequest() {
+        let board = ScriptedClipboardPasteboard(items: [], changeCount: 42, writeOutcomes: [true])
+        var posted = 0
+        let autoPaste = ClipboardAutoPasteCoordinator(
+            pasteboard: board,
+            eventPostingAccess: { _ in true },
+            optionalTargetInspection: { _ in .unknown },
+            pasteShortcutPoster: { _ in posted += 1 }
+        )
+        let coordinator = ClipboardFeatureCoordinator(
+            clipboardStore: ClipboardStore(repository: nil),
+            privacyStore: PrivacyStore(repository: nil),
+            featureAvailabilityStore: FeatureAvailabilityStore(defaults: testDefaults()),
+            autoPasteCoordinator: autoPaste
+        )
+        coordinator.pendingPasteRequest = coordinator.makePendingPasteRequest(
+            recordID: "permission-refresh", targetContext: nil, promptForAccessibility: false
+        ).waitingForAccessibilityRetry(lease: .init(changeCount: 42), historySyncPending: false)
+        coordinator.pastePermissionStateDidRefresh()
+        XCTAssertNil(coordinator.pendingPasteRequest)
+        XCTAssertNil(coordinator.pasteTask)
+        XCTAssertEqual(board.writeCallCount, 0)
+        XCTAssertEqual(posted, 0)
+    }
+
     func testAutoPasteUsesStableFrontmostTargetAndPostsOneSessionShortcut() async throws {
         let pasteboard = ScriptedClipboardPasteboard(
             items: [],
@@ -21807,7 +21944,7 @@ final class ScreenshotAppStateTests: XCTestCase {
             changeSuppressor: ClipboardPasteboardChangeSuppressor(),
             frontmostApplication: { application },
             focusSnapshot: { _ in focus },
-            accessibilityTrusted: { _ in true },
+            eventPostingAccess: { _ in true },
             pasteShortcutFactory: makePasteShortcutForTesting,
             pasteShortcutPoster: { _ in postedShortcutCount += 1 }
         )
@@ -21847,7 +21984,7 @@ final class ScreenshotAppStateTests: XCTestCase {
         XCTAssertEqual(postedShortcutCount, 1)
     }
 
-    func testAutoPasteRejectsNilOrNonEditableRevalidatedFocus() async throws {
+    func testAutoPasteRejectsMissingWindowOrHelperConfirmedNonEditableTarget() async throws {
         let application = NSRunningApplication.current
         let captured = makeEditablePasteFocusContext(application: application)
         let missing = ClipboardPasteFocusSnapshot(
@@ -21876,11 +22013,12 @@ final class ScreenshotAppStateTests: XCTestCase {
         try await assertAutoPasteFocusRejected(
             captured: captured,
             revalidated: nonEditable,
-            application: application
+            application: application,
+            helperEditability: .nonEditable
         )
     }
 
-    func testAutoPasteRejectsWindowOrControlIdentityChangeBeforePosting() async throws {
+    func testAutoPasteRejectsWindowChangeButAllowsCurrentCaretInSameWindow() async throws {
         let application = NSRunningApplication.current
         let captured = makeEditablePasteFocusContext(application: application)
         let changedWindow = makeEditablePasteFocusContext(
@@ -21897,10 +22035,11 @@ final class ScreenshotAppStateTests: XCTestCase {
             application: application,
             identity: "different-editable-control"
         )
-        try await assertAutoPasteFocusRejected(
-            captured: captured,
-            revalidated: changedIdentity,
-            application: application
+        try await assertAutoPasteFocusAllowed(
+            changedIdentity,
+            application: application,
+            changeCount: 49,
+            captured: captured
         )
     }
 
@@ -21949,12 +22088,13 @@ final class ScreenshotAppStateTests: XCTestCase {
         )
     }
 
-    func testAutoPasteCancellationOrLateFocusChangeNeverPostsShortcut() async throws {
+    func testAutoPasteCancellationOrLateWindowChangeNeverPostsShortcut() async throws {
         let application = NSRunningApplication.current
         let captured = makeEditablePasteFocusContext(application: application)
         let lateChangedFocus = makeEditablePasteFocusContext(
             application: application,
-            identity: "late-focus-change"
+            windowProcessIdentifier: 92_004,
+            identity: "late-window-change"
         )
         try await assertAutoPasteFocusRejected(
             captured: captured,
@@ -21973,7 +22113,7 @@ final class ScreenshotAppStateTests: XCTestCase {
             changeSuppressor: ClipboardPasteboardChangeSuppressor(),
             frontmostApplication: { application },
             focusSnapshot: { _ in captured },
-            accessibilityTrusted: { _ in true },
+            eventPostingAccess: { _ in true },
             pasteShortcutFactory: makePasteShortcutForTesting,
             pasteShortcutPoster: { _ in postedShortcutCount += 1 }
         )
@@ -22011,7 +22151,7 @@ final class ScreenshotAppStateTests: XCTestCase {
                 isAllowed = false
                 return focus
             },
-            accessibilityTrusted: { _ in true },
+            eventPostingAccess: { _ in true },
             pasteShortcutFactory: makePasteShortcutForTesting,
             pasteShortcutPoster: { _ in postedShortcutCount += 1 }
         )
@@ -22035,7 +22175,8 @@ final class ScreenshotAppStateTests: XCTestCase {
     private func assertAutoPasteFocusAllowed(
         _ focus: ClipboardPasteFocusSnapshot,
         application: NSRunningApplication,
-        changeCount: Int
+        changeCount: Int,
+        captured: ClipboardPasteFocusSnapshot? = nil
     ) async throws {
         let pasteboard = ScriptedClipboardPasteboard(
             items: [],
@@ -22048,13 +22189,13 @@ final class ScreenshotAppStateTests: XCTestCase {
             changeSuppressor: ClipboardPasteboardChangeSuppressor(),
             frontmostApplication: { application },
             focusSnapshot: { _ in focus },
-            accessibilityTrusted: { _ in true },
+            eventPostingAccess: { _ in true },
             pasteShortcutFactory: makePasteShortcutForTesting,
             pasteShortcutPoster: { _ in postedShortcutCount += 1 }
         )
 
         let result = try await coordinator.dispatchPaste(
-            targetContext: focus,
+            targetContext: captured ?? focus,
             pasteboardLease: ClipboardPasteboardWriteLease(changeCount: changeCount),
             promptForAccessibility: false
         )
@@ -22067,7 +22208,8 @@ final class ScreenshotAppStateTests: XCTestCase {
     private func assertAutoPasteFocusRejected(
         captured: ClipboardPasteFocusSnapshot,
         revalidated: ClipboardPasteFocusSnapshot,
-        application: NSRunningApplication
+        application: NSRunningApplication,
+        helperEditability: SelectionHelperPasteTargetEditability = .unknown
     ) async throws {
         let pasteboard = ScriptedClipboardPasteboard(
             items: [],
@@ -22080,7 +22222,8 @@ final class ScreenshotAppStateTests: XCTestCase {
             changeSuppressor: ClipboardPasteboardChangeSuppressor(),
             frontmostApplication: { application },
             focusSnapshot: { _ in revalidated },
-            accessibilityTrusted: { _ in true },
+            eventPostingAccess: { _ in true },
+            optionalTargetInspection: { _ in helperEditability },
             pasteShortcutFactory: makePasteShortcutForTesting,
             pasteShortcutPoster: { _ in postedShortcutCount += 1 }
         )
@@ -22124,7 +22267,8 @@ final class ScreenshotAppStateTests: XCTestCase {
                 subrole: nil,
                 identifier: identity,
                 domIdentifier: nil
-            )
+            ),
+            windowID: CGWindowID(windowProcessIdentifier)
         )
     }
 
@@ -27904,6 +28048,9 @@ private actor InvalidLeaseClipboardBroker: ClipboardBrokerServing {
 private actor ControlledPlainTextCopyBroker: ClipboardBrokerServing {
     private let blockPrepare: Bool
     private let blockAfterPhysicalWrite: Bool
+    private let blockValidation: Bool
+    private var validationStarted = false
+    private var validationContinuation: CheckedContinuation<Void, Never>?
     private var preparedWriteID: UUID?
     private var preparedRequest: ClipboardBrokerWriteRequest?
     private var prepareStarted = false
@@ -27916,10 +28063,12 @@ private actor ControlledPlainTextCopyBroker: ClipboardBrokerServing {
 
     init(
         blockPrepare: Bool = false,
-        blockAfterPhysicalWrite: Bool = false
+        blockAfterPhysicalWrite: Bool = false,
+        blockValidation: Bool = false
     ) {
         self.blockPrepare = blockPrepare
         self.blockAfterPhysicalWrite = blockAfterPhysicalWrite
+        self.blockValidation = blockValidation
     }
 
     func baseline() async throws -> Int { 0 }
@@ -28002,7 +28151,25 @@ private actor ControlledPlainTextCopyBroker: ClipboardBrokerServing {
 
     func validate(_ lease: ClipboardPasteboardWriteLease) async -> Bool {
         _ = lease
+        validationStarted = true
+        if blockValidation {
+            await withCheckedContinuation { validationContinuation = $0 }
+        }
         return true
+    }
+
+    func waitUntilValidationStarted() async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(1))
+        while !validationStarted, clock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        guard validationStarted else { throw ClipboardBrokerClientError.requestTimedOut }
+    }
+
+    func releaseValidation() {
+        validationContinuation?.resume()
+        validationContinuation = nil
     }
 
     func currentPlainText(

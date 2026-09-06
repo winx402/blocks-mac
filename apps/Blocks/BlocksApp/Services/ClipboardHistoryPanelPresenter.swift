@@ -272,6 +272,7 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
     private let quickPasteHintState = ClipboardQuickPasteHintState()
     private let pinState = ClipboardPanelPinState()
     private let externalTargetTracker: ClipboardExternalTargetTracker
+    private let eligiblePasteTarget: @MainActor (NSRunningApplication?) -> Bool
     private let focusCoordinator = ClipboardPanelFocusCoordinator()
     private var notificationPresenter: BlocksAnchoredNotificationPanelPresenter?
     private weak var pluginManager: BlocksNativePluginManager?
@@ -284,6 +285,7 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
         presentationCoordinator = BlocksFloatingPanelPresentationCoordinator()
         shouldSuppressRecentOpen = nil
         externalTargetTracker = ClipboardExternalTargetTracker()
+        eligiblePasteTarget = { ClipboardPasteTargetEligibility.eligibleApplication($0) != nil }
         super.init()
         configureExternalTargetTracker()
     }
@@ -291,12 +293,16 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
     init(
         presentationCoordinator: BlocksFloatingPanelPresentationCoordinator,
         shouldSuppressRecentOpen: (() -> Bool)? = nil,
-        externalTargetTracker: ClipboardExternalTargetTracker? = nil
+        externalTargetTracker: ClipboardExternalTargetTracker? = nil,
+        eligiblePasteTarget: @escaping @MainActor (NSRunningApplication?) -> Bool = {
+            ClipboardPasteTargetEligibility.eligibleApplication($0) != nil
+        }
     ) {
         self.presentationCoordinator = presentationCoordinator
         self.shouldSuppressRecentOpen = shouldSuppressRecentOpen
         self.externalTargetTracker = externalTargetTracker
             ?? ClipboardExternalTargetTracker()
+        self.eligiblePasteTarget = eligiblePasteTarget
         super.init()
         configureExternalTargetTracker()
     }
@@ -707,8 +713,12 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
     }
 
     func targetContextForPaste() -> ClipboardPasteTargetContext? {
-        guard isVisible,
-              let targetContext = invocationContext?.targetContext,
+        guard isVisible else { return nil }
+        if pinState.isPinned {
+            guard let current = externalTargetTracker.contextForInvocation() else { return nil }
+            updatePinnedTargetContext(current)
+        }
+        guard let targetContext = invocationContext?.targetContext,
               isEligiblePasteTarget(targetContext.target.runningApplication) else {
             return nil
         }
@@ -886,7 +896,7 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
     }
 
     private func isEligiblePasteTarget(_ application: NSRunningApplication?) -> Bool {
-        ClipboardPasteTargetEligibility.eligibleApplication(application) != nil
+        eligiblePasteTarget(application)
     }
 
     func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {

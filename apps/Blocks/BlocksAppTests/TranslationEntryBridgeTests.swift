@@ -3328,6 +3328,230 @@ final class TranslationEntryBridgeTests: XCTestCase {
         XCTAssertEqual(connection.authenticatedRequestCount, 0)
     }
 
+    func testSelectionHelperHealthDecodesLegacyPayloadWithoutCapabilities()
+        throws
+    {
+        let legacyPayload = try JSONSerialization.data(withJSONObject: [
+            "protocolVersion": BlocksSelectionHelperProtocol.version,
+            "helperVersion": "legacy",
+            "accessibilityTrusted": true,
+        ])
+
+        let health = try JSONDecoder().decode(
+            SelectionHelperHealth.self,
+            from: legacyPayload
+        )
+
+        XCTAssertEqual(health.capabilities, [])
+    }
+
+    func testPasteTargetInspectionSkipsWireWhenNoLocalPairingKey() async {
+        let connection = SelectionHelperAuthenticatedConnectionStub(
+            key: Data(repeating: 0x31, count: 32),
+            disconnectResult: .failure(.timedOut)
+        )
+        let client = SelectionHelperClient(
+            keyStore: SelectionHelperKeyStoreStub(),
+            connection: connection,
+            applicationLocator: selectionHelperFixtureLocator(candidates: [])
+        )
+
+        let result = await client.inspectPasteTargetIfAvailable(
+            request: pasteTargetRequest()
+        )
+
+        XCTAssertNil(result)
+        XCTAssertEqual(connection.authenticatedRequestCount, 0)
+    }
+
+    func testPasteTargetInspectionDoesNotSendCommandWhenCapabilityIsMissing()
+        async
+    {
+        let key = Data(repeating: 0x32, count: 32)
+        let connection = SelectionHelperAuthenticatedConnectionStub(
+            key: key,
+            disconnectResult: .failure(.timedOut),
+            health: SelectionHelperHealth(
+                helperVersion: "legacy-v4",
+                accessibilityTrusted: true
+            )
+        )
+        let client = SelectionHelperClient(
+            keyStore: SelectionHelperKeyStoreStub(key: key),
+            connection: connection,
+            applicationLocator: selectionHelperFixtureLocator(candidates: [])
+        )
+
+        let result = await client.inspectPasteTargetIfAvailable(
+            request: pasteTargetRequest()
+        )
+
+        XCTAssertNil(result)
+        XCTAssertEqual(
+            connection.authenticatedCommands.map(\.kind),
+            [.health]
+        )
+    }
+
+    func testPasteTargetInspectionReturnsAuthenticatedMatchingResponse()
+        async
+    {
+        let key = Data(repeating: 0x33, count: 32)
+        let request = pasteTargetRequest()
+        let connection = SelectionHelperAuthenticatedConnectionStub(
+            key: key,
+            disconnectResult: .failure(.timedOut),
+            health: SelectionHelperHealth(
+                helperVersion: "current",
+                accessibilityTrusted: true,
+                capabilities: [
+                    BlocksSelectionHelperProtocol
+                        .pasteTargetInspectionCapability,
+                ]
+            ),
+            authenticatedResponder: { command in
+                guard command.kind == .inspectPasteTarget,
+                      let request = command.pasteTargetRequest else {
+                    return .failure(.invalidResponse)
+                }
+                return .success(
+                    SelectionHelperCommandResponse(
+                        pasteTargetInspection:
+                            SelectionHelperPasteTargetInspection(
+                                requestID: request.requestID,
+                                targetPID: request.targetPID,
+                                targetBundleIdentifier:
+                                    request.targetBundleIdentifier,
+                                editability: .editable
+                            )
+                    )
+                )
+            }
+        )
+        let client = SelectionHelperClient(
+            keyStore: SelectionHelperKeyStoreStub(key: key),
+            connection: connection,
+            applicationLocator: selectionHelperFixtureLocator(candidates: [])
+        )
+
+        let result = await client.inspectPasteTargetIfAvailable(
+            request: request
+        )
+
+        XCTAssertEqual(
+            result,
+            SelectionHelperPasteTargetInspection(
+                requestID: request.requestID,
+                targetPID: request.targetPID,
+                targetBundleIdentifier: request.targetBundleIdentifier,
+                editability: .editable
+            )
+        )
+        XCTAssertEqual(
+            connection.authenticatedCommands.map(\.kind),
+            [.health, .inspectPasteTarget]
+        )
+    }
+
+    func testPasteTargetInspectionDeadlineAndBusyGateStayBounded() async {
+        let key = Data(repeating: 0x34, count: 32)
+        let request = pasteTargetRequest()
+        let connection = SelectionHelperAuthenticatedConnectionStub(
+            key: key,
+            disconnectResult: .failure(.timedOut),
+            health: SelectionHelperHealth(
+                helperVersion: "current",
+                accessibilityTrusted: true,
+                capabilities: [
+                    BlocksSelectionHelperProtocol
+                        .pasteTargetInspectionCapability,
+                ]
+            ),
+            authenticatedResponder: { _ in
+                .failure(.invalidResponse)
+            },
+            delayForCommand: { command in
+                command.kind == .inspectPasteTarget ? 0.3 : 0
+            },
+            ignoresTimeoutForCommand: { command in
+                command.kind == .inspectPasteTarget
+            }
+        )
+        let client = SelectionHelperClient(
+            keyStore: SelectionHelperKeyStoreStub(key: key),
+            connection: connection,
+            applicationLocator: selectionHelperFixtureLocator(candidates: [])
+        )
+
+        let startedAt = CFAbsoluteTimeGetCurrent()
+        async let first = client.inspectPasteTargetIfAvailable(
+            request: request,
+            timeout: 0.15
+        )
+        try? await Task.sleep(for: .milliseconds(20))
+        let busy = await client.inspectPasteTargetIfAvailable(
+            request: pasteTargetRequest(),
+            timeout: 0.15
+        )
+        let timedOut = await first
+
+        XCTAssertNil(busy)
+        XCTAssertNil(timedOut)
+        XCTAssertLessThan(
+            CFAbsoluteTimeGetCurrent() - startedAt,
+            0.25
+        )
+        XCTAssertEqual(
+            connection.authenticatedCommands.map(\.kind),
+            [.health, .inspectPasteTarget]
+        )
+    }
+
+    func testPasteTargetInspectionTimeoutDoesNotWaitForSlowKeychainOrQueue()
+        async
+    {
+        let key = Data(repeating: 0x35, count: 32)
+        let connection = SelectionHelperAuthenticatedConnectionStub(
+            key: key,
+            disconnectResult: .failure(.timedOut)
+        )
+        let client = SelectionHelperClient(
+            keyStore: SelectionHelperKeyStoreStub(
+                key: key,
+                loadDelay: 0.3
+            ),
+            connection: connection,
+            applicationLocator: selectionHelperFixtureLocator(candidates: [])
+        )
+
+        let startedAt = CFAbsoluteTimeGetCurrent()
+        async let first = client.inspectPasteTargetIfAvailable(
+            request: pasteTargetRequest(),
+            timeout: .infinity
+        )
+        try? await Task.sleep(for: .milliseconds(20))
+        let busy = await client.inspectPasteTargetIfAvailable(
+            request: pasteTargetRequest()
+        )
+        let timedOut = await first
+
+        XCTAssertNil(busy)
+        XCTAssertNil(timedOut)
+        XCTAssertLessThan(
+            CFAbsoluteTimeGetCurrent() - startedAt,
+            0.25
+        )
+        XCTAssertEqual(connection.authenticatedRequestCount, 0)
+    }
+
+    private func pasteTargetRequest() -> SelectionHelperPasteTargetRequest {
+        SelectionHelperPasteTargetRequest(
+            requestID: UUID().uuidString,
+            targetPID: 42,
+            targetBundleIdentifier: "com.example.Target"
+        )
+    }
+
     @MainActor
     func testSelectionHelperConflictUsesDedicatedCaptureAndSettingsStates()
         throws
@@ -8832,14 +9056,23 @@ private final class SelectionHelperKeyStoreStub:
     SelectionHelperSharedKeyStoring
 {
     private var storedKey: Data?
+    private let loadDelay: TimeInterval
     private(set) var deleteCount = 0
 
-    init(key: Data? = nil, legacyKey _: Data? = nil) {
+    init(
+        key: Data? = nil,
+        legacyKey _: Data? = nil,
+        loadDelay: TimeInterval = 0
+    ) {
         storedKey = key
+        self.loadDelay = loadDelay
     }
 
     func load() -> Data? {
-        storedKey
+        if loadDelay > 0 {
+            Thread.sleep(forTimeInterval: loadDelay)
+        }
+        return storedKey
     }
 
     func save(_ data: Data) throws {
@@ -8901,8 +9134,17 @@ private final class SelectionHelperAuthenticatedConnectionStub:
     )?
     private let pairingKeyProvider: ((SelectionHelperPairRequest) -> Data?)?
     private let health: SelectionHelperHealth?
+    private let authenticatedResponder: (
+        (SelectionHelperCommand) -> Result<
+            SelectionHelperCommandResponse,
+            SelectionAgentServiceFailure
+        >
+    )?
+    private let delayForCommand: (SelectionHelperCommand) -> TimeInterval
+    private let ignoresTimeoutForCommand: (SelectionHelperCommand) -> Bool
     private(set) var disconnectRequestCount = 0
     private(set) var authenticatedRequestCount = 0
+    private(set) var authenticatedCommands: [SelectionHelperCommand] = []
     private(set) var pairRequestCount = 0
     private(set) var pairPackets: [SelectionHelperWirePacket] = []
     private(set) var helperStillHasKey = true
@@ -8923,7 +9165,19 @@ private final class SelectionHelperAuthenticatedConnectionStub:
             (SelectionHelperPairRequest) -> Result<Data, SelectionAgentServiceFailure>
         )? = nil,
         pairingKeyProvider: ((SelectionHelperPairRequest) -> Data?)? = nil,
-        health: SelectionHelperHealth? = nil
+        health: SelectionHelperHealth? = nil,
+        authenticatedResponder: (
+            (SelectionHelperCommand) -> Result<
+                SelectionHelperCommandResponse,
+                SelectionAgentServiceFailure
+            >
+        )? = nil,
+        delayForCommand: @escaping (SelectionHelperCommand) -> TimeInterval = {
+            _ in 0
+        },
+        ignoresTimeoutForCommand: @escaping (SelectionHelperCommand) -> Bool = {
+            _ in false
+        }
     ) {
         self.key = key
         self.disconnectResults = disconnectResults ?? [disconnectResult]
@@ -8933,11 +9187,14 @@ private final class SelectionHelperAuthenticatedConnectionStub:
         self.pairResponder = pairResponder
         self.pairingKeyProvider = pairingKeyProvider
         self.health = health
+        self.authenticatedResponder = authenticatedResponder
+        self.delayForCommand = delayForCommand
+        self.ignoresTimeoutForCommand = ignoresTimeoutForCommand
     }
 
     func send(
         _ packet: SelectionHelperWirePacket,
-        timeout _: TimeInterval
+        timeout: TimeInterval
     ) -> Result<Data, SelectionAgentServiceFailure> {
         guard packet.kind == .authenticated else {
             pairRequestCount += 1
@@ -8969,6 +9226,16 @@ private final class SelectionHelperAuthenticatedConnectionStub:
         ) else {
             return .failure(.invalidResponse)
         }
+        authenticatedCommands.append(command)
+        let delay = max(0, delayForCommand(command))
+        if delay > 0 {
+            let boundedDelay = ignoresTimeoutForCommand(command)
+                ? delay : min(delay, max(0, timeout))
+            Thread.sleep(forTimeInterval: boundedDelay)
+            if delay > timeout, !ignoresTimeoutForCommand(command) {
+                return .failure(.timedOut)
+            }
+        }
         if hasDisconnectTombstone,
            command.kind != .disconnect {
             rejectedTombstoneCommands.append(command.kind)
@@ -8980,6 +9247,17 @@ private final class SelectionHelperAuthenticatedConnectionStub:
                 SelectionHelperCommandResponse(health: health),
                 requestID: envelope.requestID
             )
+        }
+        if let authenticatedResponder {
+            switch authenticatedResponder(command) {
+            case let .success(response):
+                return sealedResponse(
+                    response,
+                    requestID: envelope.requestID
+                )
+            case let .failure(failure):
+                return .failure(failure)
+            }
         }
         guard command.kind == .disconnect else {
             return .failure(.invalidResponse)

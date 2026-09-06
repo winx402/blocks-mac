@@ -1,47 +1,61 @@
 #!/usr/bin/env python3
+"""Current permission-refresh and explicit paste-retry source contracts."""
 import json
+import re
 import sys
 from pathlib import Path
-
+from p9b_clipboard_appstate_repository_integration_checks import body_of
 
 ROOT = Path(__file__).resolve().parents[2]
-APP_MODEL = ROOT / "apps/Blocks/BlocksApp/App/AppModel.swift"
-CLIPBOARD_COORDINATOR = ROOT / "apps/Blocks/BlocksApp/Features/Clipboard/ClipboardFeatureCoordinator.swift"
-PERMISSION_COORDINATOR = ROOT / "apps/Blocks/BlocksApp/Features/Permissions/PermissionFeatureCoordinator.swift"
-AUTO_PASTE = ROOT / "apps/Blocks/BlocksApp/Services/ClipboardAutoPasteCoordinator.swift"
-STRINGS = ROOT / "apps/Blocks/BlocksApp/Resources/Localizable.xcstrings"
 
 
-def read(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
+def read(path: str) -> str:
+    return (ROOT / path).read_text(encoding="utf-8")
+
+
+def refresh_never_replays(source: str) -> bool:
+    body = body_of(source, "func pastePermissionStateDidRefresh(")
+    return (
+        "autoPasteCoordinator.hasEventPostingAccess" in body
+        and "pendingPasteRequest = nil" in body
+        and "startPaste(" not in body
+        and "retryPendingPasteIfPossible(" not in body
+    )
 
 
 def main() -> int:
-    app_model = read(APP_MODEL)
-    clipboard_coordinator = read(CLIPBOARD_COORDINATOR)
-    permission_coordinator = read(PERMISSION_COORDINATOR)
-    auto_paste = read(AUTO_PASTE)
-    strings = read(STRINGS)
+    coordinator = read("apps/Blocks/BlocksApp/Features/Clipboard/ClipboardFeatureCoordinator.swift")
+    paste = read("apps/Blocks/BlocksApp/Features/Clipboard/ClipboardPasteOrchestrator.swift")
+    app = read("apps/Blocks/BlocksApp/App/AppModel.swift")
+    delegation = read("apps/Blocks/BlocksApp/App/AppModel+FeatureDelegation.swift")
+    auto = read("apps/Blocks/BlocksApp/Services/ClipboardAutoPasteCoordinator.swift")
+    strings = read("apps/Blocks/BlocksApp/Resources/Localizable.xcstrings")
+    retry = body_of(paste, "private func retryPendingPasteIfPossible(")
+    refresh = body_of(delegation, "func refreshPermissionState()")
+    callbacks = re.sub(r"\s+", "", paste)
+    fixture = "func pastePermissionStateDidRefresh() { guard autoPasteCoordinator.hasEventPostingAccess else { return }; pendingPasteRequest = nil }"
     checks = {
-        "pending_record_state": "private var pendingPasteRecordID" in clipboard_coordinator,
-        "refresh_retries_pending": "func retryPendingPasteIfPossible()" in clipboard_coordinator
-        and "guard accessibilityGranted(), let recordID = pendingPasteRecordID" in clipboard_coordinator,
-        "missing_accessibility_opens_assist": "presentAccessibilityAssist { [weak self] in" in clipboard_coordinator
-        and "permissionCoordinator?.presentAccessibilityAssist(onRefresh: onRefresh)" in app_model
-        and "assistPanelPresenter.present(kind: .accessibility)" in permission_coordinator,
-        "assist_callback_refresh": "self.store.refreshPermissionState()" in permission_coordinator
-        and "onRefresh()" in permission_coordinator,
-        "coordinator_prompt_gate": "promptForAccessibility: Bool = true" in auto_paste
-        and "isAccessibilityTrusted(prompt: promptForAccessibility)" in auto_paste,
-        "retry_failure_localized": "status.clipboardPasteRetry.detail" in strings,
+        "pending_request_retains_committed_lease": "var pendingPasteRequest: PendingPasteRequest?" in coordinator
+        and "preparedWriteLease: preparedWriteLease" in coordinator,
+        "permission_refresh_is_not_a_paste_gesture": refresh_never_replays(paste),
+        "app_permission_observers_do_not_replay": "clipboardCoordinator?.pastePermissionStateDidRefresh()" in app
+        and "clipboardCoordinator.pastePermissionStateDidRefresh()" in refresh
+        and "retryPendingPasteIfPossible" not in refresh,
+        "assist_callbacks_only_refresh": callbacks.count("self?.pastePermissionStateDidRefresh(requestToken:requestToken)") == 2
+        and "self?.retryPendingPasteIfPossible(requestToken:" not in callbacks,
+        "explicit_retry_reuses_write": "request.retryingAfterAccessibilityGrant()" in retry
+        and "startPaste(retryRequest)" in retry,
+        "event_permission_is_independent_of_AX": "CGPreflightPostEventAccess()" in auto
+        and "CGRequestPostEventAccess()" in auto
+        and "eventPostingAccess(promptForAccessibility)" in auto
+        and "AXIsProcessTrusted" not in auto,
+        "new_gesture_guidance_localized": "status.clipboardPastePermissionReady.detail" in strings,
+        "replay_regression_is_rejected": refresh_never_replays(fixture)
+        and not refresh_never_replays(fixture.replace("pendingPasteRequest = nil", "pendingPasteRequest = nil; startPaste(oldRequest)")),
     }
-    ok = all(checks.values())
-    print(json.dumps({
-        "ok": ok,
-        "check": "p7f_clipboard_autopaste_permission_retry",
-        "checks": checks,
-    }, ensure_ascii=False, indent=2))
-    return 0 if ok else 1
+    print(json.dumps({"ok": all(checks.values()), "check": "p7f_clipboard_autopaste_permission_retry",
+                      "verification_scope": "source_contracts_only", "checks": checks}, ensure_ascii=False, indent=2))
+    return 0 if all(checks.values()) else 1
 
 
 if __name__ == "__main__":

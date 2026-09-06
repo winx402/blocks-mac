@@ -18208,6 +18208,20 @@
         }
       }
     },
+    "status.clipboardPastePermissionReady.title": {
+      "localizations": {
+        "en": {"stringUnit": {"state": "translated", "value": "Paste permission ready"}},
+        "ja": {"stringUnit": {"state": "translated", "value": "ペーストの権限が有効になりました"}},
+        "zh-Hans": {"stringUnit": {"state": "translated", "value": "粘贴权限已就绪"}}
+      }
+    },
+    "status.clipboardPastePermissionReady.detail": {
+      "localizations": {
+        "en": {"stringUnit": {"state": "translated", "value": "Focus the destination and double-click the record again. Previous requests will not be replayed automatically."}},
+        "ja": {"stringUnit": {"state": "translated", "value": "入力先にフォーカスして、項目をもう一度ダブルクリックしてください。以前の要求は自動的に再実行されません。"}},
+        "zh-Hans": {"stringUnit": {"state": "translated", "value": "请聚焦目标输入框，再次双击记录。之前的请求不会自动重放。"}}
+      }
+    },
     "status.clipboardPasteReady.detail": {
       "localizations": {
         "en": {

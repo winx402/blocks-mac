@@ -84,6 +84,429 @@ private final class SelectionHelperCaptureService {
     }
 }
 
+/// Read-only AX metadata used for the optional paste-target enhancement. This
+/// intentionally mirrors the conservative acceptance rules used by the main
+/// app without importing its Clipboard types or reading user text.
+struct SelectionHelperPasteTargetSemantics: Equatable {
+    let role: String
+    let enabled: Bool?
+    let explicitlyEditable: Bool?
+    let valueSettable: Bool?
+    let selectedTextSettable: Bool?
+    let focusedSettable: Bool?
+    let hasTextContentModel: Bool
+    let hasTextSelectionModel: Bool
+    let hasWebAreaAncestor: Bool
+    let hasStableWebNodeIdentity: Bool
+
+    var editability: SelectionHelperPasteTargetEditability {
+        guard let enabled else { return .unknown }
+        guard enabled else { return .nonEditable }
+        guard let explicitlyEditable,
+              let valueSettable,
+              let selectedTextSettable,
+              let focusedSettable else {
+            return .unknown
+        }
+        let supportsTextMutation = valueSettable || selectedTextSettable
+        switch role {
+        case "AXTextField", "AXTextArea", "AXComboBox", "AXSearchField", "AXTextView":
+            return explicitlyEditable || supportsTextMutation
+                ? .editable : .nonEditable
+        case "AXWebArea":
+            return explicitlyEditable || (valueSettable && selectedTextSettable)
+                ? .editable : .nonEditable
+        case "AXGroup":
+            return focusedSettable
+                && hasTextContentModel
+                && hasTextSelectionModel
+                && hasWebAreaAncestor
+                && hasStableWebNodeIdentity ? .editable : .unknown
+        default:
+            return .unknown
+        }
+    }
+}
+
+struct SelectionHelperPasteTargetInspectionDeadline: Sendable {
+    private let deadlineUptimeNanoseconds: UInt64
+
+    init(timeout: TimeInterval) {
+        let normalized = timeout.isFinite && timeout > 0
+            ? min(timeout, 0.08) : 0
+        deadlineUptimeNanoseconds = DispatchTime.now().uptimeNanoseconds
+            &+ UInt64((normalized * 1_000_000_000).rounded(.up))
+    }
+
+    var hasRemainingTime: Bool {
+        DispatchTime.now().uptimeNanoseconds < deadlineUptimeNanoseconds
+    }
+
+    var remainingMessagingTimeout: Float {
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now < deadlineUptimeNanoseconds else { return 0 }
+        return min(
+            0.08,
+            Float(deadlineUptimeNanoseconds - now) / 1_000_000_000
+        )
+    }
+}
+
+private struct SelectionHelperPasteTargetInspectionWorker {
+    private static let ancestorLimit = 8
+
+    func inspect(
+        _ request: SelectionHelperPasteTargetRequest,
+        deadline: SelectionHelperPasteTargetInspectionDeadline =
+            SelectionHelperPasteTargetInspectionDeadline(timeout: 0.08)
+    ) -> SelectionHelperPasteTargetInspection {
+        let unknown = response(for: request, editability: .unknown)
+        guard request.isValid,
+              deadline.hasRemainingTime,
+              let target = NSRunningApplication(
+                processIdentifier: request.targetPID
+              ),
+              !target.isTerminated,
+              target.bundleIdentifier == request.targetBundleIdentifier,
+              isCurrentFrontmostTarget(request),
+              AXIsProcessTrusted(),
+              deadline.hasRemainingTime else {
+            return unknown
+        }
+
+        let application = AXUIElementCreateApplication(request.targetPID)
+        var focusedValue: CFTypeRef?
+        guard copyAttributeValue(
+            application,
+            kAXFocusedUIElementAttribute as CFString,
+            into: &focusedValue,
+            deadline: deadline
+        ) == .success,
+           let focusedElement = focusedValue,
+           CFGetTypeID(focusedElement) == AXUIElementGetTypeID(),
+           isCurrentFrontmostTarget(request),
+           deadline.hasRemainingTime else {
+            return unknown
+        }
+
+        let element = focusedElement as! AXUIElement
+        let editability = semantics(for: element, deadline: deadline)
+            .editability
+        guard isCurrentFrontmostTarget(request), deadline.hasRemainingTime else {
+            return unknown
+        }
+        return response(for: request, editability: editability)
+    }
+
+    private func response(
+        for request: SelectionHelperPasteTargetRequest,
+        editability: SelectionHelperPasteTargetEditability
+    ) -> SelectionHelperPasteTargetInspection {
+        SelectionHelperPasteTargetInspection(
+            requestID: request.requestID,
+            targetPID: request.targetPID,
+            targetBundleIdentifier: request.targetBundleIdentifier,
+            editability: editability
+        )
+    }
+
+    private func isCurrentFrontmostTarget(
+        _ request: SelectionHelperPasteTargetRequest
+    ) -> Bool {
+        guard let frontmost = NSWorkspace.shared.frontmostApplication else {
+            return false
+        }
+        return frontmost.processIdentifier == request.targetPID
+            && frontmost.bundleIdentifier == request.targetBundleIdentifier
+    }
+
+    private func semantics(
+        for element: AXUIElement,
+        deadline: SelectionHelperPasteTargetInspectionDeadline
+    ) -> SelectionHelperPasteTargetSemantics {
+        guard deadline.hasRemainingTime else {
+            return unknownSemantics
+        }
+        let attributeNames = Set(attributeNames(for: element, deadline: deadline))
+        guard deadline.hasRemainingTime else { return unknownSemantics }
+        let role = stringAttribute(
+            kAXRoleAttribute as CFString,
+            from: element,
+            deadline: deadline
+        ) ?? ""
+        guard deadline.hasRemainingTime else { return unknownSemantics }
+        let identifier = stringAttribute(
+            kAXIdentifierAttribute as CFString,
+            from: element,
+            deadline: deadline
+        )
+        guard deadline.hasRemainingTime else { return unknownSemantics }
+        let domIdentifier = stringAttribute(
+            "AXDOMIdentifier" as CFString,
+            from: element,
+            deadline: deadline
+        )
+        guard deadline.hasRemainingTime else { return unknownSemantics }
+        let chromeNodeID = stringAttribute(
+            "ChromeAXNodeId" as CFString,
+            from: element,
+            deadline: deadline
+        )
+        guard deadline.hasRemainingTime else { return unknownSemantics }
+        return SelectionHelperPasteTargetSemantics(
+            role: role,
+            enabled: booleanAttribute(
+                kAXEnabledAttribute as CFString,
+                from: element,
+                deadline: deadline
+            ),
+            explicitlyEditable: booleanAttribute(
+                kAXIsEditableAttribute as CFString,
+                from: element,
+                deadline: deadline
+            ),
+            valueSettable: attributeIsSettable(
+                kAXValueAttribute as CFString,
+                on: element,
+                deadline: deadline
+            ),
+            selectedTextSettable: attributeIsSettable(
+                kAXSelectedTextAttribute as CFString,
+                on: element,
+                deadline: deadline
+            ),
+            focusedSettable: attributeIsSettable(
+                kAXFocusedAttribute as CFString,
+                on: element,
+                deadline: deadline
+            ),
+            hasTextContentModel: attributeNames.contains("AXNumberOfCharacters")
+                && attributeNames.contains(kAXValueAttribute as String),
+            hasTextSelectionModel: attributeNames.contains(
+                kAXSelectedTextAttribute as String
+            ) && (
+                attributeNames.contains(kAXSelectedTextRangeAttribute as String)
+                    || attributeNames.contains("AXSelectedTextMarkerRange")
+            ),
+            hasWebAreaAncestor: hasAncestorRole(
+                "AXWebArea",
+                from: element,
+                deadline: deadline
+            ),
+            hasStableWebNodeIdentity: [identifier, domIdentifier, chromeNodeID]
+                .contains { value in value?.isEmpty == false }
+        )
+    }
+
+    private var unknownSemantics: SelectionHelperPasteTargetSemantics {
+        SelectionHelperPasteTargetSemantics(
+            role: "",
+            enabled: nil,
+            explicitlyEditable: nil,
+            valueSettable: nil,
+            selectedTextSettable: nil,
+            focusedSettable: nil,
+            hasTextContentModel: false,
+            hasTextSelectionModel: false,
+            hasWebAreaAncestor: false,
+            hasStableWebNodeIdentity: false
+        )
+    }
+
+    private func attributeNames(
+        for element: AXUIElement,
+        deadline: SelectionHelperPasteTargetInspectionDeadline
+    ) -> [String] {
+        var values: CFArray?
+        guard configure(element, deadline: deadline),
+              AXUIElementCopyAttributeNames(element, &values) == .success,
+              deadline.hasRemainingTime else {
+            return []
+        }
+        return values as? [String] ?? []
+    }
+
+    private func stringAttribute(
+        _ attribute: CFString,
+        from element: AXUIElement,
+        deadline: SelectionHelperPasteTargetInspectionDeadline
+    ) -> String? {
+        var value: CFTypeRef?
+        guard copyAttributeValue(
+            element,
+            attribute,
+            into: &value,
+            deadline: deadline
+        ) == .success else {
+            return nil
+        }
+        return value as? String
+    }
+
+    private func booleanAttribute(
+        _ attribute: CFString,
+        from element: AXUIElement,
+        deadline: SelectionHelperPasteTargetInspectionDeadline
+    ) -> Bool? {
+        var value: CFTypeRef?
+        guard copyAttributeValue(
+            element,
+            attribute,
+            into: &value,
+            deadline: deadline
+        ) == .success else {
+            return nil
+        }
+        return value as? Bool
+    }
+
+    private func attributeIsSettable(
+        _ attribute: CFString,
+        on element: AXUIElement,
+        deadline: SelectionHelperPasteTargetInspectionDeadline
+    ) -> Bool? {
+        var settable: DarwinBoolean = false
+        guard configure(element, deadline: deadline),
+              AXUIElementIsAttributeSettable(element, attribute, &settable)
+                == .success,
+              deadline.hasRemainingTime else {
+            return nil
+        }
+        return settable.boolValue
+    }
+
+    private func hasAncestorRole(
+        _ role: String,
+        from element: AXUIElement,
+        deadline: SelectionHelperPasteTargetInspectionDeadline
+    ) -> Bool {
+        var candidate: AXUIElement? = element
+        for _ in 0...Self.ancestorLimit {
+            guard deadline.hasRemainingTime else { return false }
+            guard let current = candidate else { return false }
+            if stringAttribute(
+                kAXRoleAttribute as CFString,
+                from: current,
+                deadline: deadline
+            ) == role {
+                return true
+            }
+            var parent: CFTypeRef?
+            guard copyAttributeValue(
+                current,
+                kAXParentAttribute as CFString,
+                into: &parent,
+                deadline: deadline
+            ) == .success,
+               let parent,
+               CFGetTypeID(parent) == AXUIElementGetTypeID() else {
+                return false
+            }
+            candidate = parent as! AXUIElement
+        }
+        return false
+    }
+
+    private func configure(
+        _ element: AXUIElement,
+        deadline: SelectionHelperPasteTargetInspectionDeadline
+    ) -> Bool {
+        guard deadline.hasRemainingTime else { return false }
+        AXUIElementSetMessagingTimeout(
+            element,
+            deadline.remainingMessagingTimeout
+        )
+        return deadline.hasRemainingTime
+    }
+
+    private func copyAttributeValue(
+        _ element: AXUIElement,
+        _ attribute: CFString,
+        into value: UnsafeMutablePointer<CFTypeRef?>,
+        deadline: SelectionHelperPasteTargetInspectionDeadline
+    ) -> AXError {
+        guard configure(element, deadline: deadline) else {
+            return .failure
+        }
+        let result = AXUIElementCopyAttributeValue(element, attribute, value)
+        return deadline.hasRemainingTime ? result : .failure
+    }
+}
+
+final class SelectionHelperPasteTargetInspectionService {
+    private let workerQueue = DispatchQueue(
+        label: "app.blocks.selection-helper.paste-target-inspection",
+        qos: .userInitiated
+    )
+    private let lock = NSLock()
+    private let timeout: TimeInterval
+    private let inspector: (
+        SelectionHelperPasteTargetRequest,
+        SelectionHelperPasteTargetInspectionDeadline
+    ) -> SelectionHelperPasteTargetInspection
+    private var isInspecting = false
+
+    init(
+        timeout: TimeInterval = 0.08,
+        inspector: @escaping (
+            SelectionHelperPasteTargetRequest,
+            SelectionHelperPasteTargetInspectionDeadline
+        ) -> SelectionHelperPasteTargetInspection = { request, deadline in
+            SelectionHelperPasteTargetInspectionWorker().inspect(
+                request,
+                deadline: deadline
+            )
+        }
+    ) {
+        self.timeout = timeout
+        self.inspector = inspector
+    }
+
+    func inspect(
+        _ request: SelectionHelperPasteTargetRequest,
+        completion: @escaping (SelectionHelperPasteTargetInspection) -> Void
+    ) {
+        guard beginInspection() else {
+            completion(unknownInspection(for: request))
+            return
+        }
+        let deadline = SelectionHelperPasteTargetInspectionDeadline(
+            timeout: timeout
+        )
+        workerQueue.async {
+            defer { self.endInspection() }
+            guard deadline.hasRemainingTime else {
+                completion(self.unknownInspection(for: request))
+                return
+            }
+            completion(self.inspector(request, deadline))
+        }
+    }
+
+    private func beginInspection() -> Bool {
+        lock.withLock {
+            guard !isInspecting else { return false }
+            isInspecting = true
+            return true
+        }
+    }
+
+    private func endInspection() {
+        lock.withLock { isInspecting = false }
+    }
+
+    private func unknownInspection(
+        for request: SelectionHelperPasteTargetRequest
+    ) -> SelectionHelperPasteTargetInspection {
+        SelectionHelperPasteTargetInspection(
+            requestID: request.requestID,
+            targetPID: request.targetPID,
+            targetBundleIdentifier: request.targetBundleIdentifier,
+            editability: .unknown
+        )
+    }
+}
+
 private struct SelectionAgentCaptureWorker {
     private static let maximumAncestorDepth = 8
     private static let maximumDocumentDepth = 8
@@ -1379,6 +1802,8 @@ final class SelectionHelperServer:
     private let bootstrapKeyStore: any SelectionHelperBootstrapKeyLoading
     private let replayGate = SelectionHelperAuthenticatedReplayGate()
     private let captureService = SelectionHelperCaptureService()
+    private let pasteTargetInspectionService =
+        SelectionHelperPasteTargetInspectionService()
     private let now: () -> Date
     private let queue = DispatchQueue(
         label: "app.blocks.selection-helper.server",
@@ -1872,7 +2297,11 @@ final class SelectionHelperServer:
                                     "CFBundleShortVersionString"
                             ) as? String ?? "0",
                         accessibilityTrusted:
-                            captureService.permissionStatus()
+                            captureService.permissionStatus(),
+                        capabilities: [
+                            BlocksSelectionHelperProtocol
+                                .pasteTargetInspectionCapability,
+                        ]
                     )
                 )
             )
@@ -1889,6 +2318,23 @@ final class SelectionHelperServer:
                 completion(
                     SelectionHelperCommandResponse(
                         captureResponse: response
+                    )
+                )
+            }
+        case .inspectPasteTarget:
+            guard let request = command.pasteTargetRequest,
+                  request.isValid else {
+                completion(
+                    SelectionHelperCommandResponse(
+                        failureCode: "invalid_request"
+                    )
+                )
+                return
+            }
+            pasteTargetInspectionService.inspect(request) { inspection in
+                completion(
+                    SelectionHelperCommandResponse(
+                        pasteTargetInspection: inspection
                     )
                 )
             }

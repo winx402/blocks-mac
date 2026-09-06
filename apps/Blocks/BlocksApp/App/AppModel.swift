@@ -1103,7 +1103,7 @@ final class AppModel: ObservableObject {
         let publishRouteResolution: (ProviderRouteResolution) -> Void = { [weak providerStore] resolution in
             providerStore?.providerRouteResolution = resolution
         }
-        permissionCoordinator.configure(afterPermissionRefresh: { [weak clipboardCoordinator] in clipboardCoordinator?.retryPendingPasteIfPossible() })
+        permissionCoordinator.configure(afterPermissionRefresh: { [weak clipboardCoordinator] in clipboardCoordinator?.pastePermissionStateDidRefresh() })
         clipboardCoordinator.configure(
             statusRecorder: recordStatus,
             sectionSelector: selectSection,

@@ -168,6 +168,129 @@ final class SelectionHelperServerTests: XCTestCase {
         XCTAssertEqual(server.activeResponseSenderCountForTesting(), 0)
     }
 
+    func testPasteTargetSemanticsMarksSupportedEditableControlEditable() {
+        let semantics = SelectionHelperPasteTargetSemantics(
+            role: "AXTextArea",
+            enabled: true,
+            explicitlyEditable: true,
+            valueSettable: false,
+            selectedTextSettable: false,
+            focusedSettable: false,
+            hasTextContentModel: false,
+            hasTextSelectionModel: false,
+            hasWebAreaAncestor: false,
+            hasStableWebNodeIdentity: false
+        )
+
+        XCTAssertEqual(semantics.editability, .editable)
+    }
+
+    func testPasteTargetSemanticsMarksExplicitlyNonEditableControlNonEditable() {
+        let semantics = SelectionHelperPasteTargetSemantics(
+            role: "AXTextField",
+            enabled: true,
+            explicitlyEditable: false,
+            valueSettable: false,
+            selectedTextSettable: false,
+            focusedSettable: false,
+            hasTextContentModel: false,
+            hasTextSelectionModel: false,
+            hasWebAreaAncestor: false,
+            hasStableWebNodeIdentity: false
+        )
+
+        XCTAssertEqual(semantics.editability, .nonEditable)
+    }
+
+    func testPasteTargetSemanticsMarksAmbiguousMetadataUnknown() {
+        let semantics = SelectionHelperPasteTargetSemantics(
+            role: "AXGroup",
+            enabled: true,
+            explicitlyEditable: false,
+            valueSettable: false,
+            selectedTextSettable: false,
+            focusedSettable: false,
+            hasTextContentModel: true,
+            hasTextSelectionModel: true,
+            hasWebAreaAncestor: true,
+            hasStableWebNodeIdentity: false
+        )
+
+        XCTAssertEqual(semantics.editability, .unknown)
+    }
+
+    func testPasteTargetInspectionServiceReturnsUnknownWhileOneReadIsInFlight() {
+        let firstStarted = expectation(description: "first inspection started")
+        let firstFinished = expectation(description: "first inspection finished")
+        let busyFinished = expectation(description: "busy inspection finished")
+        let releaseFirst = DispatchSemaphore(value: 0)
+        let firstRequest = pasteTargetRequest(requestID: "first")
+        let busyRequest = pasteTargetRequest(requestID: "busy")
+        let afterRequest = pasteTargetRequest(requestID: "after")
+        let service = SelectionHelperPasteTargetInspectionService(
+            inspector: { request, _ in
+                if request.requestID == firstRequest.requestID {
+                    firstStarted.fulfill()
+                    _ = releaseFirst.wait(timeout: .now() + 1)
+                }
+                return SelectionHelperPasteTargetInspection(
+                    requestID: request.requestID,
+                    targetPID: request.targetPID,
+                    targetBundleIdentifier: request.targetBundleIdentifier,
+                    editability: .editable
+                )
+            }
+        )
+
+        service.inspect(firstRequest) { inspection in
+            XCTAssertEqual(inspection.editability, .editable)
+            firstFinished.fulfill()
+        }
+        wait(for: [firstStarted], timeout: 1)
+
+        service.inspect(busyRequest) { inspection in
+            XCTAssertEqual(inspection.requestID, busyRequest.requestID)
+            XCTAssertEqual(inspection.editability, .unknown)
+            busyFinished.fulfill()
+        }
+        wait(for: [busyFinished], timeout: 1)
+
+        releaseFirst.signal()
+        wait(for: [firstFinished], timeout: 1)
+
+        let afterFinished = expectation(description: "post-work inspection")
+        service.inspect(afterRequest) { inspection in
+            XCTAssertEqual(inspection.editability, .editable)
+            afterFinished.fulfill()
+        }
+        wait(for: [afterFinished], timeout: 1)
+    }
+
+    func testPasteTargetInspectionServiceSkipsExpiredWorkBeforeMetadataRead() {
+        let finished = expectation(description: "expired inspection finished")
+        let metadataReadCount = InspectionCounter()
+        let request = pasteTargetRequest(requestID: "expired")
+        let service = SelectionHelperPasteTargetInspectionService(
+            timeout: 0,
+            inspector: { request, _ in
+                metadataReadCount.increment()
+                return SelectionHelperPasteTargetInspection(
+                    requestID: request.requestID,
+                    targetPID: request.targetPID,
+                    targetBundleIdentifier: request.targetBundleIdentifier,
+                    editability: .editable
+                )
+            }
+        )
+
+        service.inspect(request) { inspection in
+            XCTAssertEqual(inspection.editability, .unknown)
+            finished.fulfill()
+        }
+        wait(for: [finished], timeout: 1)
+        XCTAssertEqual(metadataReadCount.value, 0)
+    }
+
     func testListenerReadinessFailsWhenIPv4FailsAfterIPv6IsReady() {
         var readiness = SelectionHelperServer.ListenerReadiness()
 
@@ -821,6 +944,16 @@ final class SelectionHelperServerTests: XCTestCase {
         )
     }
 
+    private func pasteTargetRequest(
+        requestID: String
+    ) -> SelectionHelperPasteTargetRequest {
+        SelectionHelperPasteTargetRequest(
+            requestID: requestID,
+            targetPID: 42,
+            targetBundleIdentifier: "com.example.Target"
+        )
+    }
+
     private func makeValidRequest(
         requestID: String,
         pairingCode: String? = nil
@@ -984,6 +1117,17 @@ final class SelectionHelperServerTests: XCTestCase {
 private struct KeychainIdentity: Equatable {
     let service: String
     let account: String
+}
+
+private final class InspectionCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValue = 0
+
+    var value: Int { lock.withLock { storedValue } }
+
+    func increment() {
+        lock.withLock { storedValue += 1 }
+    }
 }
 
 private final class TestListener: SelectionHelperServer.Listener {

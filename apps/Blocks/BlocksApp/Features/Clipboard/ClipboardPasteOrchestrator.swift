@@ -68,12 +68,29 @@ enum ClipboardPluginEventContract {
 }
 
 extension ClipboardFeatureCoordinator {
+    /// A permission refresh is not a new paste gesture. Never replay an old
+    /// target after the user has visited System Settings or another window.
+    func pastePermissionStateDidRefresh(requestToken: UUID? = nil) {
+        guard autoPasteCoordinator.hasEventPostingAccess,
+              let pending = pendingPasteRequest,
+              requestToken == nil || requestToken == pending.token else { return }
+        pendingPasteRequest = nil
+        notificationCoordinator.presentationState.dismiss(deduplicationKey: "clipboard.paste.permission")
+        recordStatus(
+            .ready,
+            title: "status.clipboardPastePermissionReady.title",
+            detail: L10n.string("status.clipboardPastePermissionReady.detail")
+        )
+    }
+
+    // Retained for an explicitly requested retry; permission observers must
+    // only call pastePermissionStateDidRefresh instead.
     func retryPendingPasteIfPossible() {
         retryPendingPasteIfPossible(requestToken: pendingPasteRequest?.token)
     }
 
     private func retryPendingPasteIfPossible(requestToken: UUID?) {
-        guard accessibilityGranted(), let request = pendingPasteRequest,
+        guard autoPasteCoordinator.hasEventPostingAccess, let request = pendingPasteRequest,
               requestToken == nil || request.token == requestToken else {
             return
         }
@@ -401,7 +418,7 @@ extension ClipboardFeatureCoordinator {
                 to: .targetVerifying
             )
             Self.transactionLogger.info(
-                "stage=target-verification-start generation=\(generation) session=\(request.token.uuidString, privacy: .public) record=\(request.recordID, privacy: .public) targetPID=\(request.targetContext?.target.processIdentifier ?? 0) targetBundle=\(request.targetContext?.target.bundleIdentifier ?? "none", privacy: .public) capturedWindow=\(request.targetContext?.focusedWindow != nil) capturedRole=\(request.targetContext?.focusedIdentity?.role ?? "missing", privacy: .public)"
+                "stage=target-verification-start generation=\(generation) session=\(request.token.uuidString, privacy: .public) record=\(request.recordID, privacy: .public) targetPID=\(request.targetContext?.target.processIdentifier ?? 0) targetBundle=\(request.targetContext?.target.bundleIdentifier ?? "none", privacy: .public) targetWindowID=\(request.targetContext?.windowID ?? 0) launchIdentity=\(request.targetContext?.target.launchDate != nil)"
             )
             _ = pasteTransactionState.transition(
                 generation: generation,
@@ -597,7 +614,7 @@ extension ClipboardFeatureCoordinator {
             )
             clipboardStore.pasteAttempt?.failureReason = .notAuthorized
             presentAccessibilityAssist { [weak self, requestToken = request.token] in
-                self?.retryPendingPasteIfPossible(requestToken: requestToken)
+                self?.pastePermissionStateDidRefresh(requestToken: requestToken)
             }
             recordStatus(
                 .failed,
@@ -660,7 +677,7 @@ extension ClipboardFeatureCoordinator {
             pendingPasteRequest = request
             clipboardStore.pasteAttempt?.failureReason = .notAuthorized
             presentAccessibilityAssist { [weak self, requestToken = request.token] in
-                self?.retryPendingPasteIfPossible(requestToken: requestToken)
+                self?.pastePermissionStateDidRefresh(requestToken: requestToken)
             }
             recordStatus(
                 .failed,

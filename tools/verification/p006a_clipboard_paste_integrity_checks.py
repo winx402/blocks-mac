@@ -12,6 +12,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from p9b_clipboard_appstate_repository_integration_checks import body_of
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -69,6 +70,10 @@ def main() -> int:
     broker = read_tree(BROKER)
     core = read_tree(CORE)
     tests = read_tree(APP_TESTS)
+    target_capture = body_of(autopaste, "static func capturePasteTargetContext(")
+    target_validation = body_of(autopaste, "private func focusStillMatchesCapturedTarget(")
+    broker_write = body_of(broker, "private func performMaterializedWrite(")
+    before_clear = broker_write.split("let afterClear = clearPasteboard()", 1)[0]
     broker_boundary = "\n".join(
         read(path)
         for path in sorted(APP.rglob("*.swift"))
@@ -133,12 +138,12 @@ def main() -> int:
             needle in presenter + "\n" + coordinator + "\n" + autopaste
             for needle in [
                 "ClipboardPasteTargetContext",
-                "focusedWindow",
-                "focusedElement",
+                "windowID",
+                "launchDate",
                 "capturePasteTargetContext",
                 "ClipboardExternalTargetTracker",
                 ".nonactivatingPanel",
-                "kAXFocusedWindowAttribute",
+                "frontmostVisibleWindowID",
             ]
         )
         and "restoreTargetFocus" not in autopaste
@@ -149,13 +154,14 @@ def main() -> int:
             "struct PendingPasteRequest",
             "let clipboardStore",
         ),
-        "paste_focus_snapshot_is_diagnostic_only": all(
+        "input_evidence_is_separate_from_window_routing": all(
             needle in autopaste
             for needle in [
                 "struct ClipboardPasteFocusSnapshot",
                 "struct ClipboardPasteFocusIdentity",
                 "chromeAXNodeID",
-                "ChromeAXNodeId",
+                "windowID",
+                "launchDate",
                 "hasTextContentModel",
                 "hasTextSelectionModel",
                 "hasWebAreaAncestor",
@@ -195,7 +201,9 @@ def main() -> int:
             and "ignorePasteboardChange" not in app_source
         ),
         "copy_and_dispatch_are_explicit_async_stages": (
-            "async throws -> ClipboardPasteboardWriteLease" in copy
+            "async throws -> ClipboardAutoPasteCopyResult" in copy
+            and "pasteboardLease: pasteboardLease" in copy
+            and "mayContinueAutomaticPaste:" in copy
             and contains_async_call(copy, "write")
             and "guard let targetContext" not in copy
             and "guard let targetContext" in paste
@@ -216,29 +224,31 @@ def main() -> int:
             for needle in [
                 "ClipboardTargetFrontmostStability",
                 "waitForStableTargetFrontmost",
-                "paste route=preserved-frontmost",
+                "paste route=window-preserving",
                 ".post(tap: .cgSessionEventTap)",
             ]
         )
         and "private static let pasteFallbackMaxWait: TimeInterval = 0.35" in autopaste
         and "requiredConsecutiveMatches: 2" in autopaste
         and "postToPid" not in autopaste,
-        "captured_focus_uses_bounded_ax_semantics_for_diagnostics": (
-            "pasteFocusAncestorLimit = 6" in autopaste
-            and "kAXParentAttribute" in autopaste
-            and "kAXIsEditableAttribute" in autopaste
-            and "kAXSelectedTextAttribute" in autopaste
-            and 'case "AXWebArea"' in autopaste
-            and 'case "AXTextField", "AXTextArea", "AXComboBox", "AXSearchField", "AXTextView"' in autopaste
-            and "enabled != false" in autopaste
-            and "allowUnknownRole" in autopaste
+        "main_routing_works_without_AX_input_access": (
+            "frontmostVisibleWindowID(" in target_capture
+            and "windowID: windowID" in target_capture
+            and "current.windowID == capturedWindow" in target_validation
+            and "current.target == target" in target_validation
+            and "AXUIElementCopyAttributeValue" not in autopaste
+            and "AXIsProcessTrusted" not in autopaste
+            and "captured.focusedElement" not in target_validation
         ),
         "broker_write_is_single_attempt_without_old_item_reads": (
             "NSPasteboardItem" in broker
-            and broker.count("clearContents()") == 1
-            and broker.count("writeObjects(") == 1
+            and broker_write.count("clearPasteboard()") == 1
+            and broker_write.count("writeMaterializedPasteboard(") == 1
+            and "purpose: .target" in broker_write
+            and "purpose: .rollback" not in broker_write
+            and "snapshot(" not in before_clear
+            and "pasteboard.pasteboardItems" not in before_clear
             and "snapshotItems()" not in broker + "\n" + app_source
-            and "pasteboard.pasteboardItems" not in broker
             and "ClipboardPasteboardWriteFailure" not in broker + "\n" + app_source
             and "rollbackSucceeded" not in broker
         ),
