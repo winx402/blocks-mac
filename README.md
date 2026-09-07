@@ -9,9 +9,19 @@
 首版目标为 Apple Silicon / macOS 14+。目前尚未发布可供普通用户下载的官方
 签名、公证安装包，不要把源码构建产物当作正式发行版。
 
-无开发证书的完整 `LocalDevelopment`、统一安装/发布入口、内置 Helper 和
-App 内更新正在实施；没有完成真实验证的能力不会标为可用。现有签名开发流程
-见 [App 开发说明](apps/Blocks/README.md)。源码构建仍需要完整 Xcode。
+`LocalDevelopment`、统一安装/发布入口、内置 Helper 和 App 内更新代码已接入。
+源码版已完成无开发证书构建、安装启动及原地重装验证；完整功能与官方发行仍在验收，
+不会把未验证能力标为通过。源码构建需要完整 Xcode 26+，不需要 Apple 开发证书。
+
+```sh
+git clone https://github.com/winx402/blocks-mac.git
+cd blocks-mac
+./script/dev.sh run
+```
+
+环境检查使用 `./script/dev.sh doctor`，测试使用 `./script/dev.sh test`，
+干净工作树的快进更新与重新运行使用 `./script/dev.sh update`。
+源码版显示为 **Blocks Dev**，不替换正式版或复用正式版数据。
 
 统一入口、身份隔离和迁移边界见 [源码安装与独立发布](docs/技术知识库/源码安装与独立发布.md)。
 
