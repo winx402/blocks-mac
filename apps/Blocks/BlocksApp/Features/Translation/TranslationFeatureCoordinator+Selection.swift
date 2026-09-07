@@ -373,8 +373,18 @@ extension TranslationFeatureCoordinator {
             // window is ordered front. Reading it is asynchronous, so the
             // skeleton can appear immediately without disturbing the source
             // application's selection.
-            let readTask = Task.detached(priority: .userInitiated) {
-                reader.readSelection(from: request)
+            guard let admissionLease =
+                TranslationApplicationOperationAdmission.gate.begin() else {
+                request.cancel()
+                selectionInvocationID = nil
+                finishEntryPresentation(invocationID, outcome: "update-paused")
+                return
+            }
+            let readTask = Task.detached(
+                priority: .userInitiated
+            ) {
+                defer { admissionLease.release() }
+                return reader.readSelection(from: request)
             }
             selectionCaptureExecution =
                 TranslationSelectionCaptureExecution(
@@ -569,7 +579,8 @@ extension TranslationFeatureCoordinator {
         model.beginCompatibilitySelection()
         let requestID = UUID()
         let service = compatibilitySelectionService
-        let task = Task { [weak self, weak model] in
+        guard let task = TranslationApplicationOperationAdmission.gate.task({
+            [weak self, weak model] in
             let result = await service.capture(
                 target: target,
                 requestID: requestID
@@ -619,6 +630,8 @@ extension TranslationFeatureCoordinator {
                 presenters[model.id]?.focus()
                 model.requestSourceFocus()
             }
+        }) else {
+            return
         }
         compatibilitySelectionTasks[model.id] = task
     }

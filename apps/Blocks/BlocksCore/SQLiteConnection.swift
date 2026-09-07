@@ -1,5 +1,6 @@
 import Foundation
 import SQLite3
+import Darwin
 
 private let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
@@ -10,6 +11,8 @@ public enum SQLiteConnectionError: Error, LocalizedError {
     case bindFailed(message: String)
     case stepFailed(message: String)
     case closed
+    case backupFailed(String)
+    case suspendedForApplicationUpdate
 
     public var errorDescription: String? {
         switch self {
@@ -25,6 +28,10 @@ public enum SQLiteConnectionError: Error, LocalizedError {
             return "SQLite step failed: \(message)"
         case .closed:
             return "SQLite connection is closed."
+        case let .backupFailed(message):
+            return "SQLite backup failed: \(message)"
+        case .suspendedForApplicationUpdate:
+            return "Database operations are paused while the application prepares to update."
         }
     }
 }
@@ -40,17 +47,32 @@ enum SQLiteBinding {
 }
 
 public final class SQLiteConnection: @unchecked Sendable {
+    private final class WeakConnection {
+        weak var value: SQLiteConnection?
+        init(_ value: SQLiteConnection) { self.value = value }
+    }
+    private static let registryLock = NSLock()
+    private static var registry: [WeakConnection] = []
+    private static var openingSuspended = false
+    private static var fencedConnections: [SQLiteConnection] = []
+    private static var updateBackupURLs: [URL] = []
     public let url: URL
     private let lock = NSRecursiveLock()
     private var handle: OpaquePointer?
     private var transactionDepth = 0
+    private var updateSuspended = false
 
-    public init(url: URL) throws {
+    public init(url: URL, readOnly: Bool = false) throws {
         self.url = url
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        Self.registryLock.lock()
+        defer { Self.registryLock.unlock() }
+        guard !Self.openingSuspended else { throw SQLiteConnectionError.suspendedForApplicationUpdate }
+        if !readOnly {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        }
 
         var database: OpaquePointer?
-        let flags = SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
+        let flags = (readOnly ? SQLITE_OPEN_READONLY : SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE) | SQLITE_OPEN_FULLMUTEX
         let result = sqlite3_open_v2(url.path, &database, flags, nil)
         guard result == SQLITE_OK, let database else {
             let message = database.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
@@ -61,10 +83,14 @@ public final class SQLiteConnection: @unchecked Sendable {
         }
         handle = database
 
-        try execute("PRAGMA journal_mode=WAL")
-        try execute("PRAGMA foreign_keys=ON")
         try execute("PRAGMA busy_timeout=5000")
-        try execute("PRAGMA synchronous=NORMAL")
+        if !readOnly {
+            try execute("PRAGMA journal_mode=WAL")
+            try execute("PRAGMA foreign_keys=ON")
+            try execute("PRAGMA synchronous=NORMAL")
+        }
+        Self.registry.removeAll { $0.value == nil }
+        Self.registry.append(WeakConnection(self))
     }
 
     deinit {
@@ -74,14 +100,129 @@ public final class SQLiteConnection: @unchecked Sendable {
     public func close() {
         lock.withLock {
             if let handle {
-                sqlite3_close(handle)
-                self.handle = nil
+                // A live statement must not make us forget an unclosed handle.
+                // close_v2 defers physical closure until outstanding statements
+                // finish, rather than silently leaking a SQLITE_BUSY handle.
+                if sqlite3_close_v2(handle) == SQLITE_OK {
+                    self.handle = nil
+                }
             }
+        }
+    }
+
+    /// Call only after every business producer has closed admission and drained.
+    /// This is the final storage barrier, not a substitute for producer drains.
+    /// It closes admission on every live connection before taking snapshots.
+    public static func prepareForApplicationUpdate(createBackups: Bool = true) throws -> [URL] {
+        let connections: [SQLiteConnection] = try registryLock.withLock {
+            guard !openingSuspended else { throw SQLiteConnectionError.suspendedForApplicationUpdate }
+            openingSuspended = true
+            return registry.compactMap(\.value)
+        }
+        do {
+            var live: [SQLiteConnection] = []
+            for connection in connections {
+                connection.lock.withLock {
+                    if connection.handle != nil {
+                        connection.updateSuspended = true
+                        live.append(connection)
+                    }
+                }
+            }
+            var paths: Set<String> = []
+            var backups: [URL] = []
+            for connection in live where createBackups && paths.insert(connection.url.standardizedFileURL.path).inserted {
+                let directory = connection.url.deletingLastPathComponent()
+                    .appendingPathComponent("UpdateBackups", isDirectory: true)
+                    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                    attributes: [.posixPermissions: 0o700])
+                let destination = directory.appendingPathComponent(connection.url.lastPathComponent)
+                try connection.backup(to: destination)
+                backups.append(destination)
+            }
+            registryLock.withLock {
+                fencedConnections = live
+                updateBackupURLs = backups
+            }
+            return backups
+        } catch {
+            for connection in connections { connection.lock.withLock { connection.updateSuspended = false } }
+            registryLock.withLock { openingSuspended = false }
+            throw error
+        }
+    }
+
+    public static func resumeAfterCancelledApplicationUpdate() {
+        let connections = registryLock.withLock { fencedConnections }
+        for connection in connections { connection.lock.withLock { connection.updateSuspended = false } }
+        registryLock.withLock {
+            fencedConnections.removeAll()
+            updateBackupURLs.removeAll()
+            openingSuspended = false
+        }
+    }
+
+    public static func closePreparedApplicationConnections() {
+        let connections = registryLock.withLock { fencedConnections }
+        for connection in connections { connection.close() }
+        registryLock.withLock { fencedConnections.removeAll() }
+    }
+
+    /// SQLite's backup API copies a committed snapshot, including WAL contents.
+    /// Never replace a user's existing backup or copy an active database file.
+    public func backup(to destination: URL) throws {
+        try lock.withLock {
+            guard let handle else { throw SQLiteConnectionError.closed }
+            guard transactionDepth == 0 else {
+                throw SQLiteConnectionError.backupFailed("cannot back up an active write transaction")
+            }
+            let descriptor = Darwin.open(destination.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+            guard descriptor >= 0 else {
+                throw SQLiteConnectionError.backupFailed("destination must be a new writable file")
+            }
+            Darwin.close(descriptor)
+            var completed = false
+            defer {
+                if !completed { try? FileManager.default.removeItem(at: destination) }
+            }
+            var target: OpaquePointer?
+            let openResult = sqlite3_open_v2(destination.path, &target, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil)
+            guard openResult == SQLITE_OK, let target else {
+                if let target { sqlite3_close_v2(target) }
+                throw SQLiteConnectionError.backupFailed("cannot open the reserved destination")
+            }
+            defer { sqlite3_close_v2(target) }
+            guard let backup = sqlite3_backup_init(target, "main", handle, "main") else {
+                throw SQLiteConnectionError.backupFailed(String(cString: sqlite3_errmsg(target)))
+            }
+            var result: Int32
+            var busyAttempts = 0
+            let deadline = ProcessInfo.processInfo.systemUptime + 5
+            repeat {
+                result = sqlite3_backup_step(backup, 128)
+                if result == SQLITE_BUSY || result == SQLITE_LOCKED {
+                    busyAttempts += 1
+                    if busyAttempts < 50 { sqlite3_sleep(10) }
+                }
+            } while ProcessInfo.processInfo.systemUptime < deadline
+                && (result == SQLITE_OK || ((result == SQLITE_BUSY || result == SQLITE_LOCKED) && busyAttempts < 50))
+            let finishResult = sqlite3_backup_finish(backup)
+            guard result == SQLITE_DONE, finishResult == SQLITE_OK else {
+                throw SQLiteConnectionError.backupFailed("snapshot did not complete (\(result), \(finishResult))")
+            }
+            // The source header may select WAL. Normalize the independent
+            // snapshot to a standalone rollback-journal database before close.
+            guard sqlite3_exec(target, "PRAGMA journal_mode=DELETE", nil, nil, nil) == SQLITE_OK else {
+                throw SQLiteConnectionError.backupFailed("cannot finalize standalone snapshot")
+            }
+            completed = true
         }
     }
 
     func execute(_ sql: String) throws {
         try lock.withLock {
+            guard !updateSuspended else { throw SQLiteConnectionError.suspendedForApplicationUpdate }
             guard let handle else {
                 throw SQLiteConnectionError.closed
             }
@@ -162,6 +303,7 @@ public final class SQLiteConnection: @unchecked Sendable {
 
     func prepare(_ sql: String) throws -> SQLiteStatement {
         try lock.withLock {
+            guard !updateSuspended else { throw SQLiteConnectionError.suspendedForApplicationUpdate }
             guard let handle else {
                 throw SQLiteConnectionError.closed
             }

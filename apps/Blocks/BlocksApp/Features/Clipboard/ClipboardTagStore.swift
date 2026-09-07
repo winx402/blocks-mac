@@ -102,21 +102,38 @@ struct ClipboardPluginEnsureTagAttachment: Sendable {
 private final class ClipboardTagMutationPipeline: @unchecked Sendable {
     private let repository: ClipboardRepository
     private let executor: ClipboardRepositoryMutationExecutor
+    private let applicationUpdateGate: ApplicationOperationAdmissionGate
     private var operationRevision: UInt64 = 0
 
     init(
         repository: ClipboardRepository,
-        executor: ClipboardRepositoryMutationExecutor
+        executor: ClipboardRepositoryMutationExecutor,
+        applicationUpdateGate: ApplicationOperationAdmissionGate
     ) {
         self.repository = repository
         self.executor = executor
+        self.applicationUpdateGate = applicationUpdateGate
     }
 
     func perform(
         recordIDs: [String],
         operation: @escaping @Sendable (ClipboardTagRepository) throws -> ClipboardTagRepositoryMutation
     ) async -> ClipboardTagRepositoryMutationOutcome {
-        await withCheckedContinuation { continuation in
+        guard let lease = applicationUpdateGate.begin() else {
+            // Rejected work still receives an ordered outcome, but never
+            // touches the repository. The revision is owned by the executor.
+            return await withCheckedContinuation { continuation in
+                executor.enqueue {
+                    self.operationRevision &+= 1
+                    continuation.resume(returning: .failed(
+                        revision: self.operationRevision,
+                        error: .repositoryUnavailable
+                    ))
+                }
+            }
+        }
+        defer { lease.release() }
+        return await withCheckedContinuation { continuation in
             executor.enqueue { [repository] in
                 let tagRepository = ClipboardTagRepository(repository: repository)
                 self.operationRevision &+= 1
@@ -160,23 +177,27 @@ final class ClipboardTagStore: ObservableObject {
 
     private let repository: ClipboardRepository?
     private let mutationPipeline: ClipboardTagMutationPipeline?
+    private let applicationUpdateGate: ApplicationOperationAdmissionGate
     private var lastRecordIDs: [String] = []
     private var lastAppliedMutationRevision: UInt64 = 0
     private let normalizer = ClipboardTagNameNormalizer()
 
     init(
         repository: ClipboardRepository?,
-        mutationExecutor: ClipboardRepositoryMutationExecutor? = nil
+        mutationExecutor: ClipboardRepositoryMutationExecutor? = nil,
+        applicationUpdateGate: ApplicationOperationAdmissionGate = ApplicationOperationAdmissionGate(name: "Clipboard tags")
     ) {
         precondition(
             repository == nil || mutationExecutor != nil,
             "Repository-backed clipboard tags require the shared mutation executor."
         )
         self.repository = repository
+        self.applicationUpdateGate = applicationUpdateGate
         if let repository, let mutationExecutor {
             self.mutationPipeline = ClipboardTagMutationPipeline(
                 repository: repository,
-                executor: mutationExecutor
+                executor: mutationExecutor,
+                applicationUpdateGate: applicationUpdateGate
             )
         } else {
             self.mutationPipeline = nil
@@ -997,6 +1018,10 @@ final class ClipboardTagStore: ObservableObject {
     }
 
     private func performInMemory(_ operation: () throws -> ClipboardTagMutationResult) -> Bool {
+        guard let lease = applicationUpdateGate.begin() else {
+            return false
+        }
+        defer { lease.release() }
         do {
             let result = try operation()
             lastMutationResult = result

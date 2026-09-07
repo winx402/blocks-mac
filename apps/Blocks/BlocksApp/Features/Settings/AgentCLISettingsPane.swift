@@ -1,4 +1,5 @@
 import AppKit
+import BlocksCore
 import CryptoKit
 import Darwin
 import Foundation
@@ -600,7 +601,7 @@ struct BlocksCLIOperationJournalStore: @unchecked Sendable {
             .appendingPathComponent("Library/Application Support", isDirectory: true)
         return durable(
             fileURL: applicationSupport
-                .appendingPathComponent("Blocks", isDirectory: true)
+                .appendingPathComponent(BlocksRuntimeIdentity.applicationSupportDirectoryName, isDirectory: true)
                 .appendingPathComponent("State", isDirectory: true)
                 .appendingPathComponent("agent-cli-operation-journal-v1.json"),
             defaults: defaults,
@@ -662,7 +663,7 @@ struct BlocksCLIInstallationRecordStore: @unchecked Sendable {
             .appendingPathComponent("Library/Application Support", isDirectory: true)
         return durable(
             fileURL: applicationSupport
-                .appendingPathComponent("Blocks", isDirectory: true)
+                .appendingPathComponent(BlocksRuntimeIdentity.applicationSupportDirectoryName, isDirectory: true)
                 .appendingPathComponent("State", isDirectory: true)
                 .appendingPathComponent("agent-cli-installation-record-v1.json"),
             defaults: defaults,
@@ -1963,7 +1964,8 @@ final class BlocksCLIInstallationController: ObservableObject {
         self.beforeJournalRecovery = beforeJournalRecovery
         self.sourceURLProvider = sourceURLProvider ?? {
             guard let resourcesDirectory = bundle.resourceURL else { return nil }
-            return resourcesDirectory.appendingPathComponent("CLI", isDirectory: true).appendingPathComponent("blocks")
+            return resourcesDirectory.appendingPathComponent("CLI", isDirectory: true)
+                .appendingPathComponent(BlocksRuntimeIdentity.isLocalDevelopment ? "blocks-dev" : "blocks")
         }
         self.worker = BlocksCLIInstallationWorker(
             digest: digest,
@@ -2307,7 +2309,7 @@ final class BlocksCLIInstallationController: ObservableObject {
         let panel = NSSavePanel()
         panel.title = L10n.string("settings.agentCLI.install.panelTitle")
         panel.prompt = L10n.string("settings.agentCLI.install.button")
-        panel.nameFieldStringValue = "blocks"
+        panel.nameFieldStringValue = BlocksRuntimeIdentity.isLocalDevelopment ? "blocks-dev" : "blocks"
         panel.canCreateDirectories = true
         panel.isExtensionHidden = true
         let defaultDirectory = FileManager.default.homeDirectoryForCurrentUser

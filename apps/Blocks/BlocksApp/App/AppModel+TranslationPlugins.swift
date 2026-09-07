@@ -122,7 +122,7 @@ extension AppModel {
             }
             .store(in: &cancellables)
         refreshTranslationPluginRuntime()
-        Task { @MainActor [weak self] in
+        applicationOperationGate.task { @MainActor [weak self] in
             guard let self else { return }
             await translationPluginManager.reload()
             guard !Task.isCancelled,
@@ -141,7 +141,7 @@ extension AppModel {
 
     func refreshTranslationPluginRuntime() {
         translationPluginRefreshTask?.cancel()
-        translationPluginRefreshTask = Task { @MainActor [weak self] in
+        translationPluginRefreshTask = applicationOperationGate.task { @MainActor [weak self] in
             guard let self else { return }
             var translationAdapters: [any TranslationServiceAdapter] = []
             var runtimeFailures: [BlocksNativePluginRuntimeLoadFailure] = []

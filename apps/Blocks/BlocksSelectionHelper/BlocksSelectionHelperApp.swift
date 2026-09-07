@@ -1423,19 +1423,11 @@ final class SelectionHelperBootstrapKeyStore:
     }
 
     private func keychainQuery() -> [String: Any]? {
-        guard let accessGroup =
-                SelectionHelperSharedKeychainAccessGroup.current() else {
-            return nil
-        }
-        return [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String:
-                BlocksSelectionHelperProtocol.bootstrapKeychainService,
-            kSecAttrAccount as String:
-                BlocksSelectionHelperProtocol.bootstrapKeychainAccount,
-            kSecAttrAccessGroup as String: accessGroup,
-            kSecUseDataProtectionKeychain as String: true,
-        ]
+        BlocksKeychainNamespace.helperQuery(
+            service: BlocksSelectionHelperProtocol.bootstrapKeychainService,
+            account: BlocksSelectionHelperProtocol.bootstrapKeychainAccount,
+            accessGroup: SelectionHelperSharedKeychainAccessGroup.current()
+        )
     }
 }
 
@@ -1646,16 +1638,9 @@ final class SelectionHelperKeyStore: SelectionHelperKeyStoring {
         service: String,
         account: String
     ) -> [String: Any]? {
-        guard let accessGroup = accessGroupProvider() else {
-            return nil
-        }
-        return [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecAttrAccessGroup as String: accessGroup,
-            kSecUseDataProtectionKeychain as String: true,
-        ]
+        BlocksKeychainNamespace.helperQuery(
+            service: service, account: account, accessGroup: accessGroupProvider()
+        )
     }
 
     private func deleteLegacyActiveKey() {
@@ -1828,6 +1813,42 @@ final class SelectionHelperServer:
     private var activeResponseSenders:
         [UUID: SelectionHelperResponseFrameSender] = [:]
     private var responseSenderAdmission: ResponseSenderAdmission
+    private let applicationUpdateGate = ApplicationOperationAdmissionGate(name: "Selection Helper requests")
+    // These flags are confined to `queue`, just like authenticated commands.
+    private var preparedForApplicationUpdate = false
+    private var terminationRequestGeneration: UInt64 = 0
+
+    func beginUserOperation() -> ApplicationOperationAdmissionGate.Lease? { applicationUpdateGate.begin() }
+
+    func prepareForNormalTermination() -> Bool {
+        queue.sync {
+            guard responseSenderAdmission.count == 0 else { return false }
+            do {
+                try applicationUpdateGate.pauseIfIdle()
+                preparedForApplicationUpdate = true
+                return true
+            } catch { return false }
+        }
+    }
+
+    private func requestTerminationAfterResponsesFinish(generation: UInt64) {
+        queue.asyncAfter(deadline: .now() + .milliseconds(50)) { [weak self] in
+            guard let self, self.preparedForApplicationUpdate,
+                  self.terminationRequestGeneration == generation else { return }
+            guard self.responseSenderAdmission.count == 0,
+                  self.applicationUpdateGate.activeOperationCount == 0 else {
+                self.requestTerminationAfterResponsesFinish(generation: generation)
+                return
+            }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let authorized = self.queue.sync {
+                    self.preparedForApplicationUpdate && self.terminationRequestGeneration == generation
+                }
+                if authorized { NSApp.terminate(nil) }
+            }
+        }
+    }
 
     init(
         pairingCode: String,
@@ -1859,6 +1880,7 @@ final class SelectionHelperServer:
     @discardableResult
     func updatePairingCode(_ code: String) -> UInt64 {
         queue.sync {
+            guard applicationUpdateGate.isAcceptingOperations else { return pairingGeneration }
             pairingGeneration &+= 1
             pairingCode = code
             return pairingGeneration
@@ -1869,7 +1891,9 @@ final class SelectionHelperServer:
     func resetPairing(
         _ code: String
     ) -> Result<UInt64, SelectionHelperPairingResetFailure> {
-        queue.sync {
+        guard let lease = applicationUpdateGate.begin() else { return .failure(.keyDeletionFailed) }
+        defer { lease.release() }
+        return queue.sync {
             // This runs on the same serial queue as pairing and authenticated
             // commands, so an in-flight pairing cannot restore the old key.
             guard keyStore.delete() else {
@@ -1885,6 +1909,8 @@ final class SelectionHelperServer:
     }
 
     func disconnectPairedClient() -> Bool {
+        guard let operationLease = applicationUpdateGate.begin() else { return false }
+        defer { operationLease.release() }
         guard keyStore.replaceActiveKeyWithDisconnectTombstone(
             expiresAt: Date().addingTimeInterval(
                 BlocksSelectionHelperProtocol
@@ -1895,7 +1921,9 @@ final class SelectionHelperServer:
         }
         recentSuccessfulPairReply = nil
         let pairingGeneration = self.pairingGeneration
+        let notificationLease = applicationUpdateGate.begin()
         Task { @MainActor in
+            defer { notificationLease?.release() }
             pairingHandler(false, pairingGeneration)
         }
         return true
@@ -2095,6 +2123,8 @@ final class SelectionHelperServer:
     private func handlePair(
         _ packet: SelectionHelperWirePacket
     ) -> Data? {
+        guard let lease = applicationUpdateGate.begin() else { return nil }
+        defer { lease.release() }
         guard let request = try? JSONDecoder().decode(
             SelectionHelperPairRequest.self,
             from: packet.payload
@@ -2198,7 +2228,9 @@ final class SelectionHelperServer:
             response: responseData,
             expiresAt: now().addingTimeInterval(pairReplyReplayLifetime)
         )
+        let notificationLease = applicationUpdateGate.begin()
         Task { @MainActor in
+            defer { notificationLease?.release() }
             pairingHandler(true, pairingGeneration)
         }
         return responseData
@@ -2286,6 +2318,43 @@ final class SelectionHelperServer:
         completion:
             @escaping (SelectionHelperCommandResponse) -> Void
     ) {
+        // Only authenticated active-key messages can reach these controls.
+        // They never delete the active key, bootstrap key, or pairing state.
+        switch command.kind {
+        case .prepareForApplicationUpdate:
+            do {
+                try applicationUpdateGate.pauseIfIdle()
+                preparedForApplicationUpdate = true
+                completion(.init(booleanValue: true))
+            } catch { completion(.init(booleanValue: false, failureCode: "helper_busy")) }
+            return
+        case .resumeAfterCancelledApplicationUpdate:
+            terminationRequestGeneration &+= 1
+            preparedForApplicationUpdate = false
+            applicationUpdateGate.resume()
+            completion(.init(booleanValue: true))
+            return
+        case .terminateForApplicationUpdate:
+            guard preparedForApplicationUpdate,
+                  applicationUpdateGate.activeOperationCount == 0 else {
+                completion(.init(booleanValue: false, failureCode: "helper_not_prepared"))
+                return
+            }
+            terminationRequestGeneration &+= 1
+            completion(.init(booleanValue: true))
+            requestTerminationAfterResponsesFinish(generation: terminationRequestGeneration)
+            return
+        default: break
+        }
+        guard let lease = applicationUpdateGate.begin() else {
+            completion(.init(failureCode: "application_update_preparing"))
+            return
+        }
+        let originalCompletion = completion
+        let completion: (SelectionHelperCommandResponse) -> Void = { response in
+            defer { lease.release() }
+            originalCompletion(response)
+        }
         switch command.kind {
         case .health:
             completion(
@@ -2301,6 +2370,7 @@ final class SelectionHelperServer:
                         capabilities: [
                             BlocksSelectionHelperProtocol
                                 .pasteTargetInspectionCapability,
+                            BlocksSelectionHelperProtocol.updateLifecycleCapability,
                         ]
                     )
                 )
@@ -2370,6 +2440,8 @@ final class SelectionHelperServer:
                     booleanValue: disconnectPairedClient()
                 )
             )
+        case .prepareForApplicationUpdate, .resumeAfterCancelledApplicationUpdate, .terminateForApplicationUpdate:
+            completion(.init(failureCode: "invalid_lifecycle_command"))
         }
     }
 
@@ -2528,6 +2600,7 @@ private final class SelectionHelperAppModel:
     @Published var launchAtLogin = false
 
     private var server: SelectionHelperServer?
+    func prepareForApplicationTermination() -> Bool { server?.prepareForNormalTermination() ?? true }
     private var pairingGeneration: UInt64 = 0
 
     private init() {
@@ -2562,6 +2635,8 @@ private final class SelectionHelperAppModel:
     }
 
     func requestPermission() {
+        guard let lease = server?.beginUserOperation() else { return }
+        defer { lease.release() }
         let options = [
             kAXTrustedCheckOptionPrompt
                 .takeUnretainedValue() as String: true,
@@ -2571,6 +2646,8 @@ private final class SelectionHelperAppModel:
     }
 
     func setLaunchAtLogin(_ enabled: Bool) {
+        guard let lease = server?.beginUserOperation() else { return }
+        defer { lease.release() }
         do {
             if enabled {
                 try SMAppService.mainApp.register()
@@ -2922,6 +2999,11 @@ private final class SelectionHelperAppDelegate: NSObject, NSApplicationDelegate 
         _ sender: NSApplication
     ) -> Bool {
         false
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !isRunningUnitTests else { return .terminateNow }
+        return model.prepareForApplicationTermination() ? .terminateNow : .terminateCancel
     }
 
     private func presentWindow() {

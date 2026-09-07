@@ -16,14 +16,24 @@ require_signature=0
 expected_team_id=""
 expected_authority=""
 expected_cert_sha1="${BLOCKS_EXPECTED_SIGNING_CERT_SHA1:-}"
+expected_version=""
+expected_build=""
+expected_release_name=""
 while (($#)); do case "$1" in
   --require-signature) require_signature=1; shift ;;
   --expected-team-id) expected_team_id="${2:-}"; shift 2 ;;
   --expected-authority) expected_authority="${2:-}"; shift 2 ;;
   --expected-cert-sha1) expected_cert_sha1="${2:-}"; shift 2 ;;
+  --expected-version) expected_version="${2:-}"; shift 2 ;;
+  --expected-build) expected_build="${2:-}"; shift 2 ;;
+  --expected-release-name) expected_release_name="${2:-}"; shift 2 ;;
   *) echo "error: unknown argument: $1" >&2; exit 2 ;;
 esac; done
 
+if [[ -n "$expected_version$expected_build$expected_release_name" ]] && ! [[ "$expected_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$expected_build" =~ ^[1-9][0-9]*$ && "$expected_release_name" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*$ ]]; then
+  echo "error: --expected-version, --expected-build, and --expected-release-name must be supplied together and valid" >&2
+  exit 2
+fi
 if ((require_signature)) && [[ -z "$expected_authority" ]]; then
   echo "error: --require-signature requires an explicit non-empty --expected-authority" >&2
   usage
@@ -73,8 +83,8 @@ url_scheme="$(plutil -extract CFBundleURLTypes.0.CFBundleURLSchemes.0 raw "$info
   echo "error: expected Helper minimum macOS 14.0, got: $minimum_system" >&2
   exit 1
 }
-[[ "$channel" == "direct-beta" ]] || {
-  echo "error: expected direct-beta Helper channel, got: $channel" >&2
+[[ "$channel" == "direct-beta" || "$channel" == "direct-stable" ]] || {
+  echo "error: expected direct-beta or direct-stable Helper channel, got: $channel" >&2
   exit 1
 }
 [[ "$bundle_identifier" == "app.blocks.selection-helper" ]] || {
@@ -86,7 +96,7 @@ url_scheme="$(plutil -extract CFBundleURLTypes.0.CFBundleURLSchemes.0 raw "$info
   exit 1
 }
 
-# Packaging validates this checkout's release identity. Runtime compatibility
+# Packaging validates the requested release identity. Runtime compatibility
 # remains governed by the authenticated Helper protocol, not marketing labels.
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 release_profile="$repo_root/apps/Blocks/Config/Distribution.DirectBeta.xcconfig"
@@ -99,14 +109,31 @@ read_release_value() {
     END { if (count != 1 || invalid || value == "") exit 1; print value }
   ' "$release_profile"
 }
-expected_version="$(read_release_value MARKETING_VERSION)" \
-  && expected_build="$(read_release_value CURRENT_PROJECT_VERSION)" \
-  && expected_release="$(read_release_value BLOCKS_RELEASE_NAME)" \
-  || { echo "error: Helper release profile identity is missing or ambiguous" >&2; exit 1; }
+if [[ -z "$expected_version" ]]; then
+  if [[ "$channel" == "direct-stable" ]]; then
+    expected_version="$(/usr/bin/plutil -extract CFBundleShortVersionString raw -expect string "$info_plist")"
+    expected_build="$(/usr/bin/plutil -extract CFBundleVersion raw -expect string "$info_plist")"
+    expected_release_name="$(/usr/bin/plutil -extract BLOCKS_RELEASE_NAME raw -expect string "$info_plist")"
+  else
+    expected_version="$(read_release_value MARKETING_VERSION)" \
+      && expected_build="$(read_release_value CURRENT_PROJECT_VERSION)" \
+      && expected_release_name="$(read_release_value BLOCKS_RELEASE_NAME)" \
+      || { echo "error: Helper release profile identity is missing or ambiguous" >&2; exit 1; }
+  fi
+fi
 [[ "$expected_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ \
    && "$expected_build" =~ ^[0-9]+$ \
-   && "$expected_release" =~ ^[0-9A-Za-z][0-9A-Za-z._-]*$ ]] \
+   && "$expected_release_name" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*$ ]] \
   || { echo "error: Helper release profile identity is invalid" >&2; exit 1; }
+/usr/bin/python3 - "$repo_root" "$expected_release_name" "$expected_version" "$expected_build" "$channel" <<'PY' \
+  || { echo "error: Helper release name, version/build, and channel are inconsistent" >&2; exit 1; }
+import sys
+sys.path.insert(0, sys.argv[1] + "/script/release")
+from release_versioning import validate_bundle_version
+parsed = validate_bundle_version("v" + sys.argv[2], sys.argv[2], sys.argv[3], sys.argv[4])
+if sys.argv[5] != ("direct-beta" if parsed.is_prerelease else "direct-stable"):
+    raise ValueError("Helper channel does not match SemVer prerelease state")
+PY
 verify_release_field() {
   local actual
   # Keep a sentinel while capturing output so shell substitution cannot strip
@@ -118,7 +145,7 @@ verify_release_field() {
 }
 verify_release_field CFBundleShortVersionString "$expected_version"
 verify_release_field CFBundleVersion "$expected_build"
-verify_release_field BLOCKS_RELEASE_NAME "$expected_release"
+verify_release_field BLOCKS_RELEASE_NAME "$expected_release_name"
 
 if ((require_signature)); then
   [[ "$expected_team_id" =~ ^[A-Z0-9]{10}$ ]] || { echo "error: --expected-team-id must be the explicit 10-character Apple Team ID" >&2; exit 2; }
@@ -178,11 +205,11 @@ if ((require_signature)); then
   fi
 fi
 
-echo "PASS: direct-beta Selection Helper bundle audit"
+echo "PASS: $channel Selection Helper bundle audit"
 echo "app=$app_bundle"
 echo "architecture=$architectures"
 echo "minimum_system=$minimum_system"
 echo "bundle_identifier=$bundle_identifier"
 echo "version=$expected_version"
 echo "build=$expected_build"
-echo "release_name=$expected_release"
+echo "release_name=$expected_release_name"

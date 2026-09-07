@@ -7,6 +7,8 @@ BLOCKS_SELECTION_HELPER_DOWNLOAD_URL = https:/$()/downloads.orangeforge.top/beta
 BLOCKS_RELEASE_PAGE_URL = https:/$()/blocks.orangeforge.top/releases/
 BLOCKS_SUPPORT_URL = https:/$()/blocks.orangeforge.top/support/
 BLOCKS_PRIVACY_URL = https:/$()/blocks.orangeforge.top/privacy/
+BLOCKS_UPDATE_FEED_URL = https:/$()/winx402.github.io/blocks-mac/appcast/stable.xml
+BLOCKS_SPARKLE_PUBLIC_KEY = ghXr46h3DqsfqMwzwHDrsAwh4M4aTVxD9rcsndtFrt0=
 
 ARCHS = arm64
 ONLY_ACTIVE_ARCH = NO

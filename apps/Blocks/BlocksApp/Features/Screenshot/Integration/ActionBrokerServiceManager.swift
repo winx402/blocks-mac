@@ -2,6 +2,7 @@ import BlocksCore
 import Combine
 import Foundation
 import ServiceManagement
+import Darwin
 
 struct ActionBrokerEmbeddedServiceValidator {
     let bundleURL: URL
@@ -43,21 +44,27 @@ struct ActionBrokerServiceControl {
     let status: () -> SMAppService.Status
     let register: () throws -> Void
     let unregister: () throws -> Void
+    let unregisterAndWait: () async throws -> Void
 
     init(service: SMAppService) {
         status = { service.status }
         register = { try service.register() }
         unregister = { try service.unregister() }
+        // The async SMAppService variant completes after the running job has
+        // been killed; the synchronous variant explicitly does not wait.
+        unregisterAndWait = { try await service.unregister() }
     }
 
     init(
         status: @escaping () -> SMAppService.Status,
         register: @escaping () throws -> Void,
-        unregister: @escaping () throws -> Void
+        unregister: @escaping () throws -> Void,
+        unregisterAndWait: (() async throws -> Void)? = nil
     ) {
         self.status = status
         self.register = register
         self.unregister = unregister
+        self.unregisterAndWait = unregisterAndWait ?? { try unregister() }
     }
 }
 
@@ -110,6 +117,57 @@ final class ActionBrokerServiceManager: ObservableObject {
     private var hostIsActive = false
     private var retryAttempt = 0
     private var reconnectTask: AnyCancellable?
+    private var applicationUpdatePaused = false
+    private let applicationManagementGate = ApplicationOperationAdmissionGate(name: "Action Broker management")
+    private let updateRecoveryJournal: ActionBrokerUpdateRecoveryJournal
+    private let updateRecoveryStorageAvailable: Bool
+    private let runningBrokerProcessIDs: () throws -> [Int32]
+    private let processHasExited: (Int32) -> Bool
+    private var updateRecoveryTicket: ActionBrokerUpdateRecoveryTicket?
+    private var updateRecoveryTask: Task<Void, Never>?
+    private var updateRecoveryFailureMessage: String?
+
+    func prepareForApplicationUpdate(stopService: Bool = true) async throws {
+        try applicationManagementGate.pauseIfIdle()
+        applicationUpdatePaused = true
+        try await host.pauseAndDrainForApplicationUpdate()
+        guard stopService else { return }
+        guard updateRecoveryStorageAvailable else { throw ActionBrokerUpdateError.invalidRecoveryState }
+        guard try updateRecoveryJournal.load() == nil else { throw ActionBrokerUpdateError.invalidRecoveryState }
+        guard service.status() == .enabled else {
+            // An unregistered/approval-denied job cannot launch on demand, but
+            // do not ignore an already lingering binary from an older install.
+            guard try runningBrokerProcessIDs().isEmpty else { throw ActionBrokerUpdateError.serviceDidNotStop }
+            return
+        }
+        var ticket = ActionBrokerUpdateRecoveryTicket()
+        updateRecoveryTicket = ticket
+        // Persist enabled intent before the first remote pause or SM mutation.
+        try updateRecoveryJournal.save(ticket)
+        ticket.processID = try await host.prepareBrokerForApplicationUpdate(token: ticket.token)
+        updateRecoveryTicket = ticket
+        try updateRecoveryJournal.save(ticket)
+        try Task.checkCancellation()
+        // The Broker has atomically closed all submit/cancel/register admission
+        // and proved zero active requests. Only now is stopping its job safe.
+        try await service.unregisterAndWait()
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while ContinuousClock.now < deadline {
+            let registrationRemoved = service.status() == .notRegistered || service.status() == .notFound
+            if registrationRemoved, let processID = ticket.processID, processHasExited(processID),
+               try runningBrokerProcessIDs().isEmpty {
+                cancelReconnectAndStopHost()
+                isServiceRegistered = false
+                return
+            }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        throw ActionBrokerUpdateError.serviceDidNotStop
+    }
+
+    func resumeAfterCancelledApplicationUpdate() async {
+        await restoreServiceAfterUpdate()
+    }
 
     init(
         screenshotStore: ScreenshotStore,
@@ -129,7 +187,13 @@ final class ActionBrokerServiceManager: ObservableObject {
         )
         retryPolicy = .default
         retryScheduler = Self.liveRetryScheduler
-        refresh()
+        let storage = try? StorageEnvironment.appSupport()
+        updateRecoveryStorageAvailable = storage != nil
+        updateRecoveryJournal = ActionBrokerUpdateRecoveryJournal(url: storage?.rootDirectory
+            .appendingPathComponent("ActionBrokerUpdateRecovery.json"))
+        runningBrokerProcessIDs = Self.currentBrokerProcessIDs
+        processHasExited = { kill($0, 0) != 0 && errno == ESRCH }
+        if !beginStartupUpdateRecoveryIfNeeded() { refresh() }
     }
 
     /// Test seam: exercises the registration and retry state machine without
@@ -139,25 +203,101 @@ final class ActionBrokerServiceManager: ObservableObject {
         host: some ActionBrokerHosting,
         embeddedServiceAvailable: Bool = true,
         retryPolicy: ActionBrokerRetryPolicy = .default,
-        retryScheduler: @escaping ActionBrokerRetryScheduler
+        retryScheduler: @escaping ActionBrokerRetryScheduler,
+        updateRecoveryJournal: ActionBrokerUpdateRecoveryJournal = .init(),
+        runningBrokerProcessIDs: @escaping () throws -> [Int32] = { [] },
+        processHasExited: @escaping (Int32) -> Bool = { _ in true }
     ) {
         self.service = service
         self.host = host
         self.embeddedServiceAvailable = embeddedServiceAvailable
         self.retryPolicy = retryPolicy
         self.retryScheduler = retryScheduler
-        refresh()
+        self.updateRecoveryJournal = updateRecoveryJournal
+        self.updateRecoveryStorageAvailable = true
+        self.runningBrokerProcessIDs = runningBrokerProcessIDs
+        self.processHasExited = processHasExited
+        if !beginStartupUpdateRecoveryIfNeeded() { refresh() }
     }
 
     deinit {
         reconnectTask?.cancel()
     }
 
-    /// This remains the Switch value: it reports LaunchAgent registration, not
-    /// whether the App host has completed its independent XPC registration.
-    var isEnabled: Bool { isServiceRegistered }
+    /// Temporary update unregistration must not turn the user's enabled
+    /// preference off. The journal preserves that intent across app relaunch.
+    var isEnabled: Bool { isServiceRegistered || updateRecoveryTicket != nil }
+
+    private func beginStartupUpdateRecoveryIfNeeded() -> Bool {
+        do {
+            guard let ticket = try updateRecoveryJournal.load() else { return false }
+            updateRecoveryTicket = ticket
+            state = .recovering
+            updateRecoveryTask = applicationManagementGate.task { [weak self] in
+                await self?.restoreServiceAfterUpdate()
+            }
+            return true
+        } catch {
+            state = .failed(error.localizedDescription)
+            return true
+        }
+    }
+
+    private func restoreServiceAfterUpdate() async {
+        do {
+            let recoveredTicket: ActionBrokerUpdateRecoveryTicket?
+            if let updateRecoveryTicket { recoveredTicket = updateRecoveryTicket }
+            else { recoveredTicket = try updateRecoveryJournal.load() }
+            if let ticket = recoveredTicket {
+                updateRecoveryTicket = ticket
+                if service.status() != .enabled { try service.register() }
+                guard service.status() == .enabled else { throw ActionBrokerUpdateError.requiresApproval }
+                try await host.resumeBrokerAfterCancelledApplicationUpdate(token: ticket.token)
+                try updateRecoveryJournal.clear()
+                updateRecoveryTicket = nil
+            }
+            updateRecoveryFailureMessage = nil
+            applicationUpdatePaused = false
+            applicationManagementGate.resume()
+            cancelReconnectAndStopHost()
+            host.resumeAfterCancelledApplicationUpdate()
+            refresh()
+        } catch {
+            updateRecoveryFailureMessage = error.localizedDescription
+            applicationUpdatePaused = false
+            applicationManagementGate.resume()
+            cancelReconnectAndStopHost()
+            host.resumeAfterCancelledApplicationUpdate()
+            isServiceRegistered = service.status() == .enabled
+            // A failed update must not needlessly disable the old, still
+            // registered CLI host. Keep it usable while retaining the error
+            // and recovery ticket; this does not declare the update complete.
+            if isServiceRegistered { refresh() }
+            state = service.status() == .requiresApproval ? .requiresApproval : .failed(error.localizedDescription)
+            // Keep the recovery ticket and enabled intent for a later retry.
+        }
+    }
+
+    private static func currentBrokerProcessIDs() throws -> [Int32] {
+        let count = proc_listallpids(nil, 0)
+        guard count > 0 else { throw ActionBrokerUpdateError.serviceDidNotStop }
+        var processes = [Int32](repeating: 0, count: Int(count) + 64)
+        let received = processes.withUnsafeMutableBytes { proc_listallpids($0.baseAddress, Int32($0.count)) }
+        guard received > 0, Int(received) < processes.count else { throw ActionBrokerUpdateError.serviceDidNotStop }
+        let expectedPath = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/BlocksActionBroker").standardizedFileURL.path
+        return processes.prefix(Int(received)).filter { processID in
+            guard processID > 0 else { return false }
+            // proc_info.h defines PROC_PIDPATHINFO_MAXSIZE as 4 * MAXPATHLEN;
+            // that macro is not imported by this Swift SDK.
+            var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+            guard proc_pidpath(processID, &buffer, UInt32(buffer.count)) > 0 else { return false }
+            return String(cString: buffer) == expectedPath
+        }
+    }
 
     func setEnabled(_ enabled: Bool) {
+        guard let lease = applicationManagementGate.begin() else { return }
+        defer { lease.release() }
         guard embeddedServiceAvailable else {
             cancelReconnectAndStopHost()
             isServiceRegistered = false
@@ -170,6 +310,8 @@ final class ActionBrokerServiceManager: ObservableObject {
                 refresh()
             } else {
                 try service.unregister()
+                try updateRecoveryJournal.clear()
+                updateRecoveryTicket = nil
                 cancelReconnectAndStopHost()
                 isServiceRegistered = false
                 state = .disabled
@@ -184,6 +326,7 @@ final class ActionBrokerServiceManager: ObservableObject {
     }
 
     func refresh() {
+        guard !applicationUpdatePaused else { return }
         guard embeddedServiceAvailable else {
             cancelReconnectAndStopHost()
             isServiceRegistered = false
@@ -228,6 +371,7 @@ final class ActionBrokerServiceManager: ObservableObject {
     }
 
     private func startHost(isReconnect: Bool, isHealthCheck: Bool = false) {
+        guard !applicationUpdatePaused, applicationManagementGate.isAcceptingOperations else { return }
         guard isServiceRegistered, reconnectTask == nil, !hostIsActive else { return }
         hostAttempt &+= 1
         let attempt = hostAttempt
@@ -240,7 +384,7 @@ final class ActionBrokerServiceManager: ObservableObject {
                 case .success:
                     self.retryAttempt = 0
                     self.successfulHostAttempt = attempt
-                    self.state = .enabled
+                    self.state = self.updateRecoveryFailureMessage.map(State.failed) ?? .enabled
                 case let .failure(error):
                     self.hostIsActive = false
                     self.scheduleReconnect(after: error)
@@ -255,7 +399,7 @@ final class ActionBrokerServiceManager: ObservableObject {
     }
 
     private func scheduleReconnect(after error: Error) {
-        guard isServiceRegistered, reconnectTask == nil else { return }
+        guard !applicationUpdatePaused, isServiceRegistered, reconnectTask == nil else { return }
         let isHealthCheck = retryAttempt >= retryPolicy.delays.count
         let delay: Duration
         if isHealthCheck {
@@ -279,7 +423,7 @@ final class ActionBrokerServiceManager: ObservableObject {
     }
 
     private func isCurrentHostAttempt(_ attempt: Int) -> Bool {
-        isServiceRegistered && attempt == hostAttempt
+        !applicationUpdatePaused && isServiceRegistered && attempt == hostAttempt
     }
 
     private func cancelReconnectAndStopHost() {

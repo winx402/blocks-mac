@@ -7,17 +7,42 @@ profile="$repo_root/apps/Blocks/Config/Distribution.DirectBeta.xcconfig"
 identity_config="$repo_root/apps/Blocks/Config/ReleaseIdentity.local.xcconfig"
 derived_data="${BLOCKS_HELPER_DERIVED_DATA:-$repo_root/DerivedData/SelectionHelperBeta}"
 unsigned=0
+version=""
+build_number=""
+release_name=""
+channel="direct-beta"
+update_feed_url=""
+provisioning_profile=""
 
-if [[ "${1:-}" == "--unsigned" ]]; then
-  unsigned=1
-  shift
+while (($#)); do
+  case "$1" in
+    --unsigned) unsigned=1; shift ;;
+    --version) version="${2:-}"; shift 2 ;;
+    --build-number) build_number="${2:-}"; shift 2 ;;
+    --release-name) release_name="${2:-}"; shift 2 ;;
+    --update-feed-url) update_feed_url="${2:-}"; shift 2 ;;
+    --provisioning-profile) provisioning_profile="${2:-}"; shift 2 ;;
+    *) echo "usage: $0 [--unsigned] [--version X.Y.Z --build-number N --release-name NAME]" >&2; exit 2 ;;
+  esac
+done
+if [[ -n "$version$build_number$release_name$update_feed_url" ]]; then
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$build_number" =~ ^[1-9][0-9]*$ && "$release_name" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*$ && "$update_feed_url" == "https://winx402.github.io/blocks-mac/appcast/stable.xml" ]] \
+    || { echo "error: Helper version, build number, release name, and pinned update feed URL must be supplied together and valid." >&2; exit 2; }
 fi
-if (($#)); then
-  echo "usage: $0 [--unsigned]" >&2
-  exit 2
+
+if [[ -n "$release_name" ]]; then
+  channel="$(/usr/bin/python3 - "$repo_root" "$release_name" "$version" "$build_number" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1] + "/script/release")
+from release_versioning import validate_bundle_version
+parsed = validate_bundle_version("v" + sys.argv[2], sys.argv[2], sys.argv[3], sys.argv[4])
+print("direct-beta" if parsed.is_prerelease else "direct-stable")
+PY
+  )" || { echo "error: release name and version/build identity do not form a consistent SemVer release." >&2; exit 2; }
 fi
 
 if ((!unsigned)); then
+  [[ "$provisioning_profile" =~ ^[A-Fa-f0-9-]{36}$ ]] || { echo "error: --provisioning-profile must be the verified Helper profile UUID." >&2; exit 67; }
   [[ -f "$identity_config" ]] || {
     echo "error: phase 0 identity file is missing; refusing to sign the Helper." >&2
     exit 66
@@ -54,7 +79,12 @@ build_args=(
   -derivedDataPath "$derived_data"
   ARCHS=arm64
   ONLY_ACTIVE_ARCH=NO
+  BLOCKS_DISTRIBUTION_CHANNEL="$channel"
 )
+if ((!unsigned)); then build_args+=(PROVISIONING_PROFILE_SPECIFIER="$provisioning_profile"); fi
+if [[ -n "$version" ]]; then
+  build_args+=(MARKETING_VERSION="$version" CURRENT_PROJECT_VERSION="$build_number" BLOCKS_RELEASE_NAME="$release_name" BLOCKS_UPDATE_FEED_URL="$update_feed_url")
+fi
 if ((unsigned)); then
   build_args+=(CODE_SIGNING_ALLOWED=NO)
 fi
@@ -63,7 +93,11 @@ xcodebuild "${build_args[@]}" build
 app_bundle="$derived_data/Build/Products/Release/Blocks Selection Helper.app"
 
 # Check structural and release identity before applying the final signature.
-"$repo_root/script/release/audit_selection_helper_bundle.sh" "$app_bundle"
+helper_audit_args=("$app_bundle")
+if [[ -n "$version" ]]; then
+  helper_audit_args+=(--expected-version "$version" --expected-build "$build_number" --expected-release-name "$release_name")
+fi
+"$repo_root/script/release/audit_selection_helper_bundle.sh" "${helper_audit_args[@]}"
 if ((!unsigned)); then
   resolved_helper_entitlements="$(mktemp "${TMPDIR:-/tmp}/blocks-helper-entitlements.XXXXXX.plist")"
   trap '/bin/rm -f -- "${resolved_helper_entitlements:-}"' EXIT
@@ -79,12 +113,12 @@ if ((!unsigned)); then
     --timestamp \
     --entitlements "$resolved_helper_entitlements" \
     "$app_bundle"
-  "$repo_root/script/release/audit_selection_helper_bundle.sh" \
-    "$app_bundle" \
-    --require-signature \
-    --expected-team-id "$development_team" \
-    --expected-authority "$identity" \
-    --expected-cert-sha1 "$expected_cert_sha1"
+  helper_audit_args=("$app_bundle")
+  if [[ -n "$version" ]]; then
+    helper_audit_args+=(--expected-version "$version" --expected-build "$build_number" --expected-release-name "$release_name")
+  fi
+  helper_audit_args+=(--require-signature --expected-team-id "$development_team" --expected-authority "$identity" --expected-cert-sha1 "$expected_cert_sha1")
+  "$repo_root/script/release/audit_selection_helper_bundle.sh" "${helper_audit_args[@]}"
 fi
 
-echo "Direct Beta Selection Helper: $app_bundle"
+echo "$channel Selection Helper: $app_bundle"

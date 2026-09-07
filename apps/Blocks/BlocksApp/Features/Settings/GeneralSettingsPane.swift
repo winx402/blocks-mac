@@ -6,6 +6,7 @@ struct GeneralSettingsPane: View {
     @EnvironmentObject private var appearanceStore: AppAppearanceStore
     @AppStorage("app.language") private var selectedLanguageRawValue = AppLanguagePreference.system.rawValue
     @State private var glassDiagnosticsExpanded = false
+    @ObservedObject private var appUpdates = AppUpdateCoordinator.shared
 
     private var selectedLanguage: Binding<AppLanguagePreference> {
         Binding {
@@ -127,30 +128,63 @@ struct GeneralSettingsPane: View {
                     .foregroundStyle(.secondary)
             }
 
-            if DistributionChannel.current == .directBeta {
-                SettingsRowDivider()
-                SettingsFormRow(
-                    title: L10n.string("release.update.title"),
-                    detail: BlocksReleaseMetadata.releasePageURL == nil
-                        ? L10n.string("release.update.urlPending")
-                        : L10n.string("release.update.manualDetail")
-                ) {
-                    Button(L10n.string("release.update.check")) {
-                        guard let url = BlocksReleaseMetadata.releasePageURL else {
-                            return
-                        }
-                        NSWorkspace.shared.open(url)
-                    }
-                    .disabled(BlocksReleaseMetadata.releasePageURL == nil)
+            SettingsRowDivider()
+
+            SettingsStatusRow(
+                title: L10n.string("updates.title"),
+                detail: L10n.string("updates.detail"),
+                status: SettingsRowStatus(
+                    kind: appUpdates.isAvailable ? .information : .warning,
+                    message: appUpdates.statusText
+                )
+            ) {
+                Button(appUpdates.checkButtonTitle) {
+                    appUpdates.checkForUpdates()
                 }
+                .disabled(!appUpdates.canCheckForUpdates)
+                .help(appUpdates.statusText)
+            }
+
+            SettingsRowDivider()
+
+            SettingsToggleRow(
+                title: L10n.string("updates.automatic.title"),
+                detail: L10n.string("updates.automatic.detail"),
+                isOn: Binding(
+                    get: { appUpdates.automaticallyChecksForUpdates },
+                    set: { appUpdates.setAutomaticallyChecksForUpdates($0) }
+                )
+            )
+            .disabled(!appUpdates.canChangePreferences)
+
+            SettingsRowDivider()
+
+            SettingsFormRow(
+                title: L10n.string("updates.track.title"),
+                detail: L10n.string("updates.track.detail")
+            ) {
+                Picker(L10n.string("updates.track.title"), selection: Binding(
+                    get: { appUpdates.track },
+                    set: { appUpdates.setTrack($0) }
+                )) {
+                    ForEach(AppUpdateTrack.allCases) { track in
+                        Text(track.title).tag(track)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .disabled(!appUpdates.canChangePreferences)
+                .accessibilityLabel(L10n.string("updates.track.title"))
             }
         }
     }
 
     private var channelDetail: String {
         switch DistributionChannel.current {
-        case .development:
+        case .development, .localDevelopment:
             L10n.string("release.channel.developmentDetail")
+        case .directStable:
+            L10n.string("updates.distribution.official")
         case .directBeta:
             L10n.string("release.channel.directBetaDetail")
         case .appStoreBeta:

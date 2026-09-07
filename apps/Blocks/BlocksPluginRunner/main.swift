@@ -104,7 +104,7 @@ private enum BlocksPluginRunnerPeerValidator {
             return nil
         }
         return appURL.appendingPathComponent(
-            "Contents/MacOS/Blocks",
+            "Contents/MacOS/\(BlocksRuntimeIdentity.mainExecutableName)",
             isDirectory: false
         )
     }

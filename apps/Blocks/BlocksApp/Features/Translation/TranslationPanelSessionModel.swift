@@ -512,56 +512,63 @@ final class TranslationPanelSessionModel: ObservableObject, Identifiable {
                 "resolution": .string(sourceResolution.rawValue),
             ]
         )
-        pluginRunPreflightTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            _ = await dispatchPluginEvent(resolvedEvent)
-            guard !Task.isCancelled, self.pluginRunRevision == runRevision else {
-                return
-            }
-            let willEvent = BlocksPluginEventEnvelope(
-                name: .translationWillRunSession,
-                sessionID: translationSessionID,
-                revision: Int64(runRevision),
-                causationID: causationID,
-                source: resolvedEvent.source,
-                authorization: pluginRunAuthorization,
-                payload: resolvedEvent.payload
-            )
-            let result = await dispatchPluginEvent(willEvent)
-            guard !Task.isCancelled, self.pluginRunRevision == runRevision else {
-                return
-            }
-            guard result.allowed else {
-                self.runCoordinator.cancelCurrent()
-                self.clearSnapshot()
-                self.updateRunPhase(.idle)
-                self.operationError = result.reason ?? "A plugin blocked this translation."
-                return
-            }
-            let text = result.envelope.payload.string("source_text")?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? normalized
-            let source = result.envelope.payload.string("source_language")
-                .flatMap(TranslationLanguageTag.init(rawValue:))
-                ?? resolvedSourceLanguage
-            let target = result.envelope.payload.string("target_language")
-                .flatMap(TranslationLanguageTag.init(rawValue:))
-                ?? resolvedTarget
-            let inputs = self.availableSourceInputs(normalizedText: text)
-            guard !inputs.isEmpty else {
-                self.runCoordinator.cancelCurrent()
-                self.clearSnapshot()
-                self.updateRunPhase(.idle)
-                return
-            }
-            self.startResolvedRun(
-                translationSessionID: translationSessionID,
-                normalized: text,
-                sourceLanguage: source,
-                targetLanguage: target,
-                sourceResolution: sourceResolution,
-                availableInputs: inputs
-            )
+        guard let preflightTask =
+            TranslationApplicationOperationAdmission.gate.task({
+                [weak self] in
+                guard let self else { return }
+                _ = await dispatchPluginEvent(resolvedEvent)
+                guard !Task.isCancelled, self.pluginRunRevision == runRevision else {
+                    return
+                }
+                let willEvent = BlocksPluginEventEnvelope(
+                    name: .translationWillRunSession,
+                    sessionID: translationSessionID,
+                    revision: Int64(runRevision),
+                    causationID: causationID,
+                    source: resolvedEvent.source,
+                    authorization: pluginRunAuthorization,
+                    payload: resolvedEvent.payload
+                )
+                let result = await dispatchPluginEvent(willEvent)
+                guard !Task.isCancelled, self.pluginRunRevision == runRevision else {
+                    return
+                }
+                guard result.allowed else {
+                    self.runCoordinator.cancelCurrent()
+                    self.clearSnapshot()
+                    self.updateRunPhase(.idle)
+                    self.operationError = result.reason ?? "A plugin blocked this translation."
+                    return
+                }
+                let text = result.envelope.payload.string("source_text")?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) ?? normalized
+                let source = result.envelope.payload.string("source_language")
+                    .flatMap(TranslationLanguageTag.init(rawValue:))
+                    ?? resolvedSourceLanguage
+                let target = result.envelope.payload.string("target_language")
+                    .flatMap(TranslationLanguageTag.init(rawValue:))
+                    ?? resolvedTarget
+                let inputs = self.availableSourceInputs(normalizedText: text)
+                guard !inputs.isEmpty else {
+                    self.runCoordinator.cancelCurrent()
+                    self.clearSnapshot()
+                    self.updateRunPhase(.idle)
+                    return
+                }
+                self.startResolvedRun(
+                    translationSessionID: translationSessionID,
+                    normalized: text,
+                    sourceLanguage: source,
+                    targetLanguage: target,
+                    sourceResolution: sourceResolution,
+                    availableInputs: inputs
+                )
+        }) else {
+            updateRunPhase(.idle)
+            operationError = L10n.string("translation.error.generic")
+            return
         }
+        pluginRunPreflightTask = preflightTask
     }
 
     private func startResolvedRun(
@@ -649,12 +656,17 @@ final class TranslationPanelSessionModel: ObservableObject, Identifiable {
             updateRunPhase(.idle)
             return
         }
-        updateRunPhase(.debouncing)
-        autoTranslationTask = Task { [weak self] in
+        guard let task = TranslationApplicationOperationAdmission.gate.task({
+            [weak self] in
             try? await Task.sleep(for: delay)
             guard !Task.isCancelled else { return }
             self?.runImmediately()
+        }) else {
+            updateRunPhase(.idle)
+            return
         }
+        updateRunPhase(.debouncing)
+        autoTranslationTask = task
     }
 
     @discardableResult
@@ -954,10 +966,15 @@ final class TranslationPanelSessionModel: ObservableObject, Identifiable {
     func favorite() async -> Bool {
         guard canFavorite, let snapshot else { return false }
         cancelFavoriteOperation()
+        guard let admissionLease =
+            TranslationApplicationOperationAdmission.gate.begin() else {
+            return false
+        }
         let operationID = UUID()
         let revision = Int64(exactly: pluginRunRevision)
         favoriteOperationID = operationID
-        let task = Task { @MainActor [weak self] in
+        let task = Task { @MainActor [weak self, admissionLease] in
+            defer { admissionLease.release() }
             guard let self, let revision else { return false }
             do {
                 try await self.translationStore.saveFavorite(
@@ -1175,7 +1192,8 @@ final class TranslationPanelSessionModel: ObservableObject, Identifiable {
             payload: payload
         )
         let eventID = UUID()
-        pluginEventTasks[eventID] = Task { @MainActor [weak self] in
+        guard let task = TranslationApplicationOperationAdmission.gate.task({
+            [weak self] in
             defer {
                 self?.pluginEventTasks.removeValue(forKey: eventID)
             }
@@ -1195,7 +1213,10 @@ final class TranslationPanelSessionModel: ObservableObject, Identifiable {
                   ) else {
                 return
             }
+        }) else {
+            return
         }
+        pluginEventTasks[eventID] = task
     }
 
     private func invalidateCurrentPluginSession() {

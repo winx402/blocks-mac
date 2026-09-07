@@ -4,6 +4,12 @@ import Combine
 
 @MainActor
 final class AppModel: ObservableObject {
+    let applicationOperationGate: ApplicationOperationAdmissionGate
+    let applicationLifecycle = ApplicationLifecycleCoordinator(requiredParticipantIDs: [
+        "app", "shortcuts", "helper", "actionBroker", "clipboard", "translation",
+        "provider", "screenshot", "plugins", "database",
+    ])
+    private var needsApplicationUpdateBackup = false
     @Published var selectedSection: AppSection = .screenshot
     @Published private(set) var mainWindowNavigationGeneration:
         UInt64 = 0
@@ -55,6 +61,8 @@ final class AppModel: ObservableObject {
         featureAvailabilityStore: FeatureAvailabilityStore? = nil,
         colorSampleCoordinator: ScreenshotColorSampleCoordinator? = nil
     ) {
+        let applicationOperationGate = ApplicationOperationAdmissionGate(name: "Application background work")
+        self.applicationOperationGate = applicationOperationGate
         let runtimeServicesEnabled = !BlocksRuntimeEnvironment.isUnitTestHost
         if runtimeServicesEnabled {
             Step5OneShotMigration.run()
@@ -80,7 +88,9 @@ final class AppModel: ObservableObject {
         let translationRuntimeService = OpenAITranslationRuntimeService(
             auditTokenSource: providerAuditTokenSource,
             auditHandlerWithToken: { [weak resolvedProviderStore] result, token, _, _ in
+                guard let lease = applicationOperationGate.begin() else { return }
                 Task { @MainActor in
+                    defer { lease.release() }
                     resolvedProviderStore?.recordAcceptedTranslationRuntime(
                         result,
                         auditToken: token
@@ -151,13 +161,6 @@ final class AppModel: ObservableObject {
             )
         let destructiveConfirmationPresenter =
             BlocksPluginDestructiveActionConfirmationPresenter()
-        AppTerminationCoordinator.shared.installDispatcher { [weak resolvedPluginRuntimeCoordinator] in
-            await resolvedPluginRuntimeCoordinator?.dispatchAppWillTerminate()
-        }
-        AppTerminationCoordinator.shared.installFinalizer {
-            [weak resolvedPluginRuntimeCoordinator] in
-            resolvedPluginRuntimeCoordinator?.forceShutdownForApplicationTermination()
-        }
         let pluginDevelopmentService = PluginDevelopmentService(
             pluginManager: resolvedTranslationPluginManager,
             runtime: resolvedPluginRuntimeCoordinator
@@ -251,6 +254,103 @@ final class AppModel: ObservableObject {
         // Opening the panel itself is safe and still exercises the production UI.
         openClipboardPanelForVerificationIfRequested()
         translationCoordinator.openPanelForVerificationIfRequested()
+        configureApplicationLifecycle()
+    }
+
+    private func configureApplicationLifecycle() {
+        do {
+            try applicationLifecycle.register(.init(id: "app", pauseAndDrain: { [applicationOperationGate] in
+                try applicationOperationGate.pauseIfIdle()
+            }, resume: { [weak self] in
+                self?.applicationOperationGate.resume()
+                self?.refreshTranslationPluginRuntime()
+            }))
+            try applicationLifecycle.register(.init(id: "shortcuts", pauseAndDrain: { [shortcutStore] in
+                try await shortcutStore.prepareForApplicationUpdate()
+            }, resume: { [shortcutStore] in await shortcutStore.resumeAfterCancelledApplicationUpdate() }))
+            try applicationLifecycle.register(.init(id: "helper", pauseAndDrain: { [selectionHelperSettingsController] in
+                try await selectionHelperSettingsController?.prepareForApplicationUpdate()
+            }, resume: { [selectionHelperSettingsController] in
+                await selectionHelperSettingsController?.resumeAfterCancelledApplicationUpdate()
+            }))
+            try applicationLifecycle.register(.init(id: "actionBroker", pauseAndDrain: { [weak self, actionBrokerManager] in
+                try await actionBrokerManager.prepareForApplicationUpdate(
+                    stopService: (self?.needsApplicationUpdateBackup ?? true) || BlocksRuntimeIdentity.isLocalDevelopment
+                )
+            }, resume: { [actionBrokerManager] in await actionBrokerManager.resumeAfterCancelledApplicationUpdate() }))
+            try applicationLifecycle.register(.init(id: "clipboard", pauseAndDrain: { [clipboardCoordinator] in
+                try await clipboardCoordinator.prepareForApplicationUpdate()
+            }, resume: { [clipboardCoordinator] in await clipboardCoordinator.resumeAfterCancelledApplicationUpdate() }))
+            try applicationLifecycle.register(.init(id: "translation", pauseAndDrain: { [translationStore] in
+                try await translationStore.prepareForApplicationUpdate()
+            }, resume: { [translationStore] in await translationStore.resumeAfterCancelledApplicationUpdate() }))
+            try applicationLifecycle.register(.init(id: "provider", pauseAndDrain: { [providerStore] in
+                try await providerStore.prepareForApplicationUpdate()
+            }, resume: { [providerStore] in await providerStore.resumeAfterCancelledApplicationUpdate() }))
+            try applicationLifecycle.register(.init(id: "screenshot", pauseAndDrain: { [screenshotStore] in
+                try await screenshotStore.prepareForApplicationUpdate()
+            }, resume: { [screenshotStore] in await screenshotStore.resumeAfterCancelledApplicationUpdate() }))
+            try applicationLifecycle.register(.init(id: "plugins", pauseAndDrain: { [pluginRuntimeCoordinator] in
+                try await pluginRuntimeCoordinator.prepareForApplicationUpdate()
+            }, resume: { [pluginRuntimeCoordinator] in await pluginRuntimeCoordinator.resumeAfterCancelledApplicationUpdate() }))
+            try applicationLifecycle.register(.init(id: "database", pauseAndDrain: { [weak self] in
+                let needsBackup = self?.needsApplicationUpdateBackup ?? true
+                _ = try await Task.detached {
+                    try SQLiteConnection.prepareForApplicationUpdate(createBackups: needsBackup)
+                }.value
+            }, resume: {
+                SQLiteConnection.resumeAfterCancelledApplicationUpdate()
+            }))
+        } catch {
+            // No updater callback is registered if capability setup is incomplete.
+            return
+        }
+        guard applicationLifecycle.hasCompleteSafetyCoverage else { return }
+        AppTerminationCoordinator.shared.installDispatcher { [weak self] in
+            guard let self else { throw ApplicationLifecycleCoordinator.SafetyError.configurationLocked }
+            do {
+                if applicationLifecycle.state != .prepared { needsApplicationUpdateBackup = false }
+                try await prepareApplicationLifecycle()
+            } catch {
+                await resumeAfterCancelledApplicationUpdate()
+                status = AppStatus(kind: .failed, title: L10n.string("status.failed.title"),
+                    detail: error.localizedDescription)
+                throw error
+            }
+        }
+        AppTerminationCoordinator.shared.installFinalizer { [weak self] in
+            guard self?.applicationLifecycle.state == .prepared else { return }
+            self?.pluginRuntimeCoordinator.forceShutdownForApplicationTermination()
+            SQLiteConnection.closePreparedApplicationConnections()
+        }
+        AppUpdateCoordinator.shared.configureInstallationSafety(
+            prepareForUpdate: { [weak self] in
+                guard let self else { throw ApplicationLifecycleCoordinator.SafetyError.configurationLocked }
+                try await prepareForApplicationUpdate()
+            },
+            resumeAfterCancelledUpdate: { [weak self] in await self?.resumeAfterCancelledApplicationUpdate() }
+        )
+    }
+
+    func prepareForApplicationUpdate() async throws {
+        needsApplicationUpdateBackup = true
+        try await prepareApplicationLifecycle()
+    }
+
+    private func prepareApplicationLifecycle() async throws {
+        if applicationLifecycle.state == .active {
+            // Keep the existing will-terminate hook, but never cancel admitted
+            // plugin/host work to get there. All-feature admission is checked
+            // again atomically after the hook has completed.
+            try ApplicationOperationAdmissionGate.ensureAllIdle()
+            _ = await pluginRuntimeCoordinator.dispatch(.init(name: .appWillTerminate))
+        }
+        try await applicationLifecycle.prepare()
+    }
+
+    func resumeAfterCancelledApplicationUpdate() async {
+        await applicationLifecycle.resumeAfterCancelledUpdate()
+        needsApplicationUpdateBackup = false
     }
     var clipboardTagStore: ClipboardTagStore { clipboardCoordinator.tagStore }
 
@@ -1229,7 +1329,7 @@ final class AppModel: ObservableObject {
         shortcutCoordinator.configure(
             statusRecorder: recordStatus,
             screenshotSmart: { [weak self] in
-                Task { @MainActor [weak self] in
+                self?.applicationOperationGate.task { @MainActor [weak self] in
                     await self?.executeShortcutWithPluginHooks(
                         command: .screenshotSmart
                     ) { [weak self] in
@@ -1238,7 +1338,7 @@ final class AppModel: ObservableObject {
                 }
             },
             clipboardHistory: { [weak self] in
-                Task { @MainActor [weak self] in
+                self?.applicationOperationGate.task { @MainActor [weak self] in
                     await self?.executeShortcutWithPluginHooks(
                         command: .clipboardHistory
                     ) { [weak self] in
@@ -1247,7 +1347,7 @@ final class AppModel: ObservableObject {
                 }
             },
             translationPanel: { [weak self] in
-                Task { @MainActor [weak self, weak translationCoordinator] in
+                self?.applicationOperationGate.task { @MainActor [weak self, weak translationCoordinator] in
                     await self?.executeShortcutWithPluginHooks(
                         command: .translationPanel
                     ) {
@@ -1256,7 +1356,7 @@ final class AppModel: ObservableObject {
                 }
             },
             translationScreenshot: { [weak self] in
-                Task { @MainActor [weak self, weak translationCoordinator] in
+                self?.applicationOperationGate.task { @MainActor [weak self, weak translationCoordinator] in
                     await self?.executeShortcutWithPluginHooks(
                         command: .translationScreenshot
                     ) {
@@ -1265,7 +1365,7 @@ final class AppModel: ObservableObject {
                 }
             },
             clipboardQuickPaste: { [weak self] index in
-                Task { @MainActor [weak self, weak clipboardCoordinator] in
+                self?.applicationOperationGate.task { @MainActor [weak self, weak clipboardCoordinator] in
                     await self?.executeShortcutWithPluginHooks(
                         commandName: "clipboardQuickPaste\(index)",
                         payload: ["index": .int(index)]
@@ -1401,7 +1501,7 @@ final class AppModel: ObservableObject {
         selectedSection = .screenshot
         mainWindowOpener?()
         NSApp.activate(ignoringOtherApps: true)
-        Task { @MainActor [weak self] in
+        applicationOperationGate.task { @MainActor [weak self] in
             await Task.yield()
             self?.settingsAttentionRequest = SettingsAttentionRequest(target: .screenshotTag)
         }

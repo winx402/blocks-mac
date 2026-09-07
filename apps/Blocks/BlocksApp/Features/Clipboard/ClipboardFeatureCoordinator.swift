@@ -55,6 +55,7 @@ struct ClipboardPasteTransactionState: Equatable {
 
 @MainActor
 final class ClipboardFeatureCoordinator {
+    static let applicationUpdateParticipantID = "clipboard"
     static let transactionLogger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "app.blocks",
         category: "clipboard-transaction"
@@ -126,7 +127,7 @@ final class ClipboardFeatureCoordinator {
     let featureAvailabilityStore: FeatureAvailabilityStore
     let clipboardHistoryPanelPresenter: ClipboardHistoryPanelPresenter
     let autoPasteCoordinator: ClipboardAutoPasteCoordinator
-    let liveCaptureService = ClipboardLiveCaptureService()
+    let liveCaptureService: ClipboardLiveCaptureService
     private var filterClearTask: Task<Void, Never>?
     var pasteTask: Task<Void, Never>?
     var pasteTransactionState = ClipboardPasteTransactionState()
@@ -179,6 +180,9 @@ final class ClipboardFeatureCoordinator {
             clipboardHistoryPanelPresenter ?? ClipboardHistoryPanelPresenter()
         self.autoPasteCoordinator =
             autoPasteCoordinator ?? ClipboardAutoPasteCoordinator()
+        self.liveCaptureService = ClipboardLiveCaptureService(
+            applicationUpdateGate: clipboardStore.applicationUpdateGate
+        )
         plainTextCopyPayloadReader = { [clipboardStore] recordID in
             await clipboardStore.readPayloadForAction(
                 recordID: recordID,
@@ -289,6 +293,22 @@ final class ClipboardFeatureCoordinator {
         invalidatePasteTransaction(stage: "feature-disabled")
         clipboardHistoryPanelPresenter.forceCloseForRuntimeDisable()
         recordFeatureDisabledStatus()
+    }
+
+    /// Participant entry point registered by the application lifecycle layer.
+    /// This never cancels current work: a busy gate rejects the update attempt.
+    func prepareForApplicationUpdate() async throws {
+        try clipboardStore.pauseForApplicationUpdate()
+    }
+
+    /// Idempotent recovery after a cancelled update. Timers and future capture
+    /// work may obtain fresh leases again; completed Task references are not
+    /// treated as active work.
+    func resumeAfterCancelledApplicationUpdate() async {
+        clipboardStore.resumeAfterCancelledApplicationUpdate()
+        if isClipboardFeatureEnabled {
+            startLiveCapture()
+        }
     }
 
     func showHistory() { sectionSelector(.clipboardSettings); statusRecorder(clipboardStatus()) }

@@ -3,7 +3,8 @@ import CryptoKit
 import Network
 
 public enum BlocksSelectionCaptureProtocol {
-    public static let appBundleIdentifier = "app.blocks.app"
+    public static let appBundleIdentifier =
+        BlocksRuntimeIdentity.applicationBundleIdentifier
     public static let maximumSelectionCharacters = 200_000
     public static let maximumSelectionUTF8Bytes = 1_000_000
     public static let maximumRequestBytes = 16_384
@@ -518,9 +519,10 @@ public enum BlocksSelectionHelperProtocol {
     public static let version = 4
     public static let minimumCompatibleVersion = 4
     public static let bundleIdentifier =
-        "app.blocks.selection-helper"
-    public static let urlScheme = "blocks-selection-helper"
-    public static let loopbackPort: UInt16 = 49_317
+        BlocksRuntimeIdentity.selectionHelperBundleIdentifier
+    public static let urlScheme = BlocksRuntimeIdentity.selectionHelperURLScheme
+    public static let loopbackPort =
+        BlocksRuntimeIdentity.selectionHelperLoopbackPort
     public static let maximumWireBytes =
         BlocksSelectionCaptureProtocol.maximumResponseBytes + 65_536
     public static let maximumClockSkew: TimeInterval = 5
@@ -538,20 +540,21 @@ public enum BlocksSelectionHelperProtocol {
     /// separate prevents a previously compromised v3 key from authenticating
     /// a v4 envelope after an upgrade.
     public static let legacyKeychainService =
-        "app.blocks.selection-helper.shared-key"
+        BlocksRuntimeIdentity.selectionHelperLegacyKeychainService
     public static let legacyKeychainAccount = "paired-device"
     public static let keychainService =
-        "app.blocks.selection-helper.shared-active-key.v4"
+        BlocksRuntimeIdentity.selectionHelperKeychainService
     public static let keychainAccount = "paired-device-v4"
     public static let bootstrapKeychainService =
-        "app.blocks.selection-helper.shared-bootstrap-key"
+        BlocksRuntimeIdentity.selectionHelperBootstrapKeychainService
     public static let bootstrapKeychainAccount = "pairing-bootstrap-v1"
     public static let sharedKeychainAccessGroupSuffix =
-        ".app.blocks.selection-helper.shared"
+        BlocksRuntimeIdentity.selectionHelperSharedKeychainAccessGroupSuffix
     /// Optional capability. Clients must treat its absence as an unavailable
     /// enhancement and keep the normal paste path available.
     public static let pasteTargetInspectionCapability =
         "paste-target-inspection-v1"
+    public static let updateLifecycleCapability = "update-lifecycle-v1"
 }
 
 /// Validates newline-delimited Helper request frames before any JSON,
@@ -1038,6 +1041,9 @@ public enum SelectionHelperCommandKind:
     case requestPermission
     case cancel
     case disconnect
+    case prepareForApplicationUpdate
+    case resumeAfterCancelledApplicationUpdate
+    case terminateForApplicationUpdate
 }
 
 public struct SelectionHelperCommand:

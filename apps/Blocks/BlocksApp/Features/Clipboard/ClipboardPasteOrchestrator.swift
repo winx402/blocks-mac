@@ -146,6 +146,9 @@ extension ClipboardFeatureCoordinator {
     func startPaste(_ request: PendingPasteRequest) {
         guard request.invocationOrigin.userInitiated,
               pastePluginLifecycleIsCurrent(request) else { return }
+        guard let applicationLease = clipboardStore.applicationUpdateGate.begin() else {
+            return
+        }
         pasteTask?.cancel()
         pendingPasteRequest = nil
         activePasteRequest = request
@@ -154,6 +157,7 @@ extension ClipboardFeatureCoordinator {
             "stage=request-start generation=\(generation) session=\(request.token.uuidString, privacy: .public) record=\(request.recordID, privacy: .public) source=\(request.copyEventSource.rawValue, privacy: .public) expectedChangeCount=\(request.expectedPasteboardChangeCount ?? -1) preparedWriteChangeCount=\(request.preparedWriteLease?.changeCount ?? -1) preparedBrokerGeneration=\(request.preparedWriteLease?.brokerGeneration ?? 0) targetPID=\(request.targetContext?.target.processIdentifier ?? 0) targetBundle=\(request.targetContext?.target.bundleIdentifier ?? "none", privacy: .public)"
         )
         let task = Task { @MainActor [weak self] in
+            defer { applicationLease.release() }
             guard !Task.isCancelled else {
                 return
             }

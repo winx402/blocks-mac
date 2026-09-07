@@ -4994,7 +4994,7 @@ final class BlocksPluginPlatformContractTests: XCTestCase {
     }
 
     @MainActor
-    func testTerminationTimeoutForceFinalizesLeasedStagingBeforeReply()
+    func testTerminationPreservesLeasedStagingUntilDispatcherActuallyDrains()
         async throws
     {
         let stagingRoot = FileManager.default.temporaryDirectory
@@ -5021,7 +5021,8 @@ final class BlocksPluginPlatformContractTests: XCTestCase {
         let pluginID = "com.example.termination-lease"
         broker.authorize(pluginID: pluginID, resourceIDs: [reference.id])
         broker.retainHostLease(ids: [reference.id])
-        var cleanupStarted = false
+        let cleanupStarted = expectation(description: "graceful cleanup started with a live lease")
+        var finishWork: CheckedContinuation<Void, Never>?
         var leaseRemainedReadable = false
         var replyCount = 0
         let replyReceived = expectation(description: "termination reply")
@@ -5034,18 +5035,17 @@ final class BlocksPluginPlatformContractTests: XCTestCase {
                     offset: 0,
                     length: 1_024
                 )) != nil
-                cleanupStarted = true
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                await withCheckedContinuation { continuation in
+                    finishWork = continuation
+                    cleanupStarted.fulfill()
+                }
             },
             finalizer: {
                 broker.forceShutdown()
             },
-            timeoutSleeper: { _ in
-                while !cleanupStarted {
-                    await Task.yield()
-                }
-            },
-            replyHandler: { _ in
+            timeoutSleeper: { _ in },
+            replyHandler: { accepted in
+                XCTAssertTrue(accepted)
                 replyCount += 1
                 XCTAssertFalse(
                     FileManager.default.fileExists(
@@ -5057,6 +5057,12 @@ final class BlocksPluginPlatformContractTests: XCTestCase {
         )
 
         XCTAssertEqual(coordinator.requestTermination(), .terminateLater)
+        await fulfillment(of: [cleanupStarted], timeout: 1)
+        XCTAssertEqual(replyCount, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sessionDirectory.path))
+        XCTAssertTrue(leaseRemainedReadable)
+        broker.releaseHostLease(ids: [reference.id])
+        finishWork?.resume()
         await fulfillment(of: [replyReceived], timeout: 1)
         XCTAssertEqual(replyCount, 1)
         XCTAssertTrue(leaseRemainedReadable)

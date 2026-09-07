@@ -1,0 +1,14 @@
+{
+  "sparkle_sign_tool": "/absolute/path/to/Sparkle/bin/sign_update",
+  "environment": {
+    "BLOCKS_DEVELOPER_ID_APPLICATION": "Developer ID Application: YOUR NAME (YOURTEAMID)",
+    "BLOCKS_EXPECTED_SIGNING_CERT_SHA1": "YOUR_40_HEX_CERTIFICATE_SHA1",
+    "BLOCKS_NOTARY_KEYCHAIN_PROFILE": "YOUR_NOTARY_PROFILE_NAME",
+    "BLOCKS_SPARKLE_PUBLIC_KEY": "ghXr46h3DqsfqMwzwHDrsAwh4M4aTVxD9rcsndtFrt0=",
+    "BLOCKS_SPARKLE_KEYCHAIN_ACCOUNT": "app.blocks.app.sparkle",
+    "BLOCKS_MAIN_DISTRIBUTION_PROFILE_UUID": "YOUR_MAIN_PROFILE_UUID",
+    "BLOCKS_MAIN_DISTRIBUTION_PROFILE_PATH": "/absolute/path/to/main.provisionprofile",
+    "BLOCKS_HELPER_DISTRIBUTION_PROFILE_UUID": "YOUR_HELPER_PROFILE_UUID",
+    "BLOCKS_HELPER_DISTRIBUTION_PROFILE_PATH": "/absolute/path/to/helper.provisionprofile"
+  }
+}

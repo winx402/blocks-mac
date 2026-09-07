@@ -191,6 +191,19 @@ private final class ScreenshotOutputFileWriteAdmission: @unchecked Sendable {
 
 @MainActor
 final class ScreenshotStore: ObservableObject {
+    private let applicationUpdateGate = ApplicationOperationAdmissionGate(name: "Screenshot")
+
+    func prepareForApplicationUpdate() async throws {
+        // A presented editor owns unsaved user work after the capture method
+        // returned. Do not infer idleness from its Task handle.
+        guard activeEditorCompletionGeneration == nil,
+              activeEditorApplicationContext == nil else {
+            throw ApplicationOperationAdmissionGate.AdmissionError.busy("Screenshot editor")
+        }
+        try applicationUpdateGate.pauseIfIdle()
+    }
+
+    func resumeAfterCancelledApplicationUpdate() async { applicationUpdateGate.resume() }
     @Published private(set) var lastCaptureSummary: String = L10n.string("main.noScreenshotCaptured")
 
     let preferencesStore: ScreenshotPreferencesStore
@@ -422,7 +435,9 @@ final class ScreenshotStore: ObservableObject {
         origin: BlocksPluginHostInvocationOrigin,
         input: [String: JSONValue]
     ) async throws -> JSONValue {
-        try await editorPresenter.performPluginHostAction(
+        let lease = try applicationUpdateGate.requireLease()
+        defer { lease.release() }
+        return try await editorPresenter.performPluginHostAction(
             actionID,
             origin: origin,
             input: input
@@ -438,6 +453,8 @@ final class ScreenshotStore: ObservableObject {
     func startSmartScreenshot(
         startsInScrollingMode: Bool
     ) async -> ScreenshotStartResult {
+        guard let lease = applicationUpdateGate.begin() else { return .busy }
+        defer { lease.release() }
         let runtimeGeneration = runtimeGeneration
         guard isRuntimeCurrent(runtimeGeneration) else {
             statusRecorder(AppStatus(
@@ -523,6 +540,7 @@ final class ScreenshotStore: ObservableObject {
             guard isRuntimeCurrent(runtimeGeneration) else { return .cancelled }
             statusRecorder(AppStatus(kind: .ready, title: L10n.string("status.captured.title"), detail: lastCaptureSummary))
             let completionGeneration = UUID()
+            let editorUpdateLease = try applicationUpdateGate.requireLease()
             activeEditorCompletionGeneration = completionGeneration
             activeEditorScrollingSessionID = capture.scrollingSessionID
             editorPresenter.present(
@@ -533,8 +551,9 @@ final class ScreenshotStore: ObservableObject {
                         capture.defersOutputUntilEditorCompletion
                     )
                 },
-                completion: { [weak self] outcome in
+                completion: { [weak self, editorUpdateLease] outcome in
                     defer {
+                        editorUpdateLease.release()
                         applicationContext.restoreOnce()
                         self?.clearActiveEditorApplicationContext(ifMatching: applicationContext)
                     }
@@ -883,6 +902,9 @@ final class ScreenshotStore: ObservableObject {
     }
 
     func finishScrollingAction(_ input: ScreenshotScrollingFinishActionInput) async -> ScreenshotScrollingFinishActionResult {
+        guard applicationUpdateGate.isAcceptingOperations else {
+            return ScreenshotScrollingFinishActionResult(sessionID: input.sessionID, finishRequested: false)
+        }
         return ScreenshotScrollingFinishActionResult(
             sessionID: input.sessionID,
             finishRequested: scrollingSessionController?.finishScrollingSession(sessionID: input.sessionID) ?? false
@@ -890,6 +912,10 @@ final class ScreenshotStore: ObservableObject {
     }
 
     func cancelScrollingAction(_ input: ScreenshotScrollingCancelActionInput) async -> ScreenshotScrollingCancelActionResult {
+        guard let lease = applicationUpdateGate.begin() else {
+            return ScreenshotScrollingCancelActionResult(sessionID: input.sessionID, cancelled: false)
+        }
+        defer { lease.release() }
         let result = await scrollingSessionController?.cancelScrollingSession(
             sessionID: input.sessionID,
             confirm: input.confirm
@@ -928,6 +954,8 @@ final class ScreenshotStore: ObservableObject {
         _ input: ScreenshotCaptureActionInput,
         outputFile: FileHandle?
     ) async throws -> ScreenshotCaptureActionResult {
+        let lease = try applicationUpdateGate.requireLease()
+        defer { lease.release() }
         let runtimeGeneration = runtimeGeneration
         guard isRuntimeCurrent(runtimeGeneration) else {
             throw ScreenshotActionExecutionError.featureDisabled

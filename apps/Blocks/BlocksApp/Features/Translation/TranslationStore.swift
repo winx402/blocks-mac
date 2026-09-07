@@ -66,6 +66,8 @@ final class TranslationStore: ObservableObject {
     private let officialTransport: any TranslationOfficialHTTPTransport
     private let officialServiceExecutionGate:
         TranslationOfficialServiceExecutionGate
+    private let applicationOperationAdmissionGate:
+        ApplicationOperationAdmissionGate
     private let serviceProfileRefreshLoader:
         (@Sendable () async throws -> TranslationOfficialServiceProfileBatch)?
     private let defaults: UserDefaults
@@ -116,6 +118,9 @@ final class TranslationStore: ObservableObject {
         officialServiceExecutionGate:
             TranslationOfficialServiceExecutionGate =
                 TranslationOfficialServiceExecutionGate(),
+        applicationOperationAdmissionGate:
+            ApplicationOperationAdmissionGate =
+                TranslationApplicationOperationAdmission.gate,
         serviceProfileRefreshLoader:
             (@Sendable () async throws -> TranslationOfficialServiceProfileBatch)? = nil,
         appleSupportedLanguagesProvider:
@@ -133,6 +138,7 @@ final class TranslationStore: ObservableObject {
         self.serviceCredentialStore = serviceCredentialStore
         self.officialTransport = officialTransport
         self.officialServiceExecutionGate = officialServiceExecutionGate
+        self.applicationOperationAdmissionGate = applicationOperationAdmissionGate
         self.serviceProfileRefreshLoader = serviceProfileRefreshLoader
         self.defaults = defaults
         self.appleSupportedLanguagesProvider = appleSupportedLanguagesProvider
@@ -193,6 +199,14 @@ final class TranslationStore: ObservableObject {
         serviceProfileTask?.cancel()
     }
 
+    func prepareForApplicationUpdate() async throws {
+        try applicationOperationAdmissionGate.pauseIfIdle()
+    }
+
+    func resumeAfterCancelledApplicationUpdate() async {
+        applicationOperationAdmissionGate.resume()
+    }
+
     var enabledServices: [TranslationServiceDescriptor] {
         enabledServiceIDs.compactMap { serviceID in
             availableServices.first { $0.id == serviceID }
@@ -229,7 +243,6 @@ final class TranslationStore: ObservableObject {
     }
 
     func refreshServiceProfiles() {
-        serviceProfileTask?.cancel()
         guard let serviceProfileRepository else {
             serviceProfiles = []
             officialProfileAdapters = [:]
@@ -238,10 +251,15 @@ final class TranslationStore: ObservableObject {
             refreshServiceRegistry()
             return
         }
+        guard let admissionLease = applicationOperationAdmissionGate.begin() else {
+            return
+        }
+        serviceProfileTask?.cancel()
         let credentialStore = serviceCredentialStore
         let serviceProfileRefreshLoader = self.serviceProfileRefreshLoader
         isLoadingServiceProfiles = true
-        serviceProfileTask = Task { [weak self] in
+        serviceProfileTask = Task { [weak self, admissionLease] in
+            defer { admissionLease.release() }
             do {
                 let batch: TranslationOfficialServiceProfileBatch
                 if let serviceProfileRefreshLoader {
@@ -475,6 +493,8 @@ final class TranslationStore: ObservableObject {
         )
         let mutatedCredentialFieldIDs = credentialFieldIDsToSave
             .union(credentialFieldIDsToDelete)
+        let admissionLease = try applicationOperationAdmissionGate.requireLease()
+        defer { admissionLease.release() }
         let mutationSnapshot = try beginServiceProfileMutation(
             profileID: profile.id,
             serviceID: profile.serviceID
@@ -594,6 +614,8 @@ final class TranslationStore: ObservableObject {
     func configuredCredentialFieldIDs(
         for profile: TranslationServiceProfile
     ) async throws -> Set<String> {
+        let admissionLease = try applicationOperationAdmissionGate.requireLease()
+        defer { admissionLease.release() }
         let credentialStore = serviceCredentialStore
         let fieldIDs = TranslationServiceTemplateCatalog
             .credentialFieldIDs(for: profile.templateID)
@@ -612,6 +634,8 @@ final class TranslationStore: ObservableObject {
     }
 
     func deleteServiceProfile(id: String) async throws {
+        let admissionLease = try applicationOperationAdmissionGate.requireLease()
+        defer { admissionLease.release() }
         guard let serviceProfileRepository else {
             throw TranslationServiceAdapterError.unavailable(
                 code: "translation_profile_storage_unavailable",
@@ -689,6 +713,8 @@ final class TranslationStore: ObservableObject {
     func connectionTest(
         profile: TranslationServiceProfile
     ) async throws -> String {
+        let admissionLease = try applicationOperationAdmissionGate.requireLease()
+        defer { admissionLease.release() }
         guard !mutatingServiceProfileIDs.contains(profile.id) else {
             throw TranslationServiceProfileMutationError
                 .mutationInProgress
@@ -811,6 +837,8 @@ final class TranslationStore: ObservableObject {
         serviceID: String,
         testText: String? = nil
     ) async throws {
+        let admissionLease = try applicationOperationAdmissionGate.requireLease()
+        defer { admissionLease.release() }
         guard let descriptor = availableServices.first(where: {
             $0.id == serviceID
         }),
@@ -1130,10 +1158,14 @@ final class TranslationStore: ObservableObject {
               languageRefreshTask == nil else {
             return
         }
+        guard let admissionLease = applicationOperationAdmissionGate.begin() else {
+            return
+        }
         let fallbackTargets = supportedLanguages
         let fallbackSources = supportedSourceLanguages
         let provider = appleSupportedLanguagesProvider
-        languageRefreshTask = Task { [weak self] in
+        languageRefreshTask = Task { [weak self, admissionLease] in
+            defer { admissionLease.release() }
             let appleLanguages = await provider()
             guard !Task.isCancelled,
                   let self,
@@ -1159,6 +1191,8 @@ final class TranslationStore: ObservableObject {
     func saveFavorite(
         session: TranslationSessionSnapshot
     ) async throws -> TranslationFavorite {
+        let admissionLease = try applicationOperationAdmissionGate.requireLease()
+        defer { admissionLease.release() }
         guard let favoriteWorker else {
             throw TranslationServiceAdapterError.unavailable(
                 code: "translation_favorites_unavailable",
@@ -1180,12 +1214,16 @@ final class TranslationStore: ObservableObject {
             favoriteHasMore = false
             return
         }
+        guard let admissionLease = applicationOperationAdmissionGate.begin() else {
+            return
+        }
         let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         favoriteQuery = normalizedQuery
         favoriteListTask?.cancel()
         isLoadingFavorites = true
         isLoadingMoreFavorites = false
-        favoriteListTask = Task { [weak self] in
+        favoriteListTask = Task { [weak self, admissionLease] in
+            defer { admissionLease.release() }
             do {
                 let summaries = try await favoriteWorker.loadSummaries(
                     query: normalizedQuery,
@@ -1228,11 +1266,15 @@ final class TranslationStore: ObservableObject {
               let favoriteWorker else {
             return
         }
+        guard let admissionLease = applicationOperationAdmissionGate.begin() else {
+            return
+        }
         let query = favoriteQuery
         let offset = favoriteSummaries.count
         favoriteListTask?.cancel()
         isLoadingMoreFavorites = true
-        favoriteListTask = Task { [weak self] in
+        favoriteListTask = Task { [weak self, admissionLease] in
+            defer { admissionLease.release() }
             do {
                 let summaries = try await favoriteWorker.loadSummaries(
                     query: query,
@@ -1275,9 +1317,13 @@ final class TranslationStore: ObservableObject {
             isLoadingFavoriteDetail = false
             return
         }
+        guard let admissionLease = applicationOperationAdmissionGate.begin() else {
+            return
+        }
         favoriteDetailTask?.cancel()
         isLoadingFavoriteDetail = true
-        favoriteDetailTask = Task { [weak self] in
+        favoriteDetailTask = Task { [weak self, admissionLease] in
+            defer { admissionLease.release() }
             do {
                 let favorite = try await favoriteWorker.load(id: id)
                 try Task.checkCancellation()
@@ -1309,6 +1355,10 @@ final class TranslationStore: ObservableObject {
 
     @discardableResult
     func deleteFavorite(id: String) async -> Bool {
+        guard let admissionLease = applicationOperationAdmissionGate.begin() else {
+            return false
+        }
+        defer { admissionLease.release() }
         guard let favoriteWorker else { return false }
         do {
             let deleted = try await favoriteWorker.delete(id: id)
@@ -1328,11 +1378,15 @@ final class TranslationStore: ObservableObject {
     }
 
     func exportFavoritesJSON() async throws -> Data {
+        let admissionLease = try applicationOperationAdmissionGate.requireLease()
+        defer { admissionLease.release() }
         guard let favoriteWorker else { return Data("[]".utf8) }
         return try await favoriteWorker.exportJSON()
     }
 
     func exportFavoritesMarkdown() async throws -> Data {
+        let admissionLease = try applicationOperationAdmissionGate.requireLease()
+        defer { admissionLease.release() }
         guard let favoriteWorker else { return Data() }
         return try await favoriteWorker.exportMarkdown()
     }

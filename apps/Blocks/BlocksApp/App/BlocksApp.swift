@@ -6,6 +6,7 @@ struct BlocksApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var appModel = AppModel()
     @StateObject private var appearanceStore = AppAppearanceStore()
+    @StateObject private var appUpdates = AppUpdateCoordinator.shared
 
     var body: some Scene {
         Window(L10n.string("app.name"), id: "main") {
@@ -25,10 +26,18 @@ struct BlocksApp: App {
                 .environmentObject(appearanceStore)
                 .frame(minWidth: 820, minHeight: 520)
                 .blocksDefaultFont()
+                .task { appUpdates.startIfPossible() }
         }
         .defaultSize(width: 980, height: 680)
         .commands {
             CommandGroup(replacing: .newItem) {}
+            CommandGroup(after: .appInfo) {
+                Button(appUpdates.checkButtonTitle) {
+                    appUpdates.checkForUpdates()
+                }
+                .disabled(!appUpdates.canCheckForUpdates)
+                .help(appUpdates.statusText)
+            }
             CommandGroup(replacing: .appSettings) {
                 Button(L10n.string("menu.settings")) {
                     appModel.openMainWindow(section: .settings)

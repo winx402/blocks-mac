@@ -44,6 +44,30 @@ sign "$app_bundle/Contents/MacOS/BlocksActionBroker" \
   --identifier app.blocks.action-broker \
   --entitlements "$repo_root/apps/Blocks/BlocksActionBroker/BlocksActionBroker.entitlements"
 sign "$app_bundle/Contents/Resources/CLI/blocks" --identifier app.blocks.cli
+# Sparkle's outer framework signature does not re-sign its XPC services and
+# helpers. Follow Sparkle's sandboxed distribution order from the innermost
+# services outward; Downloader retains only Sparkle's own required metadata.
+sparkle_framework="$app_bundle/Contents/Frameworks/Sparkle.framework"
+sparkle_version_root="$sparkle_framework/Versions/B"
+sparkle_installer="$sparkle_version_root/XPCServices/Installer.xpc"
+sparkle_downloader="$sparkle_version_root/XPCServices/Downloader.xpc"
+sparkle_autoupdate="$sparkle_version_root/Autoupdate"
+sparkle_updater="$sparkle_version_root/Updater.app"
+for sparkle_component in "$sparkle_installer" "$sparkle_downloader" "$sparkle_autoupdate" "$sparkle_updater" "$sparkle_framework"; do
+  [[ -e "$sparkle_component" ]] || { echo "error: required Sparkle component is missing: $sparkle_component" >&2; exit 1; }
+done
+sign "$sparkle_installer"
+sign "$sparkle_downloader" --preserve-metadata=entitlements
+sign "$sparkle_autoupdate"
+sign "$sparkle_updater"
+sign "$sparkle_framework"
+# The Helper was independently built and signed before it was copied into the
+# main bundle. Do not re-sign it with the main app's entitlements: retain its
+# narrow, shared-Keychain entitlement contract and let the outer signature
+# seal this nested code object.
+helper_bundle="$app_bundle/Contents/Helpers/Blocks Selection Helper.app"
+[[ -d "$helper_bundle" ]] || { echo "error: embedded Selection Helper is missing before main-app signing." >&2; exit 1; }
+codesign --verify --deep --strict --verbose=2 "$helper_bundle"
 sign "$app_bundle" \
   --entitlements "$resolved_main_entitlements"
 

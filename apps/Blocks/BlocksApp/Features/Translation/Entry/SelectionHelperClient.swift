@@ -75,6 +75,7 @@ struct SelectionHelperBundleIdentityVerifier:
 }
 
 struct SelectionHelperApplicationLocator {
+    private static let launchAdmission = ApplicationOperationAdmissionGate(name: "Selection Helper launch")
     private let candidateURLsProvider: () -> [URL]
     private let runningApplicationURLsProvider: () -> [URL]
     private let openApplication: (URL, Bool) -> Void
@@ -128,7 +129,10 @@ struct SelectionHelperApplicationLocator {
     }
 
     private static func defaultCandidateURLs() -> [URL] {
-        var candidates: [URL] = []
+        #if BLOCKS_LOCAL_DEVELOPMENT
+        return [bundledHelperURL]
+        #else
+        var candidates: [URL] = [bundledHelperURL]
         candidates.append(
             contentsOf: NSRunningApplication.runningApplications(
                 withBundleIdentifier:
@@ -171,6 +175,7 @@ struct SelectionHelperApplicationLocator {
             )
         )
         return candidates
+        #endif
     }
 
     private static func defaultRunningApplicationURLs() -> [URL] {
@@ -184,7 +189,11 @@ struct SelectionHelperApplicationLocator {
         guard DistributionChannel.current.supportsSelectionHelper else {
             return []
         }
+        #if BLOCKS_LOCAL_DEVELOPMENT
+        return [bundledHelperURL]
+        #else
         var allowed = [
+            bundledHelperURL,
             URL(fileURLWithPath: "/Applications/Blocks Selection Helper.app"),
         ]
         if DistributionChannel.current == .development {
@@ -196,6 +205,11 @@ struct SelectionHelperApplicationLocator {
             )
         }
         return allowed
+        #endif
+    }
+
+    private static var bundledHelperURL: URL {
+        Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/Blocks Selection Helper.app")
     }
 
     private static func loginHomeDirectoryURL() -> URL {
@@ -218,18 +232,27 @@ struct SelectionHelperApplicationLocator {
         at applicationURL: URL,
         activates: Bool
     ) {
+        guard let lease = launchAdmission.begin() else { return }
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = activates
         configuration.allowsRunningApplicationSubstitution = false
         NSWorkspace.shared.openApplication(
             at: applicationURL,
             configuration: configuration,
-            completionHandler: { _, _ in }
+            completionHandler: { _, _ in lease.release() }
         )
     }
 
     private func isTrustedSelectionHelper(_ url: URL) -> Bool {
         let standardizedURL = url.standardizedFileURL
+        #if BLOCKS_LOCAL_DEVELOPMENT
+        guard allowedApplicationURLsProvider().contains(where: { $0.standardizedFileURL == standardizedURL }),
+              Self.hasExpectedBundleIdentifier(at: standardizedURL),
+              let executable = Bundle(url: standardizedURL)?.executableURL,
+              let host = Bundle.main.executableURL else { return false }
+        return BlocksLocalBuildTrust.accepts(executableURL: executable, role: "helper")
+            && BlocksLocalBuildTrust.accepts(executableURL: host, role: "app")
+        #else
         guard allowedApplicationURLsProvider().contains(where: {
             $0.standardizedFileURL == standardizedURL
         }),
@@ -244,6 +267,7 @@ struct SelectionHelperApplicationLocator {
             return false
         }
         return true
+        #endif
     }
 
     private static func hasExpectedBundleIdentifier(at url: URL) -> Bool {
@@ -253,6 +277,7 @@ struct SelectionHelperApplicationLocator {
     }
 
     private static func preferenceScore(for url: URL) -> Int {
+        if url.standardizedFileURL == bundledHelperURL.standardizedFileURL { return -1 }
         let path = url.path
         if path == "/Applications/Blocks Selection Helper.app" {
             return 0
@@ -273,6 +298,8 @@ struct SelectionHelperApplicationLocator {
     var isInstalled: Bool {
         resolvedApplicationURL != nil
     }
+
+    var isRunning: Bool { !runningApplicationURLsProvider().isEmpty }
 
     var hasConflictingRunningApplication: Bool {
         let runningURLs = runningApplicationURLsProvider()
@@ -470,16 +497,9 @@ final class SelectionHelperSharedKeyStore:
         service: String,
         account: String
     ) -> [String: Any]? {
-        guard let accessGroup = accessGroupProvider() else {
-            return nil
-        }
-        return [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecAttrAccessGroup as String: accessGroup,
-            kSecUseDataProtectionKeychain as String: true,
-        ]
+        BlocksKeychainNamespace.helperQuery(
+            service: service, account: account, accessGroup: accessGroupProvider()
+        )
     }
 
     private func deleteLegacyActiveKey() {
@@ -573,19 +593,11 @@ final class SelectionHelperBootstrapKeyStore:
     }
 
     private func keychainQuery() -> [String: Any]? {
-        guard let accessGroup =
-                SelectionHelperSharedKeychainAccessGroup.current() else {
-            return nil
-        }
-        return [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String:
-                BlocksSelectionHelperProtocol.bootstrapKeychainService,
-            kSecAttrAccount as String:
-                BlocksSelectionHelperProtocol.bootstrapKeychainAccount,
-            kSecAttrAccessGroup as String: accessGroup,
-            kSecUseDataProtectionKeychain as String: true,
-        ]
+        BlocksKeychainNamespace.helperQuery(
+            service: BlocksSelectionHelperProtocol.bootstrapKeychainService,
+            account: BlocksSelectionHelperProtocol.bootstrapKeychainAccount,
+            accessGroup: SelectionHelperSharedKeychainAccessGroup.current()
+        )
     }
 }
 
@@ -703,6 +715,87 @@ extension SelectionHelperLoopbackConnection:
     SelectionHelperLoopbackConnecting {}
 
 final class SelectionHelperClient: @unchecked Sendable {
+    private let applicationUpdateGate = ApplicationOperationAdmissionGate(name: "Selection Helper client")
+    private let updateStateLock = NSLock()
+    private var helperWasRunningBeforeUpdate = false
+    private var updatePreparationStarted = false
+    private var pasteTargetInspectionApplicationLease: ApplicationOperationAdmissionGate.Lease?
+
+    @MainActor
+    func prepareForApplicationUpdate() async throws {
+        try await Task.detached { [self] in
+            try applicationUpdateGate.pauseIfIdle()
+            guard !applicationLocator.hasConflictingRunningApplication else {
+                throw SelectionAgentServiceFailure.helperInstallationConflict
+            }
+            guard applicationLocator.isRunning else { return }
+            updateStateLock.withLock {
+                helperWasRunningBeforeUpdate = true
+            }
+            guard let key = keyStore.load() else { throw SelectionAgentServiceFailure.notPaired }
+            guard case let .success(healthResponse) = sendAuthenticated(
+                .init(kind: .health), keyData: key, timeout: 0.5, lifecycleControl: true
+            ), healthResponse.health?.capabilities.contains(BlocksSelectionHelperProtocol.updateLifecycleCapability) == true else {
+                throw SelectionAgentServiceFailure.incompatibleVersion
+            }
+            updateStateLock.withLock { updatePreparationStarted = true }
+            guard case let .success(preparation) = sendAuthenticated(
+                .init(kind: .prepareForApplicationUpdate), keyData: key, timeout: 0.5, lifecycleControl: true
+            ), preparation.booleanValue == true else {
+                throw ApplicationOperationAdmissionGate.AdmissionError.busy("Selection Helper")
+            }
+            guard case let .success(termination) = sendAuthenticated(
+                .init(kind: .terminateForApplicationUpdate), keyData: key, timeout: 0.5, lifecycleControl: true
+            ), termination.booleanValue == true else {
+                throw SelectionAgentServiceFailure.connectionFailed
+            }
+            let deadline = ProcessInfo.processInfo.systemUptime + 3
+            while applicationLocator.isRunning && ProcessInfo.processInfo.systemUptime < deadline {
+                Thread.sleep(forTimeInterval: 0.025)
+            }
+            guard !applicationLocator.isRunning else { throw SelectionAgentServiceFailure.timedOut }
+        }.value
+    }
+
+    @MainActor
+    func resumeAfterCancelledApplicationUpdate() async {
+        await Task.detached { [self] in
+            let needsRestore = updateStateLock.withLock { updatePreparationStarted && helperWasRunningBeforeUpdate }
+            var restored = !needsRestore
+            if needsRestore {
+                let deadline = ProcessInfo.processInfo.systemUptime + 3
+                var launchRequested = false
+                while ProcessInfo.processInfo.systemUptime < deadline {
+                    if applicationLocator.isRunning, let key = keyStore.load(),
+                       case let .success(response) = sendAuthenticated(
+                           .init(kind: .resumeAfterCancelledApplicationUpdate), keyData: key,
+                           timeout: 0.25, lifecycleControl: true
+                       ), response.booleanValue == true {
+                        restored = true
+                        break
+                    }
+                    if !applicationLocator.isRunning, !launchRequested {
+                        launchRequested = applicationLocator.open(activates: false)
+                    }
+                    Thread.sleep(forTimeInterval: 0.05)
+                }
+            }
+            updateStateLock.withLock {
+                if restored {
+                    updatePreparationStarted = false
+                    helperWasRunningBeforeUpdate = false
+                }
+            }
+            if !restored { Self.logger.error("update cancellation could not confirm Helper recovery; pairing was preserved") }
+            applicationUpdateGate.resume()
+        }.value
+    }
+
+    var hasPendingApplicationUpdateRecovery: Bool {
+        updateStateLock.withLock { updatePreparationStarted && helperWasRunningBeforeUpdate }
+    }
+
+    func beginApplicationOperation() -> ApplicationOperationAdmissionGate.Lease? { applicationUpdateGate.begin() }
     private static let logger = Logger(
         subsystem: "app.blocks.app",
         category: "SelectionHelper"
@@ -756,6 +849,8 @@ final class SelectionHelperClient: @unchecked Sendable {
 
     @discardableResult
     func openHelper(activates: Bool = true) -> Bool {
+        guard let lease = applicationUpdateGate.begin() else { return false }
+        defer { lease.release() }
         if let url = applicationLocator.resolvedApplicationURL {
             Self.logger.info(
                 "helper launch path=\(url.path, privacy: .public) activates=\(activates, privacy: .public)"
@@ -767,6 +862,8 @@ final class SelectionHelperClient: @unchecked Sendable {
     func disconnect(
         timeout: TimeInterval = 0.4
     ) -> Result<Void, SelectionAgentServiceFailure> {
+        guard let lease = applicationUpdateGate.begin() else { return .failure(.connectionFailed) }
+        defer { lease.release() }
         guard keyStore.load() != nil else {
             return .success(())
         }
@@ -787,6 +884,8 @@ final class SelectionHelperClient: @unchecked Sendable {
         code: String,
         timeout: TimeInterval = 1
     ) -> Result<SelectionHelperHealth, SelectionAgentServiceFailure> {
+        guard let lease = applicationUpdateGate.begin() else { return .failure(.connectionFailed) }
+        defer { lease.release() }
         guard !hasInstallationConflict else {
             return .failure(.helperInstallationConflict)
         }
@@ -988,6 +1087,8 @@ final class SelectionHelperClient: @unchecked Sendable {
         maximumCharacters: Int =
             BlocksSelectionCaptureProtocol.maximumSelectionCharacters
     ) -> AXSelectionElementReadResult {
+        guard let lease = applicationUpdateGate.begin() else { return .failure(.cancelled) }
+        defer { lease.release() }
         let startedAt = CFAbsoluteTimeGetCurrent()
         let timeout =
             timeout.isFinite && timeout > 0
@@ -1198,9 +1299,11 @@ final class SelectionHelperClient: @unchecked Sendable {
     }
 
     private func beginPasteTargetInspection() -> Bool {
-        pasteTargetInspectionLock.withLock {
+        guard let lease = applicationUpdateGate.begin() else { return false }
+        return pasteTargetInspectionLock.withLock {
             guard !pasteTargetInspectionInFlight else { return false }
             pasteTargetInspectionInFlight = true
+            pasteTargetInspectionApplicationLease = lease
             return true
         }
     }
@@ -1208,17 +1311,23 @@ final class SelectionHelperClient: @unchecked Sendable {
     private func endPasteTargetInspection() {
         pasteTargetInspectionLock.withLock {
             pasteTargetInspectionInFlight = false
+            pasteTargetInspectionApplicationLease?.release()
+            pasteTargetInspectionApplicationLease = nil
         }
     }
 
     private func sendAuthenticated(
         _ command: SelectionHelperCommand,
         keyData: Data,
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        lifecycleControl: Bool = false
     ) -> Result<
         SelectionHelperCommandResponse,
         SelectionAgentServiceFailure
     > {
+        let lease = lifecycleControl ? nil : applicationUpdateGate.begin()
+        guard lifecycleControl || lease != nil else { return .failure(.connectionFailed) }
+        defer { lease?.release() }
         let requestID =
             command.captureRequest?.requestID
             ?? command.pasteTargetRequest?.requestID
@@ -1419,6 +1528,14 @@ final class SelectionHelperDisconnectRecoveryStore:
 final class SelectionHelperSettingsController:
     ObservableObject
 {
+    func prepareForApplicationUpdate() async throws { try await client.prepareForApplicationUpdate() }
+    func resumeAfterCancelledApplicationUpdate() async {
+        await client.resumeAfterCancelledApplicationUpdate()
+        if client.hasPendingApplicationUpdateRecovery {
+            lastError = helperFailureMessage(.connectionFailed)
+        }
+    }
+
     @Published private(set) var state:
         SelectionHelperConnectionState = .checking
     @Published var pairingCode = ""
@@ -1471,6 +1588,7 @@ final class SelectionHelperSettingsController:
     }
 
     func refresh() {
+        guard let lease = client.beginApplicationOperation() else { return }
         generation &+= 1
         let currentGeneration = generation
         lastError = nil
@@ -1522,7 +1640,7 @@ final class SelectionHelperSettingsController:
         let client = client
         Task.detached(priority: .userInitiated) {
             client.health(timeout: 0.6)
-        }.valueTask { [weak self] result in
+        }.valueTask(holding: lease) { [weak self] result in
             guard let self,
                   generation == currentGeneration else {
                 return
@@ -1542,6 +1660,7 @@ final class SelectionHelperSettingsController:
     }
 
     func openHelper() {
+        guard let lease = client.beginApplicationOperation() else { return }
         guard !client.hasInstallationConflict else {
             state = .installationConflict
             lastError = helperFailureMessage(.helperInstallationConflict)
@@ -1555,12 +1674,14 @@ final class SelectionHelperSettingsController:
         }
         state = client.isPaired ? .connecting : .notPaired
         Task { [weak self] in
+            defer { lease.release() }
             try? await Task.sleep(for: .milliseconds(350))
             self?.refresh()
         }
     }
 
     func pair() {
+        guard let lease = client.beginApplicationOperation() else { return }
         let code = pairingCode.filter(\.isNumber)
         guard code.count == 6 else {
             lastError = L10n.string(
@@ -1575,7 +1696,7 @@ final class SelectionHelperSettingsController:
         let client = client
         Task.detached(priority: .userInitiated) {
             client.pair(code: code, timeout: 1.2)
-        }.valueTask { [weak self] result in
+        }.valueTask(holding: lease) { [weak self] result in
             guard let self,
                   generation == currentGeneration else {
                 return
@@ -1588,12 +1709,13 @@ final class SelectionHelperSettingsController:
     }
 
     func requestAccessibilityPermission() {
+        guard let lease = client.beginApplicationOperation() else { return }
         generation &+= 1
         let currentGeneration = generation
         let client = client
         Task.detached(priority: .userInitiated) {
             client.requestPermission(timeout: 1)
-        }.valueTask { [weak self] _ in
+        }.valueTask(holding: lease) { [weak self] _ in
             guard let self,
                   generation == currentGeneration else {
                 return
@@ -1613,6 +1735,8 @@ final class SelectionHelperSettingsController:
     }
 
     func disconnect() {
+        guard let lease = client.beginApplicationOperation() else { return }
+        defer { lease.release() }
         generation &+= 1
         let currentGeneration = generation
         pendingDisconnectRecovery = true
@@ -1635,10 +1759,11 @@ final class SelectionHelperSettingsController:
         currentGeneration: UInt64,
         isRecoveryAttempt: Bool
     ) {
+        guard let lease = client.beginApplicationOperation() else { return }
         let client = client
         Task.detached(priority: .utility) {
             client.disconnect()
-        }.valueTask { [weak self] result in
+        }.valueTask(holding: lease) { [weak self] result in
             guard let self,
                   generation == currentGeneration else {
                 return
@@ -1746,10 +1871,12 @@ final class SelectionHelperSettingsController:
 
 private extension Task where Success: Sendable, Failure == Never {
     func valueTask(
+        holding lease: ApplicationOperationAdmissionGate.Lease? = nil,
         _ completion:
             @escaping @MainActor (Success) -> Void
     ) {
         _Concurrency.Task<Void, Never> { @MainActor in
+            defer { lease?.release() }
             completion(await value)
         }
     }
@@ -1783,6 +1910,7 @@ extension SelectionHelperClient:
 private final class SelectionHelperCaptureOperation:
     @unchecked Sendable
 {
+    private let applicationUpdateGate = ApplicationOperationAdmissionGate(name: "Selection Helper capture operation")
     private enum State {
         case pending
         case resolved(AXSelectionElementReadResult)
@@ -1804,6 +1932,10 @@ private final class SelectionHelperCaptureOperation:
             return true
         }
         guard shouldStart else { return }
+        guard let lease = applicationUpdateGate.begin() else {
+            _ = resolve(.failure(.cancelled))
+            return
+        }
         let boundedTimeout =
             timeout.isFinite && timeout > 0
             ? timeout
@@ -1814,11 +1946,14 @@ private final class SelectionHelperCaptureOperation:
             guard resolve(.failure(.timedOut)) else {
                 return
             }
+            let timeoutLease = applicationUpdateGate.begin()
             Task.detached(priority: .utility) {
+                defer { timeoutLease?.release() }
                 onTimeout()
             }
         }
         Task.detached(priority: .userInitiated) { [self] in
+            defer { lease.release() }
             guard isPending else { return }
             let result = capture()
             _ = resolve(result)
@@ -1849,7 +1984,9 @@ private final class SelectionHelperCaptureOperation:
             return true
         }
         guard shouldNotify else { return }
+        guard let lease = applicationUpdateGate.begin() else { return }
         Task.detached(priority: .utility) {
+            defer { lease.release() }
             notifyHelper()
         }
     }

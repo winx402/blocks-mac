@@ -434,25 +434,32 @@ private final class ClipboardRecordMutationPipeline: @unchecked Sendable {
     private let hooks: ClipboardRecordMutationPipelineHooks
     private let recordActionValidity: ClipboardRecordActionValidity
     private let commitGate: ClipboardRecordCommitGate
+    private let applicationUpdateGate: ApplicationOperationAdmissionGate
 
     init(
         repository: ClipboardRepository?,
         mutationQueue: ClipboardRepositoryMutationQueue,
         hooks: ClipboardRecordMutationPipelineHooks,
         recordActionValidity: ClipboardRecordActionValidity,
-        commitGate: ClipboardRecordCommitGate
+        commitGate: ClipboardRecordCommitGate,
+        applicationUpdateGate: ApplicationOperationAdmissionGate
     ) {
         self.repository = repository
         self.mutationQueue = mutationQueue
         self.hooks = hooks
         self.recordActionValidity = recordActionValidity
         self.commitGate = commitGate
+        self.applicationUpdateGate = applicationUpdateGate
     }
 
     func delete(
         recordID: String,
         expectedContentRevision: Int64? = nil
     ) async -> ClipboardRecordMutationOutcome {
+        guard let applicationLease = applicationUpdateGate.begin() else {
+            return .failure
+        }
+        defer { applicationLease.release() }
         hooks.beforeCommitGateAcquire(.delete)
         guard let permit = await commitGate.acquire() else { return .failure }
         guard !Task.isCancelled else {
@@ -489,7 +496,11 @@ private final class ClipboardRecordMutationPipeline: @unchecked Sendable {
         recordID: String,
         at date: Date
     ) async -> ClipboardRecordMutationOutcome {
-        await perform(.markCopied) { repository in
+        guard let applicationLease = applicationUpdateGate.begin() else {
+            return .failure
+        }
+        defer { applicationLease.release() }
+        return await perform(.markCopied) { repository in
             do {
                 return .copied(try repository.markCopied(recordID: recordID, at: date))
             } catch ClipboardRepositoryError.recordNotFound(_) {
@@ -506,6 +517,8 @@ private final class ClipboardRecordMutationPipeline: @unchecked Sendable {
         text: String?,
         expectedContentRevision: Int64
     ) async throws -> ClipboardDetailSaveResult {
+        let applicationLease = try applicationUpdateGate.requireLease()
+        defer { applicationLease.release() }
         guard let permit = await commitGate.acquire() else {
             throw CancellationError()
         }
@@ -601,25 +614,32 @@ private final class ClipboardCleanupMutationPipeline: @unchecked Sendable {
     private let mutationQueue: ClipboardRepositoryMutationQueue
     private let recordActionValidity: ClipboardRecordActionValidity
     private let commitGate: ClipboardRecordCommitGate
+    private let applicationUpdateGate: ApplicationOperationAdmissionGate
 
     init(
         repository: ClipboardRepository?,
         hooks: ClipboardCleanupMutationPipelineHooks,
         mutationQueue: ClipboardRepositoryMutationQueue,
         recordActionValidity: ClipboardRecordActionValidity,
-        commitGate: ClipboardRecordCommitGate
+        commitGate: ClipboardRecordCommitGate,
+        applicationUpdateGate: ApplicationOperationAdmissionGate
     ) {
         self.repository = repository
         self.hooks = hooks
         self.mutationQueue = mutationQueue
         self.recordActionValidity = recordActionValidity
         self.commitGate = commitGate
+        self.applicationUpdateGate = applicationUpdateGate
     }
 
     func applyPolicy(
         _ policy: ClipboardRepositoryPrunePolicy,
         visibleLimit: Int
     ) async -> ClipboardCleanupMutationOutcome {
+        guard let applicationLease = applicationUpdateGate.begin() else {
+            return .failure(.repository)
+        }
+        defer { applicationLease.release() }
         guard let permit = await commitGate.acquire() else { return .failure(.repository) }
         guard !Task.isCancelled else {
             await commitGate.release(permit)
@@ -659,6 +679,10 @@ private final class ClipboardCleanupMutationPipeline: @unchecked Sendable {
     func previewPolicy(
         _ policy: ClipboardRepositoryPrunePolicy
     ) async -> Result<ClipboardRepositoryPrunePlan, ClipboardCleanupMutationFailure> {
+        guard let applicationLease = applicationUpdateGate.begin() else {
+            return .failure(.repository)
+        }
+        defer { applicationLease.release() }
         guard let permit = await commitGate.acquire() else { return .failure(.repository) }
         let outcome: Result<ClipboardRepositoryPrunePlan, ClipboardCleanupMutationFailure> = await withCheckedContinuation { continuation in
             mutationQueue.enqueue { [repository] in
@@ -679,6 +703,10 @@ private final class ClipboardCleanupMutationPipeline: @unchecked Sendable {
         token: ClipboardRepositoryPrunePlanToken,
         visibleLimit: Int
     ) async -> ClipboardCleanupMutationOutcome {
+        guard let applicationLease = applicationUpdateGate.begin() else {
+            return .failure(.repository)
+        }
+        defer { applicationLease.release() }
         guard let permit = await commitGate.acquire() else { return .failure(.repository) }
         let outcome = await perform(.applyPolicy) { repository in
             guard let result = try repository.applyPolicyConfirming(
@@ -708,6 +736,10 @@ private final class ClipboardCleanupMutationPipeline: @unchecked Sendable {
     }
 
     func clearUnfavorited() async -> ClipboardCleanupMutationOutcome {
+        guard let applicationLease = applicationUpdateGate.begin() else {
+            return .failure(.repository)
+        }
+        defer { applicationLease.release() }
         guard let permit = await commitGate.acquire() else { return .failure(.repository) }
         guard !Task.isCancelled else {
             await commitGate.release(permit)
@@ -948,6 +980,9 @@ final class ClipboardStore: ObservableObject {
     private let cleanupMutationPipeline: ClipboardCleanupMutationPipeline
     private let recordActionValidity: ClipboardRecordActionValidity
     let recordCommitGate: ClipboardRecordCommitGate
+    /// Shared by every clipboard task producer; update admission is acquired
+    /// before task enqueue, never inferred from a retained Task reference.
+    let applicationUpdateGate: ApplicationOperationAdmissionGate
     private let cleanupPolicyDebounce: Duration
     let tagStore: ClipboardTagStore
     let detailStore: ClipboardDetailStore
@@ -998,7 +1033,8 @@ final class ClipboardStore: ObservableObject {
         cleanupPolicyDebounce: Duration = .milliseconds(250),
         cleanupMutationPipelineHooks: ClipboardCleanupMutationPipelineHooks = ClipboardCleanupMutationPipelineHooks(),
         capturePersistencePipelineHooks: ClipboardCapturePersistencePipelineHooks = ClipboardCapturePersistencePipelineHooks(),
-        recordMutationPipelineHooks: ClipboardRecordMutationPipelineHooks = ClipboardRecordMutationPipelineHooks()
+        recordMutationPipelineHooks: ClipboardRecordMutationPipelineHooks = ClipboardRecordMutationPipelineHooks(),
+        applicationUpdateGate: ApplicationOperationAdmissionGate = ApplicationOperationAdmissionGate(name: "Clipboard")
     ) {
         let repositoryMutationQueue = ClipboardRepositoryMutationQueue()
         let recordActionValidity = ClipboardRecordActionValidity()
@@ -1006,6 +1042,7 @@ final class ClipboardStore: ObservableObject {
         self.repository = repository
         self.recordActionValidity = recordActionValidity
         self.recordCommitGate = recordCommitGate
+        self.applicationUpdateGate = applicationUpdateGate
         self.historyReadPipeline = ClipboardHistoryReadPipeline(repository: repository)
         self.recordActionPipeline = ClipboardRecordActionPipeline(repository: repository)
         self.recordMutationPipeline = ClipboardRecordMutationPipeline(
@@ -1013,7 +1050,8 @@ final class ClipboardStore: ObservableObject {
             mutationQueue: repositoryMutationQueue,
             hooks: recordMutationPipelineHooks,
             recordActionValidity: recordActionValidity,
-            commitGate: recordCommitGate
+            commitGate: recordCommitGate,
+            applicationUpdateGate: applicationUpdateGate
         )
         self.capturePersistencePipeline = ClipboardCapturePersistencePipeline(
             repository: repository,
@@ -1027,17 +1065,20 @@ final class ClipboardStore: ObservableObject {
             hooks: cleanupMutationPipelineHooks,
             mutationQueue: repositoryMutationQueue,
             recordActionValidity: recordActionValidity,
-            commitGate: recordCommitGate
+            commitGate: recordCommitGate,
+            applicationUpdateGate: applicationUpdateGate
         )
         self.cleanupPolicyDebounce = cleanupPolicyDebounce
         self.tagStore = ClipboardTagStore(
             repository: repository,
-            mutationExecutor: repositoryMutationQueue
+            mutationExecutor: repositoryMutationQueue,
+            applicationUpdateGate: applicationUpdateGate
         )
         self.detailStore = ClipboardDetailStore(
             repository: repository,
             mutationExecutor: repositoryMutationQueue,
             recordCommitGate: recordCommitGate,
+            applicationUpdateGate: applicationUpdateGate,
             onCommittedDeletion: { deletedRecordIDs in
                 recordActionValidity.invalidate(recordIDs: deletedRecordIDs)
             }
@@ -1049,7 +1090,8 @@ final class ClipboardStore: ObservableObject {
             resolvedOCRQueue = ClipboardVisionOCRQueue(
                 repository: repository,
                 ocrCoordinator: ocrCoordinator
-                    ?? LocalOCRCoordinator(service: ocrService ?? LocalVisionOCRService())
+                    ?? LocalOCRCoordinator(service: ocrService ?? LocalVisionOCRService()),
+                applicationUpdateGate: applicationUpdateGate
             )
         } else {
             resolvedOCRQueue = nil
@@ -1080,7 +1122,10 @@ final class ClipboardStore: ObservableObject {
             }
             .store(in: &cancellables)
         if let resolvedOCRQueue {
-            ocrScheduler = ClipboardOCRScheduler(queue: resolvedOCRQueue) { [weak self] recordIDs in
+            ocrScheduler = ClipboardOCRScheduler(
+                queue: resolvedOCRQueue,
+                applicationUpdateGate: applicationUpdateGate
+            ) { [weak self] recordIDs in
                 self?.refreshAfterOCRWork(recordIDs: recordIDs)
             }
         }
@@ -1093,6 +1138,15 @@ final class ClipboardStore: ObservableObject {
         ) async -> BlocksPluginEventDispatchResult
     ) {
         dispatchPluginEvent = dispatcher
+    }
+
+    func pauseForApplicationUpdate() throws {
+        try applicationUpdateGate.pauseIfIdle()
+    }
+
+    func resumeAfterCancelledApplicationUpdate() {
+        applicationUpdateGate.resume()
+        ocrScheduler?.resumeAfterCancelledApplicationUpdate()
     }
 
     deinit {
@@ -1524,6 +1578,10 @@ final class ClipboardStore: ObservableObject {
         maxItems: Int,
         preserveFavorite: Bool
     ) -> Bool {
+        guard let applicationLease = applicationUpdateGate.begin() else {
+            return false
+        }
+        defer { applicationLease.release() }
         logOrderingStage("capture-received", record: snapshot.record)
         let decision = capturePolicy.evaluate(record: snapshot.record, payload: snapshot.payload)
         guard let repository else {
@@ -1587,6 +1645,10 @@ final class ClipboardStore: ObservableObject {
         publishCommittedEffects: @MainActor () -> Bool = { true },
         causationID: UUID? = nil
     ) async -> ClipboardLiveCaptureIngestResult {
+        guard let applicationLease = applicationUpdateGate.begin() else {
+            return .failed
+        }
+        defer { applicationLease.release() }
         logOrderingStage("capture-received", record: snapshot.record)
         if let captureDecision, captureDecision.skipped {
             return .failed
@@ -1863,6 +1925,10 @@ final class ClipboardStore: ObservableObject {
         causationID: UUID? = nil,
         requiresPersistence: Bool = false
     ) async -> Bool {
+        guard let applicationLease = applicationUpdateGate.begin() else {
+            return false
+        }
+        defer { applicationLease.release() }
         if repository == nil {
             guard !requiresPersistence else { return false }
             guard resolveRecord(recordID: recordID) != nil else {
@@ -1974,6 +2040,10 @@ final class ClipboardStore: ObservableObject {
         causationID: UUID? = nil,
         shouldPublishPluginEvent: @MainActor () -> Bool = { true }
     ) async -> ClipboardRecordRecencyUpdate {
+        guard let applicationLease = applicationUpdateGate.begin() else {
+            return .notFound
+        }
+        defer { applicationLease.release() }
         let signpostState = Self.performanceSignposter.beginInterval("RecencyPromotion")
         defer { Self.performanceSignposter.endInterval("RecencyPromotion", signpostState) }
         let currentRecord = records.first(where: { $0.id == recordID })

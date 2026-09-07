@@ -7,7 +7,7 @@
 
 ## Targets
 
-- `Blocks`：主 App，bundle id `app.blocks.app`，sandbox-first；`build_and_run.sh` 会把 Debug App 固定 staging 到 `~/Applications/BlocksDev/Debug/Blocks.app`。完整 Debug App 的 Keychain 访问组要求 Apple Development 证书及匹配的 provisioning profile，不支持无证书 ad-hoc 回退。
+- `Blocks`：官方直发 App，采用 App Sandbox、Developer ID、Hardened Runtime 和 notarization；不计划上架 App Store。`LocalDevelopment` 使用独立 bundle/runtime identity、数据目录和 Keychain namespace，且不启用 App Sandbox，不能与官方包的身份或数据混用。`build_and_run.sh` 会把开发产物固定 staging 到 `~/Applications/BlocksDev/Debug/Blocks.app`；尚未完成的签名、公证和更新链路不代表可发行。
 
 首次构建前，将 `Config/Signing.local.example.xcconfig` 复制为被 Git 忽略的 `Config/Signing.local.xcconfig`，按模板填写自己的 Team、签名及 profile 配置，并安装授权对应 Keychain 组的开发 profile。不要提交本机配置、证书或 profile。缺少签名时脚本会在修改安装包前停止；`BLOCKS_REQUIRE_STABLE_SIGNING=0` 不会取消系统对 profile 的要求。
 

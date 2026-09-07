@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Blocks local release and installer policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "repository",
+    "bundle_id",
+    "team_id",
+    "certificate_sha1",
+    "dmg_asset_template"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "repository": { "const": "winx402/blocks-mac" },
+    "bundle_id": { "const": "app.blocks.app" },
+    "team_id": { "type": "string", "pattern": "^[A-Z0-9]{10}$" },
+    "certificate_sha1": {
+      "type": "string",
+      "oneOf": [
+        { "pattern": "^[A-Fa-f0-9]{40}$" },
+        { "pattern": "^(?:[A-Fa-f0-9]{2}:){19}[A-Fa-f0-9]{2}$" }
+      ]
+    },
+    "dmg_asset_template": { "type": "string", "pattern": "^[-A-Za-z0-9._{}]+\\.dmg$" }
+  },
+  "description": "Create install-release-policy.json from verified public release identity only. It must not contain a Keychain profile, token, private key, or Sparkle private key. The filename template must contain exactly one {tag}."
+}

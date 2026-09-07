@@ -1,8 +1,16 @@
 # Sandbox-first 与分发渠道
 
-状态：active
+状态：superseded
 决策日期：2026-07-01
 来源级别：user-confirmed decision
+
+## 现行规则（2026-09-08 批准）
+
+本记录下方的“sandbox-first + Direct Download/App Store 双出口”已被取代。项目自有代码采用 MIT 开源；官方发行固定为 Developer ID 签名、Hardened Runtime 与 notarization 的 App Sandbox 直发包，不计划 App Store、StoreKit/IAP 或 App Store 审核路线。`LocalDevelopment` 不启用 App Sandbox，并以独立 runtime identity、数据目录和 Keychain namespace 与官方包隔离。
+
+签名、公证、安装和更新链路仍须逐项验收；本规则不将尚未验证的功能或脚本标为可用。
+
+## 被取代的 2026-07 决策
 
 ## 背景
 

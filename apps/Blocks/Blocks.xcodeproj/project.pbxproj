@@ -7,6 +7,22 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B908N0000000000000000001 /* Sparkle-LICENSE.txt in Resources */ = {isa = PBXBuildFile; fileRef = F908N0000000000000000001; };
+		B908N0000000000000000002 /* LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = F908N0000000000000000002; };
+		B908L0000000000000000001 /* ApplicationOperationAdmission.swift in Sources */ = {isa = PBXBuildFile; fileRef = F908L0000000000000000001; };
+		B908L0000000000000000004 /* ApplicationOperationAdmission.swift in Helper */ = {isa = PBXBuildFile; fileRef = F908L0000000000000000001; };
+		B908L0000000000000000002 /* ApplicationLifecycleCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F908L0000000000000000002; };
+		B908L0000000000000000003 /* AppTerminationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F908L0000000000000000003; };
+		B908U0000000000000000001 /* AppUpdateCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F908U0000000000000000001; };
+		B908U0000000000000000002 /* AppUpdateCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F908U0000000000000000002; };
+		B908U0000000000000000003 /* ActionBrokerUpdateSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F908U0000000000000000003; };
+		B908S0000000000000000001 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = S908S0000000000000000001 /* Sparkle */; };
+		B908D0000000000000000001 /* BlocksRuntimeIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = F908D0000000000000000001; };
+		B908D0000000000000000002 /* BlocksLocalBuildTrust.swift in Sources */ = {isa = PBXBuildFile; fileRef = F908D0000000000000000002; };
+		B908D0000000000000000003 /* BlocksKeychainNamespace.swift in Sources */ = {isa = PBXBuildFile; fileRef = F908D0000000000000000003; };
+		B908D0000000000000000004 /* BlocksRuntimeIdentity.swift in Helper */ = {isa = PBXBuildFile; fileRef = F908D0000000000000000001; };
+		B908D0000000000000000005 /* BlocksKeychainNamespace.swift in Helper */ = {isa = PBXBuildFile; fileRef = F908D0000000000000000003; };
+		B908D0000000000000000006 /* BlocksRuntimeIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F908D0000000000000000006; };
 		B90700000000000000000003 /* FloatingPanelGeometryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F90700000000000000000003 /* FloatingPanelGeometryTests.swift */; };
 		B90700000000000000000001 /* SettingsNavigationInteractionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F90700000000000000000001 /* SettingsNavigationInteractionTests.swift */; };
 		B90700000000000000000002 /* SettingsNavigationRowSurfaceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F90700000000000000000002 /* SettingsNavigationRowSurfaceTests.swift */; };
@@ -493,6 +509,19 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		F908N0000000000000000001 /* Sparkle-LICENSE.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = Resources/Sparkle-LICENSE.txt; sourceTree = "<group>"; };
+		F908N0000000000000000002 /* LICENSE */ = {isa = PBXFileReference; lastKnownFileType = text; path = ../../LICENSE; sourceTree = SOURCE_ROOT; };
+		F908L0000000000000000001 /* ApplicationOperationAdmission.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApplicationOperationAdmission.swift; sourceTree = "<group>"; };
+		F908L0000000000000000002 /* ApplicationLifecycleCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/ApplicationLifecycleCoordinator.swift; sourceTree = "<group>"; };
+		F908L0000000000000000003 /* AppTerminationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/AppTerminationCoordinator.swift; sourceTree = "<group>"; };
+		F908U0000000000000000001 /* AppUpdateCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/AppUpdateCoordinator.swift; sourceTree = "<group>"; };
+		F908U0000000000000000002 /* AppUpdateCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdateCoordinatorTests.swift; sourceTree = "<group>"; };
+		F908U0000000000000000003 /* ActionBrokerUpdateSafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActionBrokerUpdateSafetyTests.swift; sourceTree = "<group>"; };
+		F908D0000000000000000001 /* BlocksRuntimeIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlocksRuntimeIdentity.swift; sourceTree = "<group>"; };
+		F908D0000000000000000002 /* BlocksLocalBuildTrust.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlocksLocalBuildTrust.swift; sourceTree = "<group>"; };
+		F908D0000000000000000003 /* BlocksKeychainNamespace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlocksKeychainNamespace.swift; sourceTree = "<group>"; };
+		F908D0000000000000000006 /* BlocksRuntimeIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlocksRuntimeIdentityTests.swift; sourceTree = "<group>"; };
+		F907D0000000000000000001 /* LocalDevelopment.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = LocalDevelopment.xcconfig; sourceTree = "<group>"; };
 		F90700000000000000000003 /* FloatingPanelGeometryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingPanelGeometryTests.swift; sourceTree = "<group>"; };
 		F90700000000000000000001 /* SettingsNavigationInteractionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsNavigationInteractionTests.swift; sourceTree = "<group>"; };
 		F90700000000000000000002 /* SettingsNavigationRowSurfaceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsNavigationRowSurfaceTests.swift; sourceTree = "<group>"; };
@@ -835,6 +864,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B908S0000000000000000001 /* Sparkle in Frameworks */,
 				B0030000000000000000000D /* BlocksCore.framework in Frameworks */,
 				B00600000000000000000007 /* BlocksScreenshotCore.framework in Frameworks */,
 			);
@@ -996,6 +1026,9 @@
 		A14G00000000000000000001 /* BlocksAppTests */ = {
 			isa = PBXGroup;
 			children = (
+				F908U0000000000000000002 /* AppUpdateCoordinatorTests.swift */,
+				F908U0000000000000000003 /* ActionBrokerUpdateSafetyTests.swift */,
+				F908D0000000000000000006 /* BlocksRuntimeIdentityTests.swift */,
 				F90700000000000000000003 /* FloatingPanelGeometryTests.swift */,
 				F90700000000000000000001 /* SettingsNavigationInteractionTests.swift */,
 				F90700000000000000000002 /* SettingsNavigationRowSurfaceTests.swift */,
@@ -1021,6 +1054,10 @@
 		A10000000000000000000001 /* BlocksCore */ = {
 			isa = PBXGroup;
 			children = (
+				F908L0000000000000000001 /* ApplicationOperationAdmission.swift */,
+				F908D0000000000000000001 /* BlocksRuntimeIdentity.swift */,
+				F908D0000000000000000002 /* BlocksLocalBuildTrust.swift */,
+				F908D0000000000000000003 /* BlocksKeychainNamespace.swift */,
 				F10100000000000000000001 /* ActionEnvelope.swift */,
 				F10100000000000000000002 /* ActionRegistry.swift */,
 				F10100000000000000000003 /* ScreenshotAction.swift */,
@@ -1132,6 +1169,11 @@
 		A30000000000000000000001 /* BlocksApp */ = {
 			isa = PBXGroup;
 			children = (
+				F908N0000000000000000001 /* Sparkle-LICENSE.txt */,
+				F908N0000000000000000002 /* LICENSE */,
+				F908L0000000000000000002 /* ApplicationLifecycleCoordinator.swift */,
+				F908L0000000000000000003 /* AppTerminationCoordinator.swift */,
+				F908U0000000000000000001 /* AppUpdateCoordinator.swift */,
 				F50000000000000000000001 /* Assets.xcassets */,
 				F30100000000000000000001 /* BlocksApp.swift */,
 				F34R00000000000000000001 /* DistributionChannel.swift */,
@@ -1345,6 +1387,7 @@
 			isa = PBXGroup;
 			children = (
 				F50000000000000000000002 /* Signing.shared.xcconfig */,
+				F907D0000000000000000001 /* LocalDevelopment.xcconfig */,
 				F50000000000000000000003 /* Signing.local.example.xcconfig */,
 			);
 			path = Config;
@@ -1394,6 +1437,9 @@
 				D33I00000000000000000001 /* BlocksCommand */,
 			);
 			name = Blocks;
+			packageProductDependencies = (
+				S908S0000000000000000001 /* Sparkle */,
+			);
 			productName = Blocks;
 			productReference = F00100000000000000000001 /* Blocks.app */;
 			productType = "com.apple.product-type.application";
@@ -1625,6 +1671,9 @@
 			mainGroup = A00000000000000000000002;
 			productRefGroup = A00000000000000000000003 /* Products */;
 			projectDirPath = "";
+			packageReferences = (
+				R908S0000000000000000001 /* Sparkle */,
+			);
 			projectRoot = "";
 			targets = (
 				T00300000000000000000001 /* Blocks */,
@@ -1643,11 +1692,29 @@
 		};
 /* End PBXProject section */
 
+/* Begin XCRemoteSwiftPackageReference section */
+		R908S0000000000000000001 /* Sparkle */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = { kind = exactVersion; version = 2.9.6; };
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		S908S0000000000000000001 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = R908S0000000000000000001 /* Sparkle */;
+			productName = Sparkle;
+		};
+/* End XCSwiftPackageProductDependency section */
+
 /* Begin PBXResourcesBuildPhase section */
 		P00300000000000000000003 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B908N0000000000000000001 /* Sparkle-LICENSE.txt in Resources */,
+				B908N0000000000000000002 /* LICENSE in Resources */,
 				B00500000000000000000001 /* Assets.xcassets in Resources */,
 				B0030000000000000000000F /* Localizable.xcstrings in Resources */,
 				B35I00000000000000000001 /* InfoPlist.xcstrings in Resources */,
@@ -1723,7 +1790,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -eu\nhelper=\"${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/MacOS/BlocksClipboardBroker\"\nentitlements=\"${SRCROOT}/BlocksClipboardBroker/BlocksClipboardBroker.entitlements\"\nif [ \"${CODE_SIGNING_ALLOWED:-NO}\" != \"YES\" ] || [ ! -x \"$helper\" ]; then\n    exit 0\nfi\nidentity=\"${EXPANDED_CODE_SIGN_IDENTITY:--}\"\nif [ -z \"$identity\" ]; then\n    identity=\"-\"\nfi\n/usr/bin/codesign --force --sign \"$identity\" --identifier app.blocks.clipboard-broker --entitlements \"$entitlements\" --timestamp=none --generate-entitlement-der \"$helper\"\n";
+			shellScript = "set -eu\nhelper=\"${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/MacOS/BlocksClipboardBroker\"\nentitlements=\"${SRCROOT}/BlocksClipboardBroker/BlocksClipboardBroker.entitlements\"\nif [ \"${CODE_SIGNING_ALLOWED:-NO}\" != \"YES\" ] || [ ! -x \"$helper\" ]; then\n    exit 0\nfi\nidentity=\"${EXPANDED_CODE_SIGN_IDENTITY:--}\"\nif [ -z \"$identity\" ]; then\n    identity=\"-\"\nfi\n/usr/bin/codesign --force --sign \"$identity\" --identifier \"${BLOCKS_IDENTIFIER_PREFIX:-app.blocks}.clipboard-broker\" --entitlements \"$entitlements\" --timestamp=none --generate-entitlement-der \"$helper\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -1732,6 +1799,10 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B908L0000000000000000001 /* ApplicationOperationAdmission.swift in Sources */,
+				B908D0000000000000000001 /* BlocksRuntimeIdentity.swift in Sources */,
+				B908D0000000000000000002 /* BlocksLocalBuildTrust.swift in Sources */,
+				B908D0000000000000000003 /* BlocksKeychainNamespace.swift in Sources */,
 				B00100000000000000000001 /* ActionEnvelope.swift in Sources */,
 				B00100000000000000000002 /* ActionRegistry.swift in Sources */,
 				B00100000000000000000003 /* ScreenshotAction.swift in Sources */,
@@ -1779,6 +1850,9 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B908L0000000000000000002 /* ApplicationLifecycleCoordinator.swift in Sources */,
+				B908L0000000000000000003 /* AppTerminationCoordinator.swift in Sources */,
+				B908U0000000000000000001 /* AppUpdateCoordinator.swift in Sources */,
 				B00300000000000000000001 /* BlocksApp.swift in Sources */,
 				B34R00000000000000000001 /* DistributionChannel.swift in Sources */,
 				B34R00000000000000000002 /* DiagnosticsExportService.swift in Sources */,
@@ -2039,6 +2113,9 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B908U0000000000000000002 /* AppUpdateCoordinatorTests.swift in Sources */,
+				B908U0000000000000000003 /* ActionBrokerUpdateSafetyTests.swift in Sources */,
+				B908D0000000000000000006 /* BlocksRuntimeIdentityTests.swift in Sources */,
 				B90700000000000000000003 /* FloatingPanelGeometryTests.swift in Sources */,
 				B90700000000000000000001 /* SettingsNavigationInteractionTests.swift in Sources */,
 				B90700000000000000000002 /* SettingsNavigationRowSurfaceTests.swift in Sources */,
@@ -2089,6 +2166,9 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B908D0000000000000000004 /* BlocksRuntimeIdentity.swift in Helper */,
+				B908D0000000000000000005 /* BlocksKeychainNamespace.swift in Helper */,
+				B908L0000000000000000004 /* ApplicationOperationAdmission.swift in Helper */,
 				B27X00000000000000000004 /* BlocksSelectionHelperApp.swift in Sources */,
 				B27X00000000000000000006 /* SelectionAgentXPC.swift in Sources */,
 			);
@@ -2886,6 +2966,225 @@
 			buildSettings = { CODE_SIGN_IDENTITY = "-"; CODE_SIGN_STYLE = Manual; CREATE_INFOPLIST_SECTION_IN_BINARY = YES; GENERATE_INFOPLIST_FILE = YES; PRODUCT_BUNDLE_IDENTIFIER = app.blocks.clipboard-blocking-provider-fixture; PRODUCT_NAME = BlocksClipboardBlockingProviderFixture; SKIP_INSTALL = YES; SUPPORTED_PLATFORMS = macosx; };
 			name = DebugTesting;
 		};
+		LD8F6872CA34894ABA0CAE38 /* LocalDevelopment */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = F907D0000000000000000001 /* LocalDevelopment.xcconfig */;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_STYLE = Manual;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG BLOCKS_LOCAL_DEVELOPMENT";
+				SWIFT_VERSION = 5.0;
+			};
+			name = LocalDevelopment;
+		};
+		LDD8A178E94978D24E282A07 /* LocalDevelopment */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG BLOCKS_LOCAL_DEVELOPMENT";
+				CODE_SIGNING_ALLOWED = NO;
+				DEFINES_MODULE = YES;
+				MACH_O_TYPE = staticlib;
+				PRODUCT_BUNDLE_IDENTIFIER = app.blocks.dev.core;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = macosx;
+			};
+			name = LocalDevelopment;
+		};
+		LD355C08F958D9DF5E03BEA8 /* LocalDevelopment */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = F907D0000000000000000001 /* LocalDevelopment.xcconfig */;
+			buildSettings = {
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG BLOCKS_LOCAL_DEVELOPMENT";
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = "BlocksApp/Blocks-LocalDevelopment.entitlements";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = BlocksApp/Resources/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.blocks.dev;
+				PRODUCT_NAME = "Blocks Dev";
+				PRODUCT_MODULE_NAME = Blocks;
+				SKIP_INSTALL = NO;
+				SUPPORTED_PLATFORMS = macosx;
+			};
+			name = LocalDevelopment;
+		};
+		LD78377CA647B063A2158747 /* LocalDevelopment */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG BLOCKS_LOCAL_DEVELOPMENT";
+				CODE_SIGNING_ALLOWED = NO;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+				PRODUCT_MODULE_NAME = BlocksCLI;
+				PRODUCT_NAME = blocks;
+				SKIP_INSTALL = NO;
+				SUPPORTED_PLATFORMS = macosx;
+			};
+			name = LocalDevelopment;
+		};
+		LD4B764AE2E6D265F904E0AE /* LocalDevelopment */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG BLOCKS_LOCAL_DEVELOPMENT";
+				CODE_SIGNING_ALLOWED = NO;
+				DEFINES_MODULE = YES;
+				MACH_O_TYPE = staticlib;
+				PRODUCT_BUNDLE_IDENTIFIER = app.blocks.dev.screenshotcore;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = macosx;
+			};
+			name = LocalDevelopment;
+		};
+		LD2CC2E98F3C36352C3767D6 /* LocalDevelopment */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG BLOCKS_LOCAL_DEVELOPMENT";
+				CODE_SIGNING_ALLOWED = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @loader_path/../Frameworks @executable_path/../Frameworks";
+				PRODUCT_BUNDLE_IDENTIFIER = app.blocks.dev.screenshotcore.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = macosx;
+			};
+			name = LocalDevelopment;
+		};
+		LD7DC77A89EE2147BF88B55B /* LocalDevelopment */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG BLOCKS_LOCAL_DEVELOPMENT";
+				CODE_SIGN_ENTITLEMENTS = "BlocksApp/Blocks-LocalDevelopment.entitlements";
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				CREATE_INFOPLIST_SECTION_IN_BINARY = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+				PRODUCT_BUNDLE_IDENTIFIER = app.blocks.dev.action-broker;
+				PRODUCT_NAME = BlocksActionBroker;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = macosx;
+			};
+			name = LocalDevelopment;
+		};
+		LDE6301CA791AF6BA6A8A2CF /* LocalDevelopment */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG BLOCKS_LOCAL_DEVELOPMENT";
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @loader_path/../Frameworks @executable_path/../Frameworks";
+				PRODUCT_BUNDLE_IDENTIFIER = app.blocks.dev.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_ENABLE_EXPLICIT_MODULES = NO;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Blocks Dev.app/Contents/MacOS/Blocks Dev";
+			};
+			name = LocalDevelopment;
+		};
+		LD7462AE8C0A11B5F9AADB02 /* LocalDevelopment */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = BlocksPluginRunner/BlocksPluginRunner.entitlements;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = BlocksPluginRunner/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @loader_path/../Frameworks @executable_path/../Frameworks";
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.blocks.dev.plugin-runner;
+				PRODUCT_NAME = BlocksPluginRunner;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG BLOCKS_PLUGIN_RUNNER_SERVICE BLOCKS_LOCAL_DEVELOPMENT";
+			};
+			name = LocalDevelopment;
+		};
+			LD2FAD99933372A44AB8F72E /* LocalDevelopment */ = {
+				isa = XCBuildConfiguration;
+				baseConfigurationReference = F907D0000000000000000001 /* LocalDevelopment.xcconfig */;
+				buildSettings = {
+					CODE_SIGN_ENTITLEMENTS = BlocksApp/Blocks-LocalDevelopment.entitlements;
+					CURRENT_PROJECT_VERSION = 1;
+					ENABLE_HARDENED_RUNTIME = NO;
+					GENERATE_INFOPLIST_FILE = NO;
+					INFOPLIST_FILE = BlocksSelectionHelper/Info.plist;
+					MARKETING_VERSION = 0.1.0;
+					PRODUCT_BUNDLE_IDENTIFIER = app.blocks.dev.selection-helper;
+					PRODUCT_NAME = "Blocks Selection Helper";
+					SKIP_INSTALL = NO;
+					SUPPORTED_PLATFORMS = macosx;
+					SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG BLOCKS_SELECTION_HELPER BLOCKS_LOCAL_DEVELOPMENT";
+				};
+				name = LocalDevelopment;
+			};
+		LDA40BDE590D2261B83966E9 /* LocalDevelopment */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG BLOCKS_LOCAL_DEVELOPMENT";
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGNING_ALLOWED = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @loader_path/../Frameworks @executable_path/../Frameworks";
+				PRODUCT_BUNDLE_IDENTIFIER = app.blocks.dev.selection-helper.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_ENABLE_EXPLICIT_MODULES = NO;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Blocks Selection Helper.app/Contents/MacOS/Blocks Selection Helper";
+			};
+			name = LocalDevelopment;
+		};
+		LD61F2EEB671CB1C34210987 /* LocalDevelopment */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG BLOCKS_LOCAL_DEVELOPMENT";
+				CODE_SIGN_ENTITLEMENTS = BlocksClipboardBroker/BlocksClipboardBroker.entitlements;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO;
+				CODE_SIGN_STYLE = Manual;
+				CREATE_INFOPLIST_SECTION_IN_BINARY = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+				PRODUCT_BUNDLE_IDENTIFIER = app.blocks.dev.clipboard-broker;
+				PRODUCT_NAME = BlocksClipboardBroker;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = macosx;
+			};
+			name = LocalDevelopment;
+		};
+		LDA1C93DBF00CA027723DD12 /* LocalDevelopment */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG BLOCKS_LOCAL_DEVELOPMENT";
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				CREATE_INFOPLIST_SECTION_IN_BINARY = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = app.blocks.dev.clipboard-blocking-provider-fixture;
+				PRODUCT_NAME = BlocksClipboardBlockingProviderFixture;
+				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = macosx;
+			};
+			name = LocalDevelopment;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -2893,6 +3192,7 @@
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				L00000000000000000000002 /* Debug */,
+				LD8F6872CA34894ABA0CAE38 /* LocalDevelopment */,
 				L40T00000000000000000001 /* DebugTesting */,
 				L00000000000000000000003 /* Release */,
 				L00000000000000000000004 /* AppStoreRelease */,
@@ -2904,6 +3204,7 @@
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				L00200000000000000000002 /* Debug */,
+				LDD8A178E94978D24E282A07 /* LocalDevelopment */,
 				L40T00000000000000000002 /* DebugTesting */,
 				L00200000000000000000003 /* Release */,
 				L00200000000000000000004 /* AppStoreRelease */,
@@ -2915,6 +3216,7 @@
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				L00300000000000000000002 /* Debug */,
+				LD355C08F958D9DF5E03BEA8 /* LocalDevelopment */,
 				L40T00000000000000000003 /* DebugTesting */,
 				L00300000000000000000003 /* Release */,
 				L00300000000000000000004 /* AppStoreRelease */,
@@ -2926,6 +3228,7 @@
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				L00400000000000000000002 /* Debug */,
+				LD78377CA647B063A2158747 /* LocalDevelopment */,
 				L40T00000000000000000004 /* DebugTesting */,
 				L00400000000000000000003 /* Release */,
 				L00400000000000000000004 /* AppStoreRelease */,
@@ -2937,6 +3240,7 @@
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				L00600000000000000000002 /* Debug */,
+				LD4B764AE2E6D265F904E0AE /* LocalDevelopment */,
 				L40T00000000000000000005 /* DebugTesting */,
 				L00600000000000000000003 /* Release */,
 				L00600000000000000000004 /* AppStoreRelease */,
@@ -2948,6 +3252,7 @@
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				L00600000000000000000012 /* Debug */,
+				LD2CC2E98F3C36352C3767D6 /* LocalDevelopment */,
 				L00600000000000000000013 /* Release */,
 				L00600000000000000000014 /* AppStoreRelease */,
 			);
@@ -2958,6 +3263,7 @@
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				L14F00000000000000000002 /* Debug */,
+				LD7DC77A89EE2147BF88B55B /* LocalDevelopment */,
 				L40T00000000000000000006 /* DebugTesting */,
 				L14F00000000000000000003 /* Release */,
 				L14F00000000000000000004 /* AppStoreRelease */,
@@ -2969,6 +3275,7 @@
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				L14G00000000000000000002 /* Debug */,
+				LDE6301CA791AF6BA6A8A2CF /* LocalDevelopment */,
 				L40T00000000000000000007 /* DebugTesting */,
 				L14G00000000000000000003 /* Release */,
 				L14G00000000000000000004 /* AppStoreRelease */,
@@ -2980,6 +3287,7 @@
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				L15P00000000000000000002 /* Debug */,
+				LD7462AE8C0A11B5F9AADB02 /* LocalDevelopment */,
 				L40T00000000000000000008 /* DebugTesting */,
 				L15P00000000000000000003 /* Release */,
 				L15P00000000000000000004 /* AppStoreRelease */,
@@ -2991,6 +3299,7 @@
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				L27X00000000000000000002 /* Debug */,
+				LD2FAD99933372A44AB8F72E /* LocalDevelopment */,
 				L27X00000000000000000003 /* Release */,
 				L27X00000000000000000004 /* AppStoreRelease */,
 			);
@@ -3001,6 +3310,7 @@
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				L27V00000000000000000002 /* Debug */,
+				LDA40BDE590D2261B83966E9 /* LocalDevelopment */,
 				L27V00000000000000000003 /* Release */,
 				L27V00000000000000000004 /* AppStoreRelease */,
 			);
@@ -3011,6 +3321,7 @@
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				L28C00000000000000000002 /* Debug */,
+				LD61F2EEB671CB1C34210987 /* LocalDevelopment */,
 				L40T00000000000000000009 /* DebugTesting */,
 				L28C00000000000000000003 /* Release */,
 				L28C00000000000000000004 /* AppStoreRelease */,
@@ -3022,6 +3333,7 @@
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				L29F00000000000000000002 /* Debug */,
+				LDA1C93DBF00CA027723DD12 /* LocalDevelopment */,
 				L40T0000000000000000000A /* DebugTesting */,
 				L29F00000000000000000003 /* Release */,
 				L29F00000000000000000004 /* AppStoreRelease */,

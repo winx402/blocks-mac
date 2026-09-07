@@ -4,9 +4,11 @@ set -euo pipefail
 usage() {
   cat >&2 <<'EOF'
 usage: package_dmg.sh \
-  --artifact direct-beta|selection-helper-beta \
+  --artifact direct-stable|direct-beta|selection-helper-stable|selection-helper-beta \
   --app /path/to/App.app \
   --release-name VERSION \
+  [--expected-dmg-name NAME.dmg] \
+  [--expected-version X.Y.Z --expected-build N] \
   --output-dir /path/to/output \
   --expected-team-id TEAMID \
   --expected-cert-sha1 SHA1 \
@@ -22,6 +24,9 @@ output_directory=""
 expected_team_id=""
 expected_cert_sha1="${BLOCKS_EXPECTED_SIGNING_CERT_SHA1:-}"
 identity="${BLOCKS_DEVELOPER_ID_APPLICATION:-}"
+expected_dmg_name=""
+expected_version=""
+expected_build=""
 
 while (($#)); do
   case "$1" in
@@ -32,18 +37,29 @@ while (($#)); do
     --expected-team-id) expected_team_id="${2:-}"; shift 2 ;;
     --expected-cert-sha1) expected_cert_sha1="${2:-}"; shift 2 ;;
     --identity) identity="${2:-}"; shift 2 ;;
+    --expected-dmg-name) expected_dmg_name="${2:-}"; shift 2 ;;
+    --expected-version) expected_version="${2:-}"; shift 2 ;;
+    --expected-build) expected_build="${2:-}"; shift 2 ;;
     *) usage; exit 2 ;;
   esac
 done
 
-[[ "$artifact" == "direct-beta" || "$artifact" == "selection-helper-beta" ]] \
+[[ "$artifact" == "direct-beta" || "$artifact" == "direct-stable" || "$artifact" == "selection-helper-beta" || "$artifact" == "selection-helper-stable" ]] \
   || { usage; exit 2; }
 [[ -d "$app_bundle" ]] \
   || { echo "error: app bundle not found: $app_bundle" >&2; exit 66; }
-[[ "$release_name" =~ ^[0-9A-Za-z._-]+$ ]] \
+[[ "$release_name" =~ ^[0-9A-Za-z._+-]+$ ]] \
   || { echo "error: release name contains unsupported filename characters" >&2; exit 2; }
 [[ -n "$output_directory" && "$output_directory" != "/" ]] \
   || { echo "error: an explicit, non-root output directory is required" >&2; exit 2; }
+if [[ -n "$expected_dmg_name" ]]; then
+  [[ "$expected_dmg_name" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*\.dmg$ ]] \
+    || { echo "error: --expected-dmg-name must be one safe .dmg filename" >&2; exit 2; }
+fi
+if [[ -n "$expected_version$expected_build" ]] && ! [[ "$expected_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$expected_build" =~ ^[1-9][0-9]*$ ]]; then
+  echo "error: --expected-version and --expected-build must be supplied together and valid" >&2
+  exit 2
+fi
 [[ "$expected_team_id" =~ ^[A-Z0-9]{10}$ ]] \
   || { echo "error: --expected-team-id must be the explicit 10-character Apple Team ID" >&2; exit 2; }
 expected_cert_sha1_compact="${expected_cert_sha1//:/}"
@@ -64,22 +80,40 @@ bundle_release_name="$(/usr/bin/plutil -extract BLOCKS_RELEASE_NAME raw -expect 
   && bundle_release_name="${bundle_release_name%.}" \
   && [[ "$bundle_release_name" == "$release_name" ]] \
   || { echo "error: --release-name must match the bundle BLOCKS_RELEASE_NAME string" >&2; exit 2; }
+channel="$(/usr/bin/python3 - "$repo_root" "$app_bundle/Contents/Info.plist" "$release_name" "$artifact" <<'PY'
+import plistlib, sys
+sys.path.insert(0, sys.argv[1] + "/script/release")
+from release_versioning import validate_bundle_version
+with open(sys.argv[2], "rb") as stream:
+    info = plistlib.load(stream)
+parsed = validate_bundle_version("v" + sys.argv[3], info.get("BLOCKS_RELEASE_NAME"),
+                                 info.get("CFBundleShortVersionString"), info.get("CFBundleVersion"))
+channel = "direct-beta" if parsed.is_prerelease else "direct-stable"
+suffix = "beta" if parsed.is_prerelease else "stable"
+if info.get("BLOCKS_DISTRIBUTION_CHANNEL") != channel or sys.argv[4] not in ("direct-" + suffix, "selection-helper-" + suffix):
+    raise ValueError("artifact kind, bundle channel, and release name disagree")
+print(channel)
+PY
+)" || { echo "error: artifact and bundle channel must match the SemVer release identity" >&2; exit 2; }
+if [[ -z "$expected_version" ]]; then
+  expected_version="$(/usr/bin/plutil -extract CFBundleShortVersionString raw -expect string "$app_bundle/Contents/Info.plist")"
+  expected_build="$(/usr/bin/plutil -extract CFBundleVersion raw -expect string "$app_bundle/Contents/Info.plist")"
+fi
 security find-identity -v -p codesigning | awk -v identity="$identity" 'index($0, identity) { found = 1 } END { exit !found }' \
   || { echo "error: DMG signing identity is unavailable: $identity" >&2; exit 67; }
 
 case "$artifact" in
-  direct-beta)
-    "$repo_root/script/release/audit_app_bundle.sh" \
-      --channel direct-beta \
-      --app "$app_bundle" \
-      --require-signature \
-      --expected-team-id "$expected_team_id" \
-      --expected-authority "$identity" \
-      --expected-cert-sha1 "$expected_cert_sha1"
+  direct-beta|direct-stable)
+    audit_args=(--channel "$channel" --app "$app_bundle" --require-signature --expected-team-id "$expected_team_id" --expected-authority "$identity" --expected-cert-sha1 "$expected_cert_sha1")
+    if [[ -n "$expected_version" ]]; then
+      audit_args+=(--expected-version "$expected_version" --expected-build "$expected_build" --expected-release-name "$release_name")
+    fi
+    "$repo_root/script/release/audit_app_bundle.sh" "${audit_args[@]}"
     ;;
-  selection-helper-beta)
+  selection-helper-beta|selection-helper-stable)
     "$repo_root/script/release/audit_selection_helper_bundle.sh" \
       "$app_bundle" \
+      --expected-version "$expected_version" --expected-build "$expected_build" --expected-release-name "$release_name" \
       --require-signature \
       --expected-team-id "$expected_team_id" \
       --expected-authority "$identity" \
@@ -92,6 +126,9 @@ staging_directory="$(mktemp -d "${TMPDIR:-/tmp}/blocks-dmg.XXXXXX")"
 app_name="$(basename "$app_bundle" .app)"
 app_slug="${app_name// /-}"
 dmg_path="$output_directory/$app_slug-$release_name-arm64.dmg"
+if [[ -n "$expected_dmg_name" ]]; then
+  dmg_path="$output_directory/$expected_dmg_name"
+fi
 temporary_dmg="$output_directory/.$app_slug-$release_name-arm64.$$.tmp.dmg"
 certificate_file=""
 cleanup() {

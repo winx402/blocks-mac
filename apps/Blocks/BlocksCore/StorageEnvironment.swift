@@ -66,7 +66,10 @@ public struct StorageEnvironment {
             throw StorageEnvironmentError.applicationSupportDirectoryUnavailable
         }
         let root = appSupport
-            .appendingPathComponent("Blocks", isDirectory: true)
+            .appendingPathComponent(
+                BlocksRuntimeIdentity.applicationSupportDirectoryName,
+                isDirectory: true
+            )
             .appendingPathComponent("Data", isDirectory: true)
         return StorageEnvironment(rootDirectory: root)
     }

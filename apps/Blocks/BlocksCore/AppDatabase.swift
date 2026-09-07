@@ -1,6 +1,7 @@
 import Foundation
 
 public final class AppDatabase {
+    public static let currentSchemaVersion = 17
     public let environment: StorageEnvironment
     let connection: SQLiteConnection
     public let ftsEnabled: Bool
@@ -13,10 +14,63 @@ public final class AppDatabase {
 
     public static func open(environment: StorageEnvironment? = nil) throws -> AppDatabase {
         let resolvedEnvironment = try environment ?? StorageEnvironment.appSupport()
+        // Do not switch journal modes or start a migration on a future schema.
+        // A read-only connection still observes committed WAL records.
+        if FileManager.default.fileExists(atPath: resolvedEnvironment.databaseURL.path) {
+            let inspection = try SQLiteConnection(url: resolvedEnvironment.databaseURL, readOnly: true)
+            defer { inspection.close() }
+            let version = try inspection.firstInt("PRAGMA user_version") ?? 0
+            guard version <= currentSchemaVersion else {
+                throw AppDatabaseError.unsupportedSchemaVersion(version)
+            }
+            if try needsSchemaBackup(connection: inspection, version: version) {
+                let backupDirectory = resolvedEnvironment.rootDirectory
+                    .appendingPathComponent("MigrationBackups", isDirectory: true)
+                    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+                try FileManager.default.createDirectory(
+                    at: backupDirectory, withIntermediateDirectories: true,
+                    attributes: [.posixPermissions: 0o700]
+                )
+                try inspection.backup(to: backupDirectory.appendingPathComponent("Blocks-schema-\(version).sqlite"))
+            }
+        }
         try resolvedEnvironment.prepare()
         let connection = try SQLiteConnection(url: resolvedEnvironment.databaseURL)
-        let ftsEnabled = try MigrationRunner(connection: connection).migrate()
-        return AppDatabase(environment: resolvedEnvironment, connection: connection, ftsEnabled: ftsEnabled)
+        do {
+            let ftsEnabled = try MigrationRunner(connection: connection).migrate()
+            return AppDatabase(environment: resolvedEnvironment, connection: connection, ftsEnabled: ftsEnabled)
+        } catch {
+            connection.close()
+            throw error
+        }
+    }
+
+    private static func needsSchemaBackup(connection: SQLiteConnection, version: Int) throws -> Bool {
+        if version < currentSchemaVersion { return true }
+        // The unreleased v15/v17 repair paths can change schema without
+        // incrementing user_version. They need the same recovery snapshot.
+        let requiredObjects = [
+            "clipboard_tags", "clipboard_sidecar_cleanup",
+            "clipboard_record_tags_content_revision_insert",
+            "clipboard_record_tags_content_revision_delete",
+        ]
+        for name in requiredObjects {
+            if try connection.firstInt("SELECT COUNT(*) FROM sqlite_master WHERE name = ?", bindings: [.string(name)]) != 1 {
+                return true
+            }
+        }
+        for (table, required) in [
+            ("clipboard_tags", Set(["content_revision"])),
+            ("plugin_hook_bindings", Set(["safety_disabled", "consecutive_failure_count"])),
+        ] {
+            let columns = try connection.withStatement("PRAGMA table_info(\(table))") { statement in
+                var names: Set<String> = []
+                while try statement.step() { if let name = statement.columnString(1) { names.insert(name) } }
+                return names
+            }
+            if !required.isSubset(of: columns) { return true }
+        }
+        return false
     }
 
     public func close() {
@@ -69,8 +123,14 @@ struct MigrationRunner {
     }
 
     func migrate() throws -> Bool {
+        // Nested per-version transactions participate in this outer transaction.
+        // A failure in any later migration rolls back schema, data and user_version.
+        try connection.transaction { try migrateAtomically() }
+    }
+
+    private func migrateAtomically() throws -> Bool {
         let currentVersion = try connection.firstInt("PRAGMA user_version") ?? 0
-        if currentVersion > 17 {
+        if currentVersion > AppDatabase.currentSchemaVersion {
             throw AppDatabaseError.unsupportedSchemaVersion(currentVersion)
         }
 

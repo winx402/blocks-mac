@@ -1,0 +1,36 @@
+title = "Blocks default secret checks with exact reviewed fixture exceptions"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Swift type declaration, not serialized private key material"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "line"
+paths = ['''^apps/Blocks/BlocksSelectionHelperTests/SelectionHelperServerTests\.swift$''']
+regexes = ['''^\s*let privateKey: P256\.KeyAgreement\.PrivateKey\s*$''']
+
+[[allowlists]]
+description = "Nonfunctional mock Keychain account name"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "line"
+paths = ['''^tools/spikes/blocks_provider_settings_smoke\.py$''']
+regexes = ['''^\s*"keychain_account": "mock-api:p2k-placeholder",\s*$''']
+
+[[allowlists]]
+description = "Fixed diagnostic redaction test sentinel"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "line"
+paths = ['''^apps/Blocks/BlocksAppTests/BlocksNativePluginTests\.swift$''']
+regexes = ['''^\s*let metadataKeySentinel = "DIAGNOSTIC_KEY_SENTINEL_4B4C"\s*$''']
+
+[[allowlists]]
+description = "Boolean expression checking that dummy secrets were not printed"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "line"
+paths = ['''^tools/verification/p5k_user_secret_keychain_gate_checks\.py$''']
+regexes = ['''^\s*"raw_secret_output": RAW_DUMMY_SECRET_V1 in output_text or RAW_DUMMY_SECRET_V2 in output_text,\s*$''']

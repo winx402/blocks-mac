@@ -439,6 +439,17 @@ private extension BlocksNativePluginManifest {
 
 @MainActor
 final class BlocksNativePluginManager: ObservableObject {
+    private let applicationUpdateGate = ApplicationOperationAdmissionGate(name: "Plugin management")
+    private var pendingInstallationUpdateLease: ApplicationOperationAdmissionGate.Lease?
+
+    func prepareForApplicationUpdate() async throws {
+        guard operation == .idle else {
+            throw ApplicationOperationAdmissionGate.AdmissionError.busy("Plugin management")
+        }
+        try applicationUpdateGate.pauseIfIdle()
+    }
+
+    func resumeAfterCancelledApplicationUpdate() async { applicationUpdateGate.resume() }
     @Published private(set) var plugins: [BlocksNativePluginMetadata] = []
     @Published private(set) var pendingInstallation: BlocksNativePluginPendingInstallation?
     @Published private(set) var operation: BlocksNativePluginManagerOperation = .idle
@@ -580,6 +591,8 @@ final class BlocksNativePluginManager: ObservableObject {
     }
 
     func hookBindings(pluginID: String) async -> [BlocksPluginHookBinding] {
+        guard let updateLease = applicationUpdateGate.begin() else { return [] }
+        defer { updateLease.release() }
         guard let platformRepository else { return [] }
         let bindings = (try? await Task.detached {
             try platformRepository.hookBindings(pluginID: pluginID)
@@ -595,6 +608,8 @@ final class BlocksNativePluginManager: ObservableObject {
         event: BlocksPluginEventName,
         distributionChannel: DistributionChannel = .current
     ) async -> [BlocksPluginHookBinding] {
+        guard let updateLease = applicationUpdateGate.begin() else { return [] }
+        defer { updateLease.release() }
         guard let platformRepository else { return [] }
         let bindings = (try? await persistenceWorker.perform {
             try platformRepository.hookBindings(for: event)
@@ -613,6 +628,8 @@ final class BlocksNativePluginManager: ObservableObject {
         pluginID: String,
         hookID: String
     ) async throws {
+        let updateLease = try applicationUpdateGate.requireLease()
+        defer { updateLease.release() }
         guard let platformRepository else {
             throw BlocksNativePluginManagerError.storageUnavailable
         }
@@ -629,6 +646,8 @@ final class BlocksNativePluginManager: ObservableObject {
         event: BlocksPluginEventName,
         orderedBindingIDs: [String]
     ) async throws {
+        let updateLease = try applicationUpdateGate.requireLease()
+        defer { updateLease.release() }
         guard let platformRepository else {
             throw BlocksNativePluginManagerError.storageUnavailable
         }
@@ -644,6 +663,8 @@ final class BlocksNativePluginManager: ObservableObject {
         pluginID: String? = nil,
         runnableOnly: Bool = true
     ) async -> [BlocksPluginScheduleBinding] {
+        guard let updateLease = applicationUpdateGate.begin() else { return [] }
+        defer { updateLease.release() }
         guard let platformRepository else { return [] }
         let bindings = (try? await persistenceWorker.perform {
             try platformRepository.scheduleBindings(
@@ -663,6 +684,8 @@ final class BlocksNativePluginManager: ObservableObject {
         pluginID: String,
         scheduleID: String
     ) async throws {
+        let updateLease = try applicationUpdateGate.requireLease()
+        defer { updateLease.release() }
         guard let platformRepository else {
             throw BlocksNativePluginManagerError.storageUnavailable
         }
@@ -681,6 +704,8 @@ final class BlocksNativePluginManager: ObservableObject {
         nextFireAt: Date?,
         lastFiredAt: Date?
     ) async {
+        guard let updateLease = applicationUpdateGate.begin() else { return }
+        defer { updateLease.release() }
         guard let platformRepository else { return }
         try? await persistenceWorker.perform {
             try platformRepository.updateScheduleTiming(
@@ -693,6 +718,8 @@ final class BlocksNativePluginManager: ObservableObject {
     }
 
     func setDebugEnabled(_ enabled: Bool, pluginID: String) async throws {
+        let updateLease = try applicationUpdateGate.requireLease()
+        defer { updateLease.release() }
         guard let platformRepository else {
             throw BlocksNativePluginManagerError.storageUnavailable
         }
@@ -703,6 +730,8 @@ final class BlocksNativePluginManager: ObservableObject {
     }
 
     func clearSafetyDisable(pluginID: String) async throws {
+        let updateLease = try applicationUpdateGate.requireLease()
+        defer { updateLease.release() }
         guard let platformRepository else {
             throw BlocksNativePluginManagerError.storageUnavailable
         }
@@ -714,6 +743,8 @@ final class BlocksNativePluginManager: ObservableObject {
     }
 
     func reload() async {
+        guard let updateLease = applicationUpdateGate.begin() else { return }
+        defer { updateLease.release() }
         guard operation == .idle else {
             return
         }
@@ -830,6 +861,8 @@ final class BlocksNativePluginManager: ObservableObject {
     func prepareInstallation(
         from packageURL: URL
     ) async throws -> BlocksNativePluginPendingInstallation {
+        let updateLease = try applicationUpdateGate.requireLease()
+        defer { updateLease.release() }
         #if BLOCKS_APP_STORE_BETA
         throw BlocksNativePluginManagerError.externalInstallationUnavailable
         #else
@@ -855,6 +888,8 @@ final class BlocksNativePluginManager: ObservableObject {
         validatedPackage package: BlocksNativePluginValidatedPackage,
         sourceDisplayName: String
     ) async throws -> BlocksNativePluginPendingInstallation {
+        let updateLease = try applicationUpdateGate.requireLease()
+        defer { updateLease.release() }
         guard !package.manifest.id.hasPrefix("com.blocks.builtin.") else {
             throw BlocksNativePluginManagerError.reservedOfficialIdentifier(
                 package.manifest.id
@@ -876,6 +911,8 @@ final class BlocksNativePluginManager: ObservableObject {
         entryID: String,
         catalog: BlocksBuiltInPluginCatalog
     ) async throws -> BlocksNativePluginPendingInstallation {
+        let updateLease = try applicationUpdateGate.requireLease()
+        defer { updateLease.release() }
         let matchingEntries = catalog.document.entries.filter {
             $0.id == entryID
         }
@@ -912,6 +949,7 @@ final class BlocksNativePluginManager: ObservableObject {
             package: package
         )
         pendingInstallation = pending
+        pendingInstallationUpdateLease = try applicationUpdateGate.requireLease()
         operation = .awaitingConfirmation
         return pending
     }
@@ -921,6 +959,8 @@ final class BlocksNativePluginManager: ObservableObject {
             return
         }
         pendingInstallation = nil
+        pendingInstallationUpdateLease?.release()
+        pendingInstallationUpdateLease = nil
         operation = .idle
     }
 
@@ -930,6 +970,8 @@ final class BlocksNativePluginManager: ObservableObject {
             return
         }
         pendingInstallation = nil
+        pendingInstallationUpdateLease?.release()
+        pendingInstallationUpdateLease = nil
         operation = .idle
     }
 
@@ -937,6 +979,14 @@ final class BlocksNativePluginManager: ObservableObject {
     func confirmAndInstall(
         pendingID: UUID
     ) async throws -> BlocksNativePluginMetadata {
+        let updateLease = try applicationUpdateGate.requireLease()
+        defer { updateLease.release() }
+        defer {
+            if pendingInstallation == nil {
+                pendingInstallationUpdateLease?.release()
+                pendingInstallationUpdateLease = nil
+            }
+        }
         guard let pending = pendingInstallation, pending.id == pendingID else {
             throw BlocksNativePluginManagerError.pendingInstallationMissing
         }
@@ -1191,6 +1241,8 @@ final class BlocksNativePluginManager: ObservableObject {
         _ isEnabled: Bool,
         pluginID: String
     ) async throws -> BlocksNativePluginMetadata {
+        let updateLease = try applicationUpdateGate.requireLease()
+        defer { updateLease.release() }
         try await requireOperation(.idle)
         operation = isEnabled ? .enabling(pluginID) : .disabling(pluginID)
         if !isEnabled {
@@ -1313,6 +1365,8 @@ final class BlocksNativePluginManager: ObservableObject {
     }
 
     func uninstall(pluginID: String) async throws {
+        let updateLease = try applicationUpdateGate.requireLease()
+        defer { updateLease.release() }
         try await requireOperation(.idle)
         operation = .uninstalling(pluginID)
         invalidateExecutionGeneration(pluginID: pluginID)
@@ -1502,6 +1556,12 @@ final class BlocksNativePluginManager: ObservableObject {
         testText: String? = nil,
         testImage: TranslationSourceEncodedImage? = nil
     ) async -> BlocksNativePluginConnectionTestResult {
+        guard let updateLease = applicationUpdateGate.begin() else {
+            return BlocksNativePluginConnectionTestResult(pluginID: pluginID, capability: capability,
+                succeeded: false, outputSummary: nil, errorCode: "application_update_preparing",
+                errorMessage: "Blocks is preparing to update.")
+        }
+        defer { updateLease.release() }
         do {
             try await requireRecoveryReady()
             try Task.checkCancellation()
@@ -1804,6 +1864,8 @@ final class BlocksNativePluginManager: ObservableObject {
     func loadInstalledPackage(
         pluginID: String
     ) async throws -> (BlocksNativePluginMetadata, BlocksNativePluginValidatedPackage) {
+        let updateLease = try applicationUpdateGate.requireLease()
+        defer { updateLease.release() }
         try await requireRecoveryReady()
         let repository = repository
         let managedRoot = managedRoot
@@ -1833,6 +1895,8 @@ final class BlocksNativePluginManager: ObservableObject {
         timeoutSeconds: Double,
         progress: @escaping @Sendable (BlocksNativePluginProgress) -> Void = { _ in }
     ) async throws -> BlocksPluginRuntimeResult {
+        let updateLease = try applicationUpdateGate.requireLease()
+        defer { updateLease.release() }
         let (metadata, package) = try await loadInstalledPackage(pluginID: pluginID)
         try Task.checkCancellation()
         guard package.manifest.schemaVersion >= 4,
@@ -1871,6 +1935,8 @@ final class BlocksNativePluginManager: ObservableObject {
     func configuration(
         pluginID: String
     ) async throws -> [String: JSONValue] {
+        let updateLease = try applicationUpdateGate.requireLease()
+        defer { updateLease.release() }
         let (_, package) = try await loadInstalledPackage(
             pluginID: pluginID
         )
@@ -1887,6 +1953,8 @@ final class BlocksNativePluginManager: ObservableObject {
         _ configuration: [String: JSONValue],
         pluginID: String
     ) async throws {
+        let updateLease = try applicationUpdateGate.requireLease()
+        defer { updateLease.release() }
         try await requireOperation(.idle)
         operation = .disabling(pluginID)
         lastErrorMessage = nil
@@ -1947,6 +2015,8 @@ final class BlocksNativePluginManager: ObservableObject {
         pluginID: String,
         secretID: String
     ) async throws {
+        let updateLease = try applicationUpdateGate.requireLease()
+        defer { updateLease.release() }
         try await requireOperation(.idle)
         operation = .disabling(pluginID)
         lastErrorMessage = nil
@@ -2019,6 +2089,8 @@ final class BlocksNativePluginManager: ObservableObject {
         pluginID: String,
         secretID: String
     ) async throws {
+        let updateLease = try applicationUpdateGate.requireLease()
+        defer { updateLease.release() }
         try await requireOperation(.idle)
         operation = .disabling(pluginID)
         lastErrorMessage = nil

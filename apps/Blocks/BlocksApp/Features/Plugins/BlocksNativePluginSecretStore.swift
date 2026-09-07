@@ -1,4 +1,5 @@
 import Foundation
+import BlocksCore
 import Security
 
 protocol BlocksNativePluginSecretStoring: Sendable {
@@ -40,7 +41,9 @@ struct BlocksNativePluginSecretStore: BlocksNativePluginSecretStoring, Sendable 
 
     private let service: String
 
-    init(service: String = "app.blocks.translation-plugin-secret") {
+    init(
+        service: String = BlocksRuntimeIdentity.nativePluginSecretKeychainService
+    ) {
         self.service = service
     }
 
@@ -103,7 +106,7 @@ struct BlocksNativePluginSecretStore: BlocksNativePluginSecretStoring, Sendable 
         var item = query
         item[kSecValueData as String] = data
         item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        let addStatus = SecItemAdd(item as CFDictionary, nil)
+        let addStatus = SecItemAdd(BlocksKeychainNamespace.queryForCurrentBuild(item) as CFDictionary, nil)
         guard addStatus == errSecSuccess else {
             throw BlocksNativePluginSecretStoreError.keychain(addStatus)
         }
@@ -129,10 +132,10 @@ struct BlocksNativePluginSecretStore: BlocksNativePluginSecretStoring, Sendable 
     }
 
     private func baseQuery(account: String) -> [String: Any] {
-        [
+        BlocksKeychainNamespace.queryForCurrentBuild([
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
-        ]
+        ])
     }
 }

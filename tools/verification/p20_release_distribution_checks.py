@@ -6,20 +6,35 @@ import inspect
 import plistlib
 import re
 import subprocess as _subprocess
+import os
 import tempfile
 import xml.etree.ElementTree as ET
 from collections import Counter
 from pathlib import Path
+from verification_build_helpers import run_controlled_subprocess
 
 
 ROOT = Path(__file__).resolve().parents[2]
 def run_fixture_subprocess(name: str, *args: object, **kwargs: object) -> _subprocess.CompletedProcess[str]:
-    """Run a hermetic fixture command with one bounded, named failure mode."""
+    """Run legacy fixture commands with a bounded raw subprocess timeout."""
     kwargs["timeout"] = 15
     try:
         return _subprocess.run(*args, **kwargs)  # type: ignore[arg-type,return-value]
     except _subprocess.TimeoutExpired as error:
         raise AssertionError(f"hermetic fixture timed out: {name}: {error.cmd}") from error
+
+
+def run_controlled_fixture(command: list[str], *, cwd: Path, environment: dict[str, str], name: str) -> _subprocess.CompletedProcess[str]:
+    """Use the project supervisor for the nested-signature fixture only."""
+    previous_environment = os.environ.copy()
+    try:
+        os.environ.clear(); os.environ.update(environment)
+        result = run_controlled_subprocess(command, cwd=cwd, timeout=15, termination_grace_seconds=0.25)
+    finally:
+        os.environ.clear(); os.environ.update(previous_environment)
+    if result["timed_out"]:
+        raise AssertionError(f"hermetic fixture timed out: {name}; cleanup={result.get('process_cleanup')}")
+    return _subprocess.CompletedProcess(command, int(result["returncode"]), str(result["stdout"]), str(result["stderr"]))
 
 
 class _HermeticSubprocess:
@@ -184,6 +199,61 @@ def verify_unexpected_bundle_members_are_rejected() -> None:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.touch()
 
+        def write_release_identity(
+            *,
+            channel: str,
+            version: str,
+            build: str,
+            release_name: str,
+            include_helper: bool = False,
+        ) -> None:
+            info = {
+                "LSMinimumSystemVersion": "14.0",
+                "BLOCKS_DISTRIBUTION_CHANNEL": channel,
+                "CFBundleIdentifier": "app.blocks.app",
+                "CFBundleDisplayName": "Blocks for Mac",
+                "CFBundleShortVersionString": version,
+                "CFBundleVersion": build,
+                "BLOCKS_RELEASE_NAME": release_name,
+                "BLOCKS_RELEASE_PAGE_URL": "https://blocks.orangeforge.top/releases/",
+                "BLOCKS_SUPPORT_URL": "https://blocks.orangeforge.top/support/",
+                "BLOCKS_PRIVACY_URL": "https://blocks.orangeforge.top/privacy/",
+                "BLOCKS_SELECTION_HELPER_DOWNLOAD_URL": (
+                    "https://downloads.orangeforge.top/beta/0.1.0-beta.1/"
+                    "Blocks-Selection-Helper-0.1.0-beta.1-arm64.dmg"
+                    if channel.startswith("direct-")
+                    else ""
+                ),
+            }
+            (contents / "Info.plist").write_bytes(plistlib.dumps(info))
+            if not include_helper:
+                return
+            helper_info = (
+                contents / "Helpers/Blocks Selection Helper.app/Contents/Info.plist"
+            )
+            helper_info.write_bytes(
+                plistlib.dumps(
+                    {
+                        "LSMinimumSystemVersion": "14.0",
+                        "BLOCKS_DISTRIBUTION_CHANNEL": channel,
+                        "CFBundleIdentifier": "app.blocks.selection-helper",
+                        "CFBundleURLTypes": [
+                            {"CFBundleURLSchemes": ["blocks-selection-helper"]}
+                        ],
+                        "CFBundleShortVersionString": version,
+                        "CFBundleVersion": build,
+                        "BLOCKS_RELEASE_NAME": release_name,
+                    }
+                )
+            )
+
+        write_release_identity(
+            channel="app-store-beta",
+            version="0.1.0",
+            build="1",
+            release_name="0.1.0-beta.1",
+        )
+
         shims = temporary_root / "shims"
         shims.mkdir()
         (shims / "lipo").write_text(
@@ -213,7 +283,17 @@ def verify_unexpected_bundle_members_are_rejected() -> None:
             "  BLOCKS_RELEASE_PAGE_URL) echo https://blocks.orangeforge.top/releases/ ;;\n"
             "  BLOCKS_SUPPORT_URL) echo https://blocks.orangeforge.top/support/ ;;\n"
             "  BLOCKS_PRIVACY_URL) echo https://blocks.orangeforge.top/privacy/ ;;\n"
-            "  BLOCKS_SELECTION_HELPER_DOWNLOAD_URL) if [[ \"${BLOCKS_TEST_CHANNEL:-app-store-beta}\" == direct-beta ]]; then echo https://downloads.orangeforge.top/beta/0.1.0-beta.1/Blocks-Selection-Helper-0.1.0-beta.1-arm64.dmg; else echo; fi ;;\n"
+            "  BLOCKS_SELECTION_HELPER_DOWNLOAD_URL) case \"${BLOCKS_TEST_CHANNEL:-app-store-beta}\" in direct-beta|direct-stable) echo https://downloads.orangeforge.top/beta/0.1.0-beta.1/Blocks-Selection-Helper-0.1.0-beta.1-arm64.dmg ;; *) echo ;; esac ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        # Direct releases additionally allow the explicit Sparkle 2.9 helper
+        # inventory plus the independently embedded Selection Helper.
+        (shims / "file").write_text(
+            "#!/usr/bin/env bash\n"
+            "case \"$2\" in\n"
+            "  */Contents/MacOS/Blocks|*/Contents/MacOS/BlocksClipboardBroker|*/BlocksPluginRunner.xpc/Contents/MacOS/BlocksPluginRunner|*/Contents/MacOS/BlocksActionBroker|*/Contents/Resources/CLI/blocks|*/Contents/Helpers/Blocks\\ Selection\\ Helper.app/Contents/MacOS/Blocks\\ Selection\\ Helper|*/Sparkle.framework/Versions/B/Sparkle|*/Sparkle.framework/Versions/B/Autoupdate|*/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater|*/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer|*/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc/Contents/MacOS/Downloader|*Unexpected.framework/*) echo Mach-O ;;\n"
+            "  *) echo data ;;\n"
             "esac\n",
             encoding="utf-8",
         )
@@ -337,10 +417,24 @@ def verify_unexpected_bundle_members_are_rejected() -> None:
             "MacOS/BlocksActionBroker",
             "Resources/CLI/blocks",
             "Library/LaunchAgents/app.blocks.action-broker.plist",
+            "Helpers/Blocks Selection Helper.app/Contents/MacOS/Blocks Selection Helper",
+            "Frameworks/Sparkle.framework/Versions/B/Sparkle",
+            "Frameworks/Sparkle.framework/Versions/B/Autoupdate",
+            "Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater",
+            "Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer",
+            "Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc/Contents/MacOS/Downloader",
         ]:
             path = contents / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.touch()
+
+        write_release_identity(
+            channel="direct-beta",
+            version="0.1.0",
+            build="1",
+            release_name="0.1.0-beta.1",
+            include_helper=True,
+        )
 
         direct_lipo_trace = temporary_root / "direct-lipo-trace.txt"
         direct_environment = environment | {
@@ -361,6 +455,12 @@ def verify_unexpected_bundle_members_are_rejected() -> None:
         expected_direct_architecture_paths = expected_architecture_paths + [
             str(contents / "MacOS/BlocksActionBroker"),
             str(contents / "Resources/CLI/blocks"),
+            str(contents / "Helpers/Blocks Selection Helper.app/Contents/MacOS/Blocks Selection Helper"),
+            str(contents / "Frameworks/Sparkle.framework/Versions/B/Sparkle"),
+            str(contents / "Frameworks/Sparkle.framework/Versions/B/Autoupdate"),
+            str(contents / "Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater"),
+            str(contents / "Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer"),
+            str(contents / "Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc/Contents/MacOS/Downloader"),
         ]
         require(
             set(direct_architecture_paths)
@@ -412,6 +512,28 @@ def verify_unexpected_bundle_members_are_rejected() -> None:
                 result.returncode != 0,
                 f"audit accepted an x86_64 Direct component: {component}",
             )
+
+        write_release_identity(
+            channel="direct-stable",
+            version="0.1.0",
+            build="2",
+            release_name="0.1.0",
+            include_helper=True,
+        )
+        stable_environment = environment | {
+            "BLOCKS_TEST_CHANNEL": "direct-stable",
+        }
+        result = subprocess.run(
+            ["bash", str(audit_script), "--channel", "direct-stable", "--app", str(app)],
+            text=True,
+            capture_output=True,
+            env=stable_environment,
+            check=False,
+        )
+        require(
+            result.returncode == 0,
+            f"valid Direct stable structural fixture failed audit: {result.stderr}",
+        )
 
 
 def verify_direct_signature_audit_is_hermetic() -> None:
@@ -507,6 +629,9 @@ def verify_direct_signature_audit_is_hermetic() -> None:
             "BLOCKS_DISTRIBUTION_CHANNEL": "direct-beta",
             "CFBundleIdentifier": "app.blocks.app",
             "CFBundleDisplayName": "Blocks for Mac",
+            "CFBundleShortVersionString": "0.1.0",
+            "CFBundleVersion": "1",
+            "BLOCKS_RELEASE_NAME": "0.1.0-beta.1",
             "BLOCKS_RELEASE_PAGE_URL": "https://blocks.orangeforge.top/releases/",
             "BLOCKS_SUPPORT_URL": "https://blocks.orangeforge.top/support/",
             "BLOCKS_PRIVACY_URL": "https://blocks.orangeforge.top/privacy/",
@@ -532,10 +657,27 @@ def verify_direct_signature_audit_is_hermetic() -> None:
             "MacOS/BlocksActionBroker",
             "Resources/CLI/blocks",
             "Library/LaunchAgents/app.blocks.action-broker.plist",
+            "Helpers/Blocks Selection Helper.app/Contents/MacOS/Blocks Selection Helper",
+            "Frameworks/Sparkle.framework/Versions/B/Sparkle",
+            "Frameworks/Sparkle.framework/Versions/B/Autoupdate",
+            "Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater",
+            "Frameworks/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer",
+            "Frameworks/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc/Contents/MacOS/Downloader",
         ]:
             path = contents / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.touch()
+        helper_info = contents / "Helpers/Blocks Selection Helper.app/Contents/Info.plist"
+        helper_info.write_bytes(plistlib.dumps({
+            "LSMinimumSystemVersion": "14.0",
+            "BLOCKS_DISTRIBUTION_CHANNEL": "direct-beta",
+            "CFBundleIdentifier": "app.blocks.selection-helper",
+            "CFBundleURLTypes": [{"CFBundleURLSchemes": ["blocks-selection-helper"]}],
+            "CFBundleShortVersionString": "0.1.0",
+            "CFBundleVersion": "1",
+            "BLOCKS_RELEASE_NAME": "0.1.0-beta.1",
+        }))
+        (contents / "Helpers/Blocks Selection Helper.app/Contents/MacOS/Blocks Selection Helper").chmod(0o755)
         return app
 
     def run_fixture(
@@ -588,24 +730,27 @@ def verify_direct_signature_audit_is_hermetic() -> None:
                 "\n"
                 "args = sys.argv[1:]\n"
                 "if args[:1] == ['-lint']:\n"
-                "    plistlib.load(open(args[1], 'rb'))\n"
+                "    source = args[-1]\n"
+                "    if source == '-':\n"
+                "        plistlib.loads(sys.stdin.buffer.read())\n"
+                "    else:\n"
+                "        plistlib.load(open(source, 'rb'))\n"
                 "    raise SystemExit(0)\n"
-                "if args[:3] != ['-extract', args[1] if len(args) > 1 else '', 'raw'] or len(args) != 4:\n"
+                "if len(args) < 4 or args[0] != '-extract' or args[2] != 'raw':\n"
                 "    raise SystemExit(2)\n"
-                "key, source = args[1], args[3]\n"
+                "key, source = args[1], args[-1]\n"
                 "if source == '-':\n"
                 "    value = plistlib.loads(sys.stdin.buffer.read())\n"
                 "else:\n"
                 "    value = plistlib.load(open(source, 'rb'))\n"
-                "if key.rsplit('.', 1)[-1].isdigit():\n"
-                "    key, index = key.rsplit('.', 1)\n"
-                "    value = value[key][int(index)]\n"
-                "else:\n"
-                "    value = value[key]\n"
+                "for component in key.split('.'):\n"
+                "    value = value[int(component)] if component.isdigit() else value[component]\n"
+                "if '-expect' in args and args[args.index('-expect') + 1] == 'string' and not isinstance(value, str):\n"
+                "    raise SystemExit(1)\n"
                 "if isinstance(value, bool):\n"
                 "    print(str(value).lower())\n"
                 "elif isinstance(value, str):\n"
-                "    print(value)\n"
+                "    print(value, end='' if '-n' in args else '\\n')\n"
                 "else:\n"
                 "    raise SystemExit(1)\n"
                 "PY\n",
@@ -684,6 +829,90 @@ def verify_direct_signature_audit_is_hermetic() -> None:
                 "fi\n"
                 "exit 2\n",
             )
+            plutil_path = shims / "plutil"
+            plutil_path.write_text(
+                "#!/usr/bin/env bash\n"
+                "exec /usr/bin/python3 - \"$@\" <<'PY'\n"
+                "import plistlib, sys\n"
+                "args = sys.argv[1:]\n"
+                "if args[:1] == ['-lint']:\n"
+                "    source = args[-1]\n"
+                "    plistlib.loads(sys.stdin.buffer.read()) if source == '-' else plistlib.load(open(source, 'rb'))\n"
+                "    raise SystemExit(0)\n"
+                "if len(args) < 4 or args[0] != '-extract' or args[2] != 'raw': raise SystemExit(2)\n"
+                "source = args[-1]\n"
+                "value = plistlib.loads(sys.stdin.buffer.read()) if source == '-' else plistlib.load(open(source, 'rb'))\n"
+                "parts = args[1].split('.')\n"
+                "while parts:\n"
+                "    if parts[0].isdigit(): value = value[int(parts.pop(0))]; continue\n"
+                "    for count in range(len(parts), 0, -1):\n"
+                "        candidate = '.'.join(parts[:count])\n"
+                "        if isinstance(value, dict) and candidate in value:\n"
+                "            value = value[candidate]; parts = parts[count:]; break\n"
+                "    else: raise KeyError('.'.join(parts))\n"
+                "if '-expect' in args and args[args.index('-expect') + 1] == 'string' and not isinstance(value, str): raise SystemExit(1)\n"
+                "if isinstance(value, bool): print(str(value).lower())\n"
+                "elif isinstance(value, str): print(value, end='' if '-n' in args else '\\n')\n"
+                "else: raise SystemExit(1)\n"
+                "PY\n",
+                encoding="utf-8",
+            )
+            file_path = shims / "file"
+            file_path.write_text(
+                "#!/usr/bin/env bash\n"
+                "[[ \"$1\" == -b ]] || exit 2\n"
+                "case \"$2\" in\n"
+                "  */Contents/MacOS/Blocks|*/Contents/MacOS/BlocksClipboardBroker|*/BlocksPluginRunner.xpc/Contents/MacOS/BlocksPluginRunner|*/Contents/MacOS/BlocksActionBroker|*/Contents/Resources/CLI/blocks|*/Contents/Helpers/Blocks\\ Selection\\ Helper.app/Contents/MacOS/Blocks\\ Selection\\ Helper|*/Sparkle.framework/Versions/B/Sparkle|*/Sparkle.framework/Versions/B/Autoupdate|*/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater|*/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer|*/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc/Contents/MacOS/Downloader) printf '%s\\n' Mach-O ;;\n"
+                "  *) printf '%s\\n' data ;;\n"
+                "esac\n",
+                encoding="utf-8",
+            )
+            codesign_path = shims / "codesign"
+            codesign_source = codesign_path.read_text(encoding="utf-8")
+            newline = chr(10)
+            codesign_source = codesign_source.replace(
+                "    *.app) printf '%s' main ;" + newline,
+                "    */Helpers/Blocks\\ Selection\\ Helper.app) printf '%s' helper ;" + newline +
+                "    */Frameworks/Sparkle.framework) printf '%s' sparkle-framework ;" + newline +
+                "    */Sparkle.framework/Versions/B/Updater.app) printf '%s' sparkle-updater ;" + newline +
+                "    */Sparkle.framework/Versions/B/XPCServices/Installer.xpc) printf '%s' sparkle-installer ;" + newline +
+                "    */Sparkle.framework/Versions/B/XPCServices/Downloader.xpc) printf '%s' sparkle-downloader ;" + newline +
+                "    */Sparkle.framework/Versions/B/Autoupdate) printf '%s' sparkle-autoupdate ;" + newline +
+                "    *.app) printf '%s' main ;" + newline,
+            )
+            codesign_source = codesign_source.replace(
+                "role() {" + newline,
+                "role() {" + newline
+                + "  case \"$1\" in" + newline
+                + "    */Helpers/Blocks\\ Selection\\ Helper.app) printf '%s' helper; return ;;" + newline
+                + "    */Frameworks/Sparkle.framework) printf '%s' sparkle-framework; return ;;" + newline
+                + "    */Sparkle.framework/Versions/B/Updater.app) printf '%s' sparkle-updater; return ;;" + newline
+                + "    */Sparkle.framework/Versions/B/XPCServices/Installer.xpc) printf '%s' sparkle-installer; return ;;" + newline
+                + "    */Sparkle.framework/Versions/B/XPCServices/Downloader.xpc) printf '%s' sparkle-downloader; return ;;" + newline
+                + "    */Sparkle.framework/Versions/B/Autoupdate) printf '%s' sparkle-autoupdate; return ;;" + newline
+                + "  esac" + newline,
+            )
+            codesign_source = codesign_source.replace(
+                "case \"$component_role\" in clipboard) identifier=app.blocks.clipboard-broker ;; plugin-container|plugin) identifier=app.blocks.plugin-runner ;; action) identifier=app.blocks.action-broker ;; cli) identifier=app.blocks.cli ;; esac",
+                "case \"$component_role\" in helper) identifier=app.blocks.selection-helper ;; clipboard) identifier=app.blocks.clipboard-broker ;; plugin-container|plugin) identifier=app.blocks.plugin-runner ;; action) identifier=app.blocks.action-broker ;; cli) identifier=app.blocks.cli ;; esac",
+            )
+            codesign_source = codesign_source.replace(
+                "printf 'Identifier=%s\\nTeamIdentifier=%s\\nAuthority=%s\\n' \"$identifier\" \"$team\" \"$authority\"",
+                "printf 'Identifier=%s\\nTeamIdentifier=%s\\nAuthority=%s\\nTimestamp=fixture\\n' \"$identifier\" \"$team\" \"$authority\"",
+            )
+            codesign_source = codesign_source.replace(
+                "'cli': 'app.blocks.cli'}",
+                "'cli': 'app.blocks.cli', 'helper': 'app.blocks.selection-helper', 'sparkle-framework': 'app.blocks.sparkle', 'sparkle-updater': 'app.blocks.sparkle-updater', 'sparkle-installer': 'app.blocks.sparkle-installer', 'sparkle-downloader': 'app.blocks.sparkle-downloader', 'sparkle-autoupdate': 'app.blocks.sparkle-autoupdate'}",
+            )
+            codesign_source = codesign_source.replace(
+                "['app.blocks.action-broker.xpc'], 'keychain-access-groups'",
+                "['app.blocks.action-broker.xpc', 'app.blocks.app-spks', 'app.blocks.app-spki'], 'keychain-access-groups'",
+            )
+            codesign_source = codesign_source.replace(
+                "elif role == 'clipboard':",
+                "elif role == 'helper':\n    values = {'com.apple.application-identifier': team + '.app.blocks.selection-helper', 'com.apple.developer.team-identifier': team, 'keychain-access-groups': [team + '.app.blocks.selection-helper.shared']}\nelif role == 'clipboard':",
+            )
+            codesign_path.write_text(codesign_source, encoding="utf-8")
             environment = {
                 "PATH": f"{shims}:/usr/bin:/bin",
                 "TMPDIR": str(temporary_root),
@@ -705,12 +934,11 @@ def verify_direct_signature_audit_is_hermetic() -> None:
             if include_authority:
                 command += ["--expected-authority", authority_value or expected_authority]
             command += ["--expected-cert-sha1", expected_sha1]
-            result = subprocess.run(
+            result = run_controlled_fixture(
                 command,
-                text=True,
-                capture_output=True,
-                env=environment,
-                check=False,
+                cwd=ROOT,
+                environment=environment,
+                name=f"direct-signature-{mutation or 'baseline'}",
             )
             if mutation is not None and mutation.startswith("plugin-container:"):
                 trace_lines = trace.read_text(encoding="utf-8").splitlines()
@@ -729,7 +957,7 @@ def verify_direct_signature_audit_is_hermetic() -> None:
             if mutation is None and include_authority and authority_value is None:
                 require(
                     result.returncode == 0,
-                    f"valid hermetic signature fixture failed audit: {result.stderr}",
+                    f"valid hermetic signature fixture failed audit: stdout={result.stdout!r} stderr={result.stderr!r}",
                 )
                 trace_lines = trace.read_text(encoding="utf-8").splitlines()
                 for component in ["main", "clipboard", "plugin", "action", "cli"]:
@@ -1681,6 +1909,9 @@ def verify_selection_helper_release_identity() -> None:
         audit = root / "script/release/audit_selection_helper_bundle.sh"
         audit.parent.mkdir(parents=True)
         audit.write_text(read("script/release/audit_selection_helper_bundle.sh"))
+        (root / "script/release/release_versioning.py").write_text(
+            read("script/release/release_versioning.py")
+        )
         profile = root / "apps/Blocks/Config/Distribution.DirectBeta.xcconfig"
         profile.parent.mkdir(parents=True)
         profile_text = (
@@ -1730,7 +1961,12 @@ def verify_selection_helper_release_identity() -> None:
                 env={"PATH": f"{shims}:/usr/bin:/bin", "HELPER_RELEASE_TEST_TRACE": str(trace)},
             )
 
-        require(run(baseline).returncode == 0, "Helper release-identity baseline failed")
+        baseline_result = run(baseline)
+        require(
+            baseline_result.returncode == 0,
+            "Helper release-identity baseline failed: "
+            f"stdout={baseline_result.stdout!r} stderr={baseline_result.stderr!r}",
+        )
         # The control proves signed mode reaches the signer only after metadata matches.
         require(run(baseline, signed=True).returncode == 99 and trace.exists(),
                 "Helper signed control did not reach the isolated codesign shim")
@@ -1827,6 +2063,7 @@ def verify_package_dmg_is_hermetic() -> None:
             release_directory.mkdir(parents=True)
             package_script = release_directory / "package_dmg.sh"
             write_executable(package_script, source)
+            (release_directory / "release_versioning.py").write_text(read("script/release/release_versioning.py"))
             trace = temporary_root / "dmg-trace.txt"
             for audit_name in ["audit_app_bundle.sh", "audit_selection_helper_bundle.sh"]:
                 write_executable(
@@ -1882,7 +2119,11 @@ def verify_package_dmg_is_hermetic() -> None:
             (app / "placeholder").touch()
             (app / "Contents").mkdir()
             (app / "Contents/Info.plist").write_bytes(plistlib.dumps(
-                {} if bundle_release is None else {"BLOCKS_RELEASE_NAME": bundle_release}
+                {} if bundle_release is None else {
+                    "BLOCKS_RELEASE_NAME": bundle_release,
+                    "CFBundleShortVersionString": "0.1.0", "CFBundleVersion": "1",
+                    "BLOCKS_DISTRIBUTION_CHANNEL": "direct-beta",
+                }
             ))
             output_directory = temporary_root / "output"
             environment = {
@@ -2001,10 +2242,15 @@ def verify_notarize_dmg_identity_pins_are_hermetic() -> None:
             release_directory = repo_root / "script/release"
             release_directory.mkdir(parents=True)
             write_executable(release_directory / "notarize_dmg.sh", source)
+            (release_directory / "release_versioning.py").write_text(read("script/release/release_versioning.py"))
             trace = temporary_root / "trace.txt"
             mount_point = temporary_root / "mounted"
             (mount_point / "Blocks.app/Contents").mkdir(parents=True)
-            (mount_point / "Blocks.app/Contents/Info.plist").touch()
+            (mount_point / "Blocks.app/Contents/Info.plist").write_bytes(plistlib.dumps({
+                "CFBundleIdentifier": "app.blocks.app", "BLOCKS_DISTRIBUTION_CHANNEL": "direct-beta",
+                "CFBundleShortVersionString": "0.1.0", "CFBundleVersion": "1",
+                "BLOCKS_RELEASE_NAME": "0.1.0-beta.1",
+            }))
             (mount_point / "Applications").symlink_to("/Applications")
             if root_payload == "extra-file":
                 (mount_point / "unexpected.txt").touch()
@@ -2067,7 +2313,7 @@ def verify_notarize_dmg_identity_pins_are_hermetic() -> None:
                 "  id) grep -Fq '\"id\":\"mock-submission\"' \"$4\" && echo mock-submission ;;\n"
                 "  system-entities.1.mount-point|system-entities.0.mount-point) echo \"$P20_NOTARY_MOUNT\" ;;\n"
                 "  system-entities.0.dev-entry) echo /dev/disk99 ;;\n"
-                "  CFBundleIdentifier) echo app.blocks.app ;;\n"
+                "  CFBundleIdentifier|BLOCKS_DISTRIBUTION_CHANNEL) exec /usr/bin/plutil \"$@\" ;;\n"
                 "  *) exit 2 ;;\n"
                 "esac\n",
             )
@@ -2400,9 +2646,9 @@ def main() -> None:
         "Store profile must not expose a Helper download URL",
     )
     require(
-        "PROVISIONING_PROFILE_SPECIFIER = YOUR_APP_STORE_PROFILE_NAME_OR_UUID"
-        in release_identity_example,
-        "local release identity template must require an explicit Store profile",
+        "independent Developer ID profile UUIDs" in release_identity_example
+        and "PROVISIONING_PROFILE_SPECIFIER =" not in release_identity_example,
+        "release identity must not apply one Store/global profile to both direct targets",
     )
 
     manager = read(
@@ -2428,8 +2674,12 @@ def main() -> None:
         "BLOCKS_PRIVACY_URL",
     ]:
         require(key in info, f"release metadata key missing: {key}")
-    require(info["CFBundleDisplayName"] == "Blocks for Mac", "base display name drifted")
-    require(info["CFBundleName"] == "Blocks for Mac", "base bundle name drifted")
+    require(info["CFBundleDisplayName"] == "$(BLOCKS_DISPLAY_NAME)", "base display name must remain build-setting driven")
+    require(info["CFBundleName"] == "$(BLOCKS_DISPLAY_NAME)", "base bundle name must remain build-setting driven")
+    signing_shared = read("apps/Blocks/Config/Signing.shared.xcconfig")
+    local_development = read("apps/Blocks/Config/LocalDevelopment.xcconfig")
+    require("BLOCKS_DISPLAY_NAME = Blocks for Mac" in signing_shared, "shared release display name drifted")
+    require("BLOCKS_DISPLAY_NAME = Blocks Dev" in local_development, "local-development display name drifted")
 
     info_localizations = json.loads(
         read("apps/Blocks/BlocksApp/Resources/InfoPlist.xcstrings")
@@ -2528,7 +2778,9 @@ def main() -> None:
         "Applications/BlocksDev/Debug/",
         "Library/Developer/Xcode/DerivedData/",
         "unexpected signed entitlement",
-        "Direct app ActionBroker Mach exception must contain exactly one service",
+        "Direct app Mach exceptions must contain exactly ActionBroker and Sparkle spks/spki",
+        "Sparkle signature lacks a secure timestamp",
+        "forbidden Sparkle entitlement",
         "signing Identifier differs",
         'if [[ -s "$entitlement_file" ]]',
         'unexpected Mach-O executable in bundle',
@@ -2567,17 +2819,27 @@ def main() -> None:
         direct_allowlist == [
             "$contents/MacOS/BlocksActionBroker",
             "$contents/Resources/CLI/blocks",
+            "$embedded_helper_executable",
+            "$sparkle_framework_binary",
+            "$sparkle_installer_binary",
+            "$sparkle_downloader_binary",
+            "$sparkle_autoupdate",
+            "$sparkle_updater_binary",
         ],
         "Direct Mach-O allowlist differs from the exact release policy",
     )
     sign_direct_script = read("script/release/sign_direct_bundle.sh")
-    require("Contents/Frameworks" not in sign_direct_script, "Direct signing must not traverse Frameworks")
+    require("Sparkle.framework" in sign_direct_script, "Direct signing must explicitly sign Sparkle nested components")
     require("find " not in sign_direct_script, "Direct signing must use only explicit known targets")
     for target in [
         "BlocksPluginRunner.xpc",
         "BlocksClipboardBroker",
         "BlocksActionBroker",
         "Resources/CLI/blocks",
+        "XPCServices/Installer.xpc",
+        "XPCServices/Downloader.xpc",
+        "sparkle_autoupdate",
+        "sparkle_updater",
     ]:
         require(target in sign_direct_script, f"Direct signing target missing: {target}")
     require(
@@ -2771,7 +3033,7 @@ def main() -> None:
     )
     package_script = read("script/release/package_dmg.sh")
     for marker in [
-        "--artifact direct-beta|selection-helper-beta",
+        "--artifact direct-stable|direct-beta|selection-helper-stable|selection-helper-beta",
         "--expected-team-id",
         "--expected-cert-sha1",
         "--expected-authority",

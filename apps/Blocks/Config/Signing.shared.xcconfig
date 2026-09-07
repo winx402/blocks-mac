@@ -4,6 +4,10 @@ CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO
 CODE_SIGN_IDENTITY = -
 DEVELOPMENT_TEAM =
 BLOCKS_SELECTION_HELPER_DOWNLOAD_URL =
+BLOCKS_DISPLAY_NAME = Blocks for Mac
+BLOCKS_IDENTIFIER_PREFIX = app.blocks
+BLOCKS_SPARKLE_PUBLIC_KEY =
+BLOCKS_UPDATE_FEED_URL =
 
 // Local credentials are never committed. The Debug App Keychain groups require
 // Apple Development signing and a matching provisioning profile; these ad-hoc

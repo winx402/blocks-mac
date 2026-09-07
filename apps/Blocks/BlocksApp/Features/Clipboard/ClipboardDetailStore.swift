@@ -75,6 +75,7 @@ final class ClipboardDetailStore: ObservableObject {
         mutationExecutor: ClipboardRepositoryMutationExecutor? = nil,
         pipelineHooks: ClipboardDetailPipelineHooks = ClipboardDetailPipelineHooks(),
         recordCommitGate: ClipboardRecordCommitGate? = nil,
+        applicationUpdateGate: ApplicationOperationAdmissionGate = ApplicationOperationAdmissionGate(name: "Clipboard detail"),
         onCommittedDeletion: @escaping @Sendable ([String]) -> Void = { _ in }
     ) {
         self.pipeline = repository.map {
@@ -83,6 +84,7 @@ final class ClipboardDetailStore: ObservableObject {
                 mutationExecutor: mutationExecutor,
                 hooks: pipelineHooks,
                 recordCommitGate: recordCommitGate,
+                applicationUpdateGate: applicationUpdateGate,
                 onCommittedDeletion: onCommittedDeletion
             )
         }
@@ -731,6 +733,7 @@ private actor ClipboardDetailPipeline {
     private let mutationExecutor: ClipboardRepositoryMutationExecutor?
     private let hooks: ClipboardDetailPipelineHooks
     private let recordCommitGate: ClipboardRecordCommitGate?
+    private let applicationUpdateGate: ApplicationOperationAdmissionGate
     private let onCommittedDeletion: @Sendable ([String]) -> Void
 
     init(
@@ -738,23 +741,33 @@ private actor ClipboardDetailPipeline {
         mutationExecutor: ClipboardRepositoryMutationExecutor?,
         hooks: ClipboardDetailPipelineHooks,
         recordCommitGate: ClipboardRecordCommitGate?,
+        applicationUpdateGate: ApplicationOperationAdmissionGate,
         onCommittedDeletion: @escaping @Sendable ([String]) -> Void
     ) {
         self.repository = repository
         self.mutationExecutor = mutationExecutor
         self.hooks = hooks
         self.recordCommitGate = recordCommitGate
+        self.applicationUpdateGate = applicationUpdateGate
         self.onCommittedDeletion = onCommittedDeletion
     }
 
     func load(recordID: String) -> Result<ClipboardDetailReadModel, Error> {
-        Result { try repository.loadDetailReadModel(recordID: recordID) }
+        guard let lease = applicationUpdateGate.begin() else {
+            return .failure(ApplicationOperationAdmissionGate.AdmissionError.paused("Clipboard detail"))
+        }
+        defer { lease.release() }
+        return Result { try repository.loadDetailReadModel(recordID: recordID) }
     }
 
     func editingSnapshot(
         for model: ClipboardDetailReadModel
     ) -> Result<ClipboardDetailEditingSnapshot, Error> {
-        Result {
+        guard let lease = applicationUpdateGate.begin() else {
+            return .failure(ApplicationOperationAdmissionGate.AdmissionError.paused("Clipboard detail"))
+        }
+        defer { lease.release() }
+        return Result {
             let kind: ClipboardDetailEditableKind?
             switch model.editability {
             case let .editable(editableKind):
@@ -791,6 +804,10 @@ private actor ClipboardDetailPipeline {
     func save(
         _ request: ClipboardDetailSaveRequest
     ) async -> Result<ClipboardDetailSaveSnapshot, ClipboardDetailSaveFailure> {
+        guard let applicationLease = applicationUpdateGate.begin() else {
+            return .failure(.transactionFailed)
+        }
+        defer { applicationLease.release() }
         await hooks.beforeSave(request.model.recordID)
         let permit = await recordCommitGate?.acquire()
         if recordCommitGate != nil, permit == nil {
@@ -868,6 +885,8 @@ private actor ClipboardDetailPipeline {
     }
 
     func metadataFullValue(recordID: String, itemID: String, purpose: String) async -> String? {
+        guard let lease = applicationUpdateGate.begin() else { return nil }
+        defer { lease.release() }
         await hooks.beforeMetadataRead(recordID)
         return try? repository.readDetailMetadataFullValue(
             recordID: recordID,
@@ -877,6 +896,8 @@ private actor ClipboardDetailPipeline {
     }
 
     func fullValue(model: ClipboardDetailReadModel, purpose: String) async -> String? {
+        guard let lease = applicationUpdateGate.begin() else { return nil }
+        defer { lease.release() }
         await hooks.beforeFullValueRead(model.recordID)
         switch model.editability {
         case .editable(.imageOCRText), .readOnly:

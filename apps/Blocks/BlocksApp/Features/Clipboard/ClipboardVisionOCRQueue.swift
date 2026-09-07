@@ -15,28 +15,35 @@ actor ClipboardVisionOCRQueue {
 
     private let repository: ClipboardRepository
     private let recognizer: ClipboardVisionTextRecognizer
+    private let applicationUpdateGate: ApplicationOperationAdmissionGate
     private var runningRecordIDs: Set<String> = []
 
     init(
         repository: ClipboardRepository,
-        ocrCoordinator: LocalOCRCoordinator = LocalOCRCoordinator()
+        ocrCoordinator: LocalOCRCoordinator = LocalOCRCoordinator(),
+        applicationUpdateGate: ApplicationOperationAdmissionGate = ApplicationOperationAdmissionGate(name: "Clipboard OCR")
     ) {
         self.repository = repository
         self.recognizer = AppleVisionTextRecognizer(coordinator: ocrCoordinator)
+        self.applicationUpdateGate = applicationUpdateGate
     }
 
     init(
         repository: ClipboardRepository,
-        recognizer: ClipboardVisionTextRecognizer
+        recognizer: ClipboardVisionTextRecognizer,
+        applicationUpdateGate: ApplicationOperationAdmissionGate = ApplicationOperationAdmissionGate(name: "Clipboard OCR")
     ) {
         self.repository = repository
         self.recognizer = recognizer
+        self.applicationUpdateGate = applicationUpdateGate
     }
 
     func processPending(
         limit: Int = 1,
         context: LocalOCRRequestContext = .clipboardImage
     ) async -> [OCRQueueResult] {
+        guard let lease = applicationUpdateGate.begin() else { return [] }
+        defer { lease.release() }
         do {
             let documents = try repository.loadPendingOCRDocuments(limit: max(1, limit))
             var results: [OCRQueueResult] = []
@@ -58,10 +65,18 @@ actor ClipboardVisionOCRQueue {
         revision: String,
         context: LocalOCRRequestContext = .clipboardImage
     ) async -> OCRQueueResult {
-        await process(recordID: recordID, revision: revision, context: context)
+        guard let lease = applicationUpdateGate.begin() else {
+            return .skipped(recordID: recordID, reason: "application_update_paused")
+        }
+        defer { lease.release() }
+        return await process(recordID: recordID, revision: revision, context: context)
     }
 
     func retryOCR(recordID: String) async -> OCRQueueResult {
+        guard let lease = applicationUpdateGate.begin() else {
+            return .skipped(recordID: recordID, reason: "application_update_paused")
+        }
+        defer { lease.release() }
         do {
             guard !runningRecordIDs.contains(recordID) else {
                 return .skipped(recordID: recordID, reason: "already_running")

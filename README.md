@@ -13,6 +13,8 @@
 App 内更新正在实施；没有完成真实验证的能力不会标为可用。现有签名开发流程
 见 [App 开发说明](apps/Blocks/README.md)。源码构建仍需要完整 Xcode。
 
+统一入口、身份隔离和迁移边界见 [源码安装与独立发布](docs/技术知识库/源码安装与独立发布.md)。
+
 贡献前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 和 [SECURITY.md](SECURITY.md)。
 请勿在公开 Issue 上传 API key、配对密钥、剪贴板内容或个人截图。
 
@@ -61,6 +63,6 @@ App 内更新正在实施；没有完成真实验证的能力不会标为可用�
 
 ## 当前边界
 
-- V1 正式 PRD、正式 UX Spec 和 Epics & Stories 已形成第一版需求、体验与开发拆分基线；Implementation Readiness 曾给出 `NEEDS WORK`，P2-Q 已收敛剪贴板数据所有权、翻译快捷键、provider 默认策略和 PRD 过期 open questions。正式 App 已进入 P8 产品打磨阶段：当前工程为 `apps/Blocks/Blocks.xcodeproj`，形态为 `SwiftUI + AppKit + sandbox-first + helper stub + shared action core`，已完成截图区域/窗口/全屏纵切、截图 OCR/Translate/Summarize route-ready、Bob 风格翻译浮层、`Control + Option + A/V/D` 快捷入口、快捷键自定义录入与全局修饰键、稳定签名权限诊断、Accessibility 独立请求、AI Capability Provider Layer 骨架、OpenAI-compatible 翻译 runtime gate、Keychain 低敏测试门禁和三语 UI 本地化基础。剪贴板当前已从 redacted recorder / fixture 面板推进到本地内存态 live capture：`ClipboardLiveCaptureService` 轮询 `NSPasteboard` 捕获文本、RTF、URL、file URL 和 PNG/TIFF 图片，`ClipboardController` 负责 preview、筛选、来源聚合和 ingest 去重，bottom/side 浮层直接展示内容或缩略图，并通过 `ClipboardAutoPasteCoordinator` 写回系统剪贴板和触发粘贴。P8-I/P8-J/P8-K/P8-L 已收敛 Settings 行模型、右侧控件列、全屏布局和 Clipboard bottom 高度锚定；P8-M 已完成剪贴板面板、筛选、卡片、详情、自动粘贴、settings key 和 controller 的模块化；P8-N 代码门禁已覆盖自写入抑制、live ingest 策略裁剪和条目内容字体设置。仍未完成的是生产级剪贴板持久化仓库、保存前 capture policy、完整 Pinboard 编辑、Paste Stack、文本/富文本编辑、真实 OCR/图片外发和正式 packaging/notarization。商业模式和最终发布渠道仍未锁死。
+- 早期 P8 说明仅保留为历史上下文，不代表当前发行状态。现行分发规则是：项目自有代码采用 MIT 开源；官方版本不计划上架 App Store，而以 Developer ID 签名、Hardened Runtime 和 notarization 的沙盒直发包发布。`LocalDevelopment` 不启用 App Sandbox，并以独立 runtime identity、数据目录和 Keychain namespace 与官方包隔离。尚未完成真实验证的安装、更新或功能不会标为可用。
 - 除已进入决策记录库的事项外，架构与 MVP 内容均为 `proposed` 或 `待验证`。
 - P2 第一轮技术验证与 P2-L 架构收敛已基本完成；P2-K 证明了截图边界、复杂剪贴板 fixture、helper recorder roundtrip、provider 设置确认和 Swift validator 候选的 spike 路径，但不等于正式 App、长期 recorder、多屏/权限撤销或真实 provider 调用已完成。

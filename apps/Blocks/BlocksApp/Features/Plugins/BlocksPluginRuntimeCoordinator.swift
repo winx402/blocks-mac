@@ -106,13 +106,16 @@ final class BlocksPluginHostOperationAdmissionGate: @unchecked Sendable {
         private let lock = NSLock()
         private var gate: BlocksPluginHostOperationAdmissionGate?
         private let pluginID: String
+        private let applicationLease: ApplicationOperationAdmissionGate.Lease
 
         fileprivate init(
             gate: BlocksPluginHostOperationAdmissionGate,
-            pluginID: String
+            pluginID: String,
+            applicationLease: ApplicationOperationAdmissionGate.Lease
         ) {
             self.gate = gate
             self.pluginID = pluginID
+            self.applicationLease = applicationLease
         }
 
         func release() {
@@ -121,6 +124,7 @@ final class BlocksPluginHostOperationAdmissionGate: @unchecked Sendable {
                 return self.gate
             }
             gate?.release(pluginID: pluginID)
+            applicationLease.release()
         }
 
         deinit {
@@ -129,6 +133,7 @@ final class BlocksPluginHostOperationAdmissionGate: @unchecked Sendable {
     }
 
     private let condition = NSCondition()
+    private let applicationAdmission = ApplicationOperationAdmissionGate(name: "Plugin host operations")
     private var globallyRevoked = false
     private var permanentlyRevoked = false
     private var revokedPluginIDs: Set<String> = []
@@ -154,6 +159,7 @@ final class BlocksPluginHostOperationAdmissionGate: @unchecked Sendable {
     /// same counter therefore forms one lifecycle barrier for synchronous XPC
     /// requests and asynchronous business actions.
     func acquire(pluginID: String) throws -> Lease {
+        let applicationLease = try applicationAdmission.requireLease()
         condition.lock()
         guard !globallyRevoked, !revokedPluginIDs.contains(pluginID) else {
             condition.unlock()
@@ -165,7 +171,7 @@ final class BlocksPluginHostOperationAdmissionGate: @unchecked Sendable {
         condition.unlock()
 
         admissionCheckpoint?(pluginID)
-        return Lease(gate: self, pluginID: pluginID)
+        return Lease(gate: self, pluginID: pluginID, applicationLease: applicationLease)
     }
 
     private func release(pluginID: String) {
@@ -201,6 +207,17 @@ final class BlocksPluginHostOperationAdmissionGate: @unchecked Sendable {
             condition.wait()
         }
         condition.unlock()
+    }
+
+    func pauseIfIdleForApplicationUpdate() throws -> Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        guard activeOperationCounts.isEmpty else {
+            throw ApplicationOperationAdmissionGate.AdmissionError.busy("Plugin host operations")
+        }
+        let wasRevoked = globallyRevoked
+        globallyRevoked = true
+        return wasRevoked
     }
 
     func resumeAll() {
@@ -1244,6 +1261,23 @@ final class BlocksPluginRuntimeCoordinator: ObservableObject {
     private let distributionChannel: DistributionChannel
     private let logger = Logger(subsystem: "com.toooops.blocks", category: "plugin-runtime")
     private var activeInvocationKeys: Set<String> = []
+    private let applicationUpdateGate = ApplicationOperationAdmissionGate(name: "Plugin runtime")
+    private var applicationUpdateHostWasRevoked: Bool?
+
+    func prepareForApplicationUpdate() async throws {
+        try applicationUpdateGate.pauseIfIdle()
+        try await manager.prepareForApplicationUpdate()
+        applicationUpdateHostWasRevoked = try manager.hostOperationAdmissionGate.pauseIfIdleForApplicationUpdate()
+    }
+
+    func resumeAfterCancelledApplicationUpdate() async {
+        if applicationUpdateHostWasRevoked == false {
+            manager.hostOperationAdmissionGate.resumeAll()
+        }
+        applicationUpdateHostWasRevoked = nil
+        await manager.resumeAfterCancelledApplicationUpdate()
+        applicationUpdateGate.resume()
+    }
     private var scheduleTasks: [String: Task<Void, Never>] = [:]
     private var asyncDispatchTasksByModule:
         [BlocksPluginModule: (id: UUID, task: Task<Void, Never>)] = [:]
@@ -1335,6 +1369,8 @@ final class BlocksPluginRuntimeCoordinator: ObservableObject {
         admissionIsCurrent: (@MainActor () -> Bool)? = nil,
         featureAdmission: BlocksPluginFeatureAdmissionToken? = nil
     ) async -> BlocksPluginEventDispatchResult {
+        guard let updateLease = applicationUpdateGate.begin() else { return .allowed(envelope) }
+        defer { updateLease.release() }
         let allowsTerminationDispatch = envelope.name == .appWillTerminate
         let invalidationGeneration = dispatchInvalidationGeneration
         guard isDispatchValid(
@@ -1867,6 +1903,8 @@ final class BlocksPluginRuntimeCoordinator: ObservableObject {
     }
 
     func setSafeModeEnabled(_ enabled: Bool) async {
+        guard let updateLease = applicationUpdateGate.begin() else { return }
+        defer { updateLease.release() }
         await waitForSafeModeTransition()
         guard safeModeEnabled != enabled else { return }
         safeModeTransitionInProgress = true
@@ -1913,6 +1951,8 @@ final class BlocksPluginRuntimeCoordinator: ObservableObject {
     }
 
     func reloadSchedules() async {
+        guard let updateLease = applicationUpdateGate.begin() else { return }
+        defer { updateLease.release() }
         cancelSchedules()
         guard !safeModeEnabled, !asyncDispatchesTerminated else { return }
         let bindings = await manager.scheduleBindings()
@@ -2029,6 +2069,8 @@ final class BlocksPluginRuntimeCoordinator: ObservableObject {
         _ binding: BlocksPluginScheduleBinding,
         admission: ScheduleRunnerAdmission?
     ) async {
+        guard let updateLease = applicationUpdateGate.begin() else { return }
+        defer { updateLease.release() }
         guard !safeModeEnabled,
               !asyncDispatchesTerminated,
               currentRunnableScheduleDeclaration(
@@ -2181,6 +2223,7 @@ final class BlocksPluginRuntimeCoordinator: ObservableObject {
         admissionIsCurrent: (@MainActor () -> Bool)? = nil,
         featureAdmission: BlocksPluginFeatureAdmissionToken? = nil
     ) -> Task<Void, Never>? {
+        guard let updateLease = applicationUpdateGate.begin() else { return nil }
         // A post-event can wait behind another FIFO item after its feature
         // operation has completed. Do not retain staged resources once its
         // source-bound admission has already been revoked.
@@ -2199,6 +2242,7 @@ final class BlocksPluginRuntimeCoordinator: ObservableObject {
         let previousTask = asyncDispatchTasksByModule[module]?.task
         let task = Task { @MainActor [weak self] in
             defer {
+                updateLease.release()
                 resourceBroker.releaseHostLease(ids: resourceIDs)
                 self?.completeAsyncDispatch(
                     module: module,
@@ -2364,6 +2408,8 @@ final class BlocksPluginRuntimeCoordinator: ObservableObject {
         origin: BlocksPluginHostInvocationOrigin? = nil,
         featureAdmission: BlocksPluginFeatureAdmissionToken? = nil
     ) async throws -> BlocksPluginRuntimeResult {
+        let updateLease = try applicationUpdateGate.requireLease()
+        defer { updateLease.release() }
         let resolvedOrigin = origin
             ?? (kind == .uiAction ? .explicitUser : .background)
         guard let metadata = manager.plugins.first(where: { $0.id == pluginID }) else {

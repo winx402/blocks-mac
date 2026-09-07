@@ -288,6 +288,15 @@ final class TranslationScreenshotWorkflowCoordinator {
             focusSourceEditorIfPresented(for: model)
             return
         }
+        guard let admissionLease =
+            TranslationApplicationOperationAdmission.gate.begin() else {
+            model.updateOCRFailure(
+                code: "application_update_paused",
+                message: L10n.string("translation.error.generic")
+            )
+            focusSourceEditorIfPresented(for: model)
+            return
+        }
 
         let executionID = UUID()
         let token = LocalVisionOCRRequestToken()
@@ -302,7 +311,8 @@ final class TranslationScreenshotWorkflowCoordinator {
             token: token,
             model: model
         )
-        let task = Task { [weak self, weak model] in
+        let task = Task { [weak self, weak model, admissionLease] in
+            defer { admissionLease.release() }
             guard let self, let model else { return }
             async let recognition: Void = self.executeRecognition(
                 provider: resolvedOCRProvider,

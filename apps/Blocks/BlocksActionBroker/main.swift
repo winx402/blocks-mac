@@ -50,12 +50,32 @@ private actor ActionHostRouter {
 }
 
 private final class BrokerConnectionService: NSObject, BlocksActionBrokerHostXPCProtocol, BlocksActionBrokerClientXPCProtocol {
+    func probe(withReply reply: @escaping () -> Void) { reply() }
+    func probeUpdateLifecycle(withReply reply: @escaping () -> Void) {
+        guard hostProcessID != nil else { return }
+        reply()
+    }
+
+    func prepareForApplicationUpdate(_ token: String, withReply reply: @escaping (Bool, String?) -> Void) {
+        guard hostProcessID != nil else { reply(false, "Only the authenticated Blocks App may prepare the Broker."); return }
+        do { try updateAdmission.prepare(token: token); reply(true, nil) }
+        catch { reply(false, error.localizedDescription) }
+    }
+
+    func resumeAfterCancelledApplicationUpdate(_ token: String, withReply reply: @escaping (Bool, String?) -> Void) {
+        guard hostProcessID != nil else { reply(false, "Only the authenticated Blocks App may resume the Broker."); return }
+        do { try updateAdmission.resume(token: token); reply(true, nil) }
+        catch { reply(false, error.localizedDescription) }
+    }
+
     private let router: ActionHostRouter
     private let hostProcessID: pid_t?
+    private let updateAdmission: ActionBrokerUpdateAdmission
 
-    init(router: ActionHostRouter, hostProcessID: pid_t?) {
+    init(router: ActionHostRouter, hostProcessID: pid_t?, updateAdmission: ActionBrokerUpdateAdmission) {
         self.router = router
         self.hostProcessID = hostProcessID
+        self.updateAdmission = updateAdmission
     }
 
     func registerHost(
@@ -66,7 +86,9 @@ private final class BrokerConnectionService: NSObject, BlocksActionBrokerHostXPC
             reply(false, "Only the Blocks App can register an action host.")
             return
         }
+        guard let lease = updateAdmission.begin() else { reply(false, "Action Broker is preparing to update."); return }
         Task {
+            defer { lease.release() }
             await router.register(endpoint: endpoint, processID: hostProcessID)
             reply(true, nil)
         }
@@ -77,7 +99,11 @@ private final class BrokerConnectionService: NSObject, BlocksActionBrokerHostXPC
         outputFile: FileHandle?,
         withReply reply: @escaping (Data) -> Void
     ) {
-        let once = ReplyOnce(reply)
+        guard let lease = updateAdmission.begin() else {
+            reply(Self.failure(requestData: requestData, code: "application_update_preparing", message: "Blocks is preparing to update. Retry after it restarts."))
+            return
+        }
+        let once = ReplyOnce { data in defer { lease.release() }; reply(data) }
         Task {
             if await router.waitForHost(timeout: .zero) == nil {
                 launchMainApp()
@@ -115,7 +141,8 @@ private final class BrokerConnectionService: NSObject, BlocksActionBrokerHostXPC
         _ requestID: String,
         withReply reply: @escaping (Bool) -> Void
     ) {
-        let once = BooleanReplyOnce(reply)
+        guard let lease = updateAdmission.begin() else { reply(false); return }
+        let once = BooleanReplyOnce { value in defer { lease.release() }; reply(value) }
         Task {
             guard let host = await router.waitForHost(timeout: .zero) else {
                 once.send(false)
@@ -135,13 +162,14 @@ private final class BrokerConnectionService: NSObject, BlocksActionBrokerHostXPC
     }
 
     private func launchMainApp() {
+        guard let launchLease = updateAdmission.begin() else { return }
         guard let appURL = Self.embeddedMainAppURL()
             ?? NSWorkspace.shared.urlForApplication(
                 withBundleIdentifier: BlocksActionBrokerXPC.appBundleIdentifier
             ) else { return }
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = false
-        NSWorkspace.shared.openApplication(at: appURL, configuration: configuration)
+        NSWorkspace.shared.openApplication(at: appURL, configuration: configuration) { _, _ in launchLease.release() }
     }
 
     private static func embeddedMainAppURL() -> URL? {
@@ -209,6 +237,7 @@ private final class BooleanReplyOnce: @unchecked Sendable {
 
 private final class BrokerListenerDelegate: NSObject, NSXPCListenerDelegate {
     private let router = ActionHostRouter()
+    private let updateAdmission = ActionBrokerUpdateAdmission()
 
     func listener(
         _ listener: NSXPCListener,
@@ -226,7 +255,8 @@ private final class BrokerListenerDelegate: NSObject, NSXPCListenerDelegate {
         }
         connection.exportedObject = BrokerConnectionService(
             router: router,
-            hostProcessID: hostProcessID
+            hostProcessID: hostProcessID,
+            updateAdmission: updateAdmission
         )
         connection.resume()
         return true
@@ -244,6 +274,17 @@ private enum BlocksPeerIdentityValidator {
               connection.processIdentifier > 0 else {
             return nil
         }
+        #if BLOCKS_LOCAL_DEVELOPMENT
+        if BlocksLocalBuildTrust.accepts(processIdentifier: connection.processIdentifier,
+                                        userIdentifier: connection.effectiveUserIdentifier, role: "app") {
+            return .appHost
+        }
+        if BlocksLocalBuildTrust.accepts(processIdentifier: connection.processIdentifier,
+                                        userIdentifier: connection.effectiveUserIdentifier, role: "cli") {
+            return .client
+        }
+        return nil
+        #else
         guard let peer = signingInfo(pid: connection.processIdentifier),
               let own = signingInfo(pid: getpid()),
               !own.teamID.isEmpty,
@@ -258,6 +299,7 @@ private enum BlocksPeerIdentityValidator {
         default:
             return nil
         }
+        #endif
     }
 
     private static func signingInfo(pid: pid_t) -> (teamID: String, identifier: String)? {

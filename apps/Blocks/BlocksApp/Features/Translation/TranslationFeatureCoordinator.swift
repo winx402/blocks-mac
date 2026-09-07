@@ -151,7 +151,9 @@ final class TranslationFeatureCoordinator:
         let entryID = beginEntry(source: .screenshotOCR)
         closeClipboardPanel { [weak self] in
             guard let self, isCurrentEntry(entryID) else { return }
-            Task { @MainActor in
+            guard let task = TranslationApplicationOperationAdmission.gate.task({
+                [weak self] in
+                guard let self else { return }
                 await self.screenshotWorkflow.captureAndPresent {
                     self.isCurrentEntry(entryID)
                 }
@@ -161,14 +163,19 @@ final class TranslationFeatureCoordinator:
                         outcome: "capture-cancelled"
                     )
                 }
+            }) else {
+                self.finishEntryPresentation(entryID, outcome: "update-paused")
+                return
             }
+            _ = task
         }
     }
 
     func showClipboardRecord(recordID: String) {
         let entryID = beginEntry(source: .clipboardRecord)
         let executionID = UUID()
-        let task = Task { [weak self] in
+        guard let task = TranslationApplicationOperationAdmission.gate.task({
+            [weak self] in
             guard let self, let readClipboardText else { return }
             let textResult = await readClipboardText(
                 recordID,
@@ -207,6 +214,9 @@ final class TranslationFeatureCoordinator:
                 ),
                 entryID: entryID
             )
+        }) else {
+            finishEntryPresentation(entryID, outcome: "update-paused")
+            return
         }
         clipboardReadExecution = ClipboardReadExecution(
             id: executionID,
@@ -331,7 +341,7 @@ final class TranslationFeatureCoordinator:
                 },
                 retakeScreenshot: { [weak self, weak model] in
                     guard let self, let model else { return }
-                    Task { @MainActor in
+                    _ = TranslationApplicationOperationAdmission.gate.task {
                         await self.screenshotWorkflow
                             .retakeScreenshot(for: model)
                     }
@@ -491,7 +501,7 @@ final class TranslationFeatureCoordinator:
         entryInvocationID == id
     }
 
-    private func finishEntryPresentation(
+    func finishEntryPresentation(
         _ id: UUID,
         outcome: String
     ) {

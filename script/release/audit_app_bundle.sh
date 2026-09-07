@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
 usage() {
-  echo "usage: $0 --channel direct-beta|app-store-beta --app /path/to/Blocks.app [--require-signature --expected-team-id TEAM_ID --expected-authority AUTHORITY --expected-cert-sha1 SHA1]" >&2
+  echo "usage: $0 --channel direct-stable|direct-beta|app-store-beta --app /path/to/Blocks.app [--expected-version X.Y.Z --expected-build N --expected-release-name NAME] [--require-signature --expected-team-id TEAM_ID --expected-authority AUTHORITY --expected-cert-sha1 SHA1]" >&2
 }
 
 channel=""
@@ -11,6 +13,9 @@ require_signature=0
 expected_team_id=""
 expected_authority=""
 expected_cert_sha1="${BLOCKS_EXPECTED_SIGNING_CERT_SHA1:-}"
+expected_version=""
+expected_build=""
+expected_release_name=""
 
 while (($#)); do
   case "$1" in
@@ -38,6 +43,9 @@ while (($#)); do
       expected_cert_sha1="${2:-}"
       shift 2
       ;;
+    --expected-version) expected_version="${2:-}"; shift 2 ;;
+    --expected-build) expected_build="${2:-}"; shift 2 ;;
+    --expected-release-name) expected_release_name="${2:-}"; shift 2 ;;
     *)
       usage
       exit 2
@@ -45,8 +53,12 @@ while (($#)); do
   esac
 done
 
-if [[ "$channel" != "direct-beta" && "$channel" != "app-store-beta" ]]; then
+if [[ "$channel" != "direct-beta" && "$channel" != "direct-stable" && "$channel" != "app-store-beta" ]]; then
   usage
+  exit 2
+fi
+if [[ -n "$expected_version$expected_build$expected_release_name" ]] && ! [[ "$expected_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$expected_build" =~ ^[1-9][0-9]*$ && "$expected_release_name" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*$ ]]; then
+  echo "error: --expected-version, --expected-build, and --expected-release-name must be supplied together and valid" >&2
   exit 2
 fi
 if ((require_signature)) && [[ -z "$expected_authority" ]]; then
@@ -74,11 +86,19 @@ fail() {
   exit 1
 }
 
-# Release artifacts are self-contained and currently have no approved
-# symlinked bundle members. Reject links before checking required paths so a
-# known executable name cannot be redirected to an unreviewed payload.
+# Sparkle has canonical framework-version links; every other release-bundle
+# link is forbidden so known paths cannot be redirected to unreviewed payload.
 while IFS= read -r -d '' symbolic_link; do
-  fail "symbolic link is forbidden in release bundle: ${symbolic_link#"$app_bundle/"}"
+  relative_link="${symbolic_link#"$app_bundle/"}"
+  case "$relative_link:$(readlink "$symbolic_link")" in
+    Contents/Frameworks/Sparkle.framework/Versions/Current:B|\
+    Contents/Frameworks/Sparkle.framework/Sparkle:Versions/Current/Sparkle|\
+    Contents/Frameworks/Sparkle.framework/Resources:Versions/Current/Resources|\
+    Contents/Frameworks/Sparkle.framework/Autoupdate:Versions/Current/Autoupdate|\
+    Contents/Frameworks/Sparkle.framework/Updater.app:Versions/Current/Updater.app)
+      ;;
+    *) fail "symbolic link is forbidden in release bundle: $relative_link" ;;
+  esac
 done < <(find "$contents" -type l -print0)
 
 require_path() {
@@ -103,6 +123,29 @@ minimum_system="$(plutil -extract LSMinimumSystemVersion raw "$info_plist")"
 artifact_channel="$(plutil -extract BLOCKS_DISTRIBUTION_CHANNEL raw "$info_plist")"
 [[ "$artifact_channel" == "$channel" ]] \
   || fail "expected channel $channel, got: $artifact_channel"
+
+# Stable and beta share one distribution trust policy. Their only distinction
+# is the validated SemVer prerelease field, never a weaker signing path.
+if [[ "$channel" == "direct-beta" || "$channel" == "direct-stable" ]]; then
+  /usr/bin/python3 - "$repo_root" "$info_plist" "$channel" <<'PY' || fail "main release name, version/build, and channel are inconsistent"
+import plistlib, sys
+sys.path.insert(0, sys.argv[1] + "/script/release")
+from release_versioning import validate_bundle_version
+with open(sys.argv[2], "rb") as stream:
+    info = plistlib.load(stream)
+name = info.get("BLOCKS_RELEASE_NAME")
+if not isinstance(name, str):
+    raise ValueError("BLOCKS_RELEASE_NAME must be a string")
+parsed = validate_bundle_version("v" + name, name, info.get("CFBundleShortVersionString"), info.get("CFBundleVersion"))
+if sys.argv[3] != ("direct-beta" if parsed.is_prerelease else "direct-stable"):
+    raise ValueError("release channel does not match SemVer prerelease state")
+PY
+  if [[ -z "$expected_version" ]]; then
+    expected_version="$(plutil -extract CFBundleShortVersionString raw "$info_plist")"
+    expected_build="$(plutil -extract CFBundleVersion raw "$info_plist")"
+    expected_release_name="$(plutil -extract BLOCKS_RELEASE_NAME raw "$info_plist")"
+  fi
+fi
 
 bundle_identifier="$(plutil -extract CFBundleIdentifier raw "$info_plist")"
 [[ "$bundle_identifier" == "app.blocks.app" ]] \
@@ -137,9 +180,35 @@ xpc_plugin_runner_service="$contents/XPCServices/BlocksPluginRunner.xpc"
 plugin_runner="$contents/XPCServices/BlocksPluginRunner.xpc/Contents/MacOS/BlocksPluginRunner"
 require_path "$plugin_runner"
 forbid_path "$contents/MacOS/Blocks Selection Helper"
-forbid_path "$contents/Helpers/Blocks Selection Helper.app"
 
-if [[ "$channel" == "direct-beta" ]]; then
+if [[ "$channel" == "direct-beta" || "$channel" == "direct-stable" ]]; then
+  embedded_helper="$contents/Helpers/Blocks Selection Helper.app"
+  embedded_helper_executable="$embedded_helper/Contents/MacOS/Blocks Selection Helper"
+  require_path "$embedded_helper"
+  require_path "$embedded_helper_executable"
+  /usr/bin/python3 - "$info_plist" "$embedded_helper/Contents/Info.plist" <<'PY' || fail "embedded Helper release identity differs from main App"
+import plistlib, sys
+with open(sys.argv[1], "rb") as stream:
+    app = plistlib.load(stream)
+with open(sys.argv[2], "rb") as stream:
+    helper = plistlib.load(stream)
+for key in ("CFBundleShortVersionString", "CFBundleVersion", "BLOCKS_RELEASE_NAME", "BLOCKS_DISTRIBUTION_CHANNEL"):
+    if not isinstance(app.get(key), str) or helper.get(key) != app[key]:
+        raise ValueError("embedded Helper does not match main App: " + key)
+PY
+  sparkle_framework="$contents/Frameworks/Sparkle.framework"
+  sparkle_version_root="$sparkle_framework/Versions/B"
+  sparkle_framework_binary="$sparkle_version_root/Sparkle"
+  sparkle_installer="$sparkle_version_root/XPCServices/Installer.xpc"
+  sparkle_installer_binary="$sparkle_installer/Contents/MacOS/Installer"
+  sparkle_downloader="$sparkle_version_root/XPCServices/Downloader.xpc"
+  sparkle_downloader_binary="$sparkle_downloader/Contents/MacOS/Downloader"
+  sparkle_autoupdate="$sparkle_version_root/Autoupdate"
+  sparkle_updater="$sparkle_version_root/Updater.app"
+  sparkle_updater_binary="$sparkle_updater/Contents/MacOS/Updater"
+  for sparkle_path in "$sparkle_framework" "$sparkle_framework_binary" "$sparkle_installer" "$sparkle_installer_binary" "$sparkle_downloader" "$sparkle_downloader_binary" "$sparkle_autoupdate" "$sparkle_updater" "$sparkle_updater_binary"; do
+    require_path "$sparkle_path"
+  done
   [[ "$(plutil -extract BLOCKS_SELECTION_HELPER_DOWNLOAD_URL raw "$info_plist")" == "https://downloads.orangeforge.top/beta/0.1.0-beta.1/Blocks-Selection-Helper-0.1.0-beta.1-arm64.dmg" ]] \
     || fail "Selection Helper download URL drifted"
   require_path "$contents/Resources/CLI/blocks"
@@ -178,10 +247,16 @@ allowed_mach_o_paths=(
   "$clipboard_broker"
   "$plugin_runner"
 )
-if [[ "$channel" == "direct-beta" ]]; then
+if [[ "$channel" == "direct-beta" || "$channel" == "direct-stable" ]]; then
   allowed_mach_o_paths+=(
     "$contents/MacOS/BlocksActionBroker"
     "$contents/Resources/CLI/blocks"
+    "$embedded_helper_executable"
+    "$sparkle_framework_binary"
+    "$sparkle_installer_binary"
+    "$sparkle_downloader_binary"
+    "$sparkle_autoupdate"
+    "$sparkle_updater_binary"
   )
 fi
 
@@ -193,11 +268,16 @@ for allowed_mach_o_path in "${allowed_mach_o_paths[@]}"; do
   file -b "$allowed_mach_o_path" | grep -q 'Mach-O' \
     || fail "allowlisted executable is not Mach-O: ${allowed_mach_o_path#"$app_bundle/"}"
   component_architectures="$(lipo -archs "$allowed_mach_o_path" | xargs)"
-  [[ "$component_architectures" == "arm64" ]] \
-    || fail "expected arm64-only executable ${allowed_mach_o_path#"$app_bundle/"}, got: $component_architectures"
+  if [[ "$allowed_mach_o_path" == "$contents/Frameworks/Sparkle.framework/"* ]]; then
+    [[ " $component_architectures " == *" arm64 "* ]] \
+      || fail "Sparkle executable lacks arm64 ${allowed_mach_o_path#"$app_bundle/"}, got: $component_architectures"
+  else
+    [[ "$component_architectures" == "arm64" ]] \
+      || fail "expected arm64-only executable ${allowed_mach_o_path#"$app_bundle/"}, got: $component_architectures"
+  fi
 done
 
-# Release bundles do not embed frameworks. Keep this as an exact executable
+# Only the enumerated Sparkle framework is allowed. Keep an exact executable
 # inventory rather than allowing a directory pattern: a new Mach-O must be
 # deliberately added to this channel's release policy before it can be signed.
 while IFS= read -r -d '' executable; do
@@ -207,13 +287,13 @@ while IFS= read -r -d '' executable; do
     [[ "$executable" == "$allowed_mach_o_path" ]] && allowed=1
   done
   ((allowed)) || fail "unexpected Mach-O executable in bundle: ${executable#"$app_bundle/"}"
-done < <(find "$contents" -type f -print0)
+  done < <(find "$contents" -type f -print0)
 
 if ((require_signature)); then
   [[ "$expected_team_id" =~ ^[A-Z0-9]{10}$ ]] \
     || fail "--expected-team-id must be the explicit 10-character Apple Team ID"
   case "$channel" in
-    direct-beta) expected_authority_pattern="^Developer ID Application: .+ \\(${expected_team_id}\\)$" ;;
+    direct-beta|direct-stable) expected_authority_pattern="^Developer ID Application: .+ \\(${expected_team_id}\\)$" ;;
     app-store-beta) expected_authority_pattern="^Apple Distribution: .+ \\(${expected_team_id}\\)$" ;;
   esac
   [[ "$expected_authority" =~ $expected_authority_pattern ]] \
@@ -225,7 +305,10 @@ if ((require_signature)); then
 
   # codesign metadata for the .app covers the main executable. Every nested
   # component was already checked against the exact structural inventory above.
-  signing_components=("$app_bundle" "${allowed_mach_o_paths[@]:1}")
+  signing_components=("$app_bundle" "$clipboard_broker" "$plugin_runner")
+  if [[ "$channel" == "direct-beta" || "$channel" == "direct-stable" ]]; then
+    signing_components+=("$contents/MacOS/BlocksActionBroker" "$contents/Resources/CLI/blocks")
+  fi
 
   main_signature_details="$(codesign -dvv "$app_bundle" 2>&1)"
   main_team_identifier="$(awk -F= '/^TeamIdentifier=/{print $2; exit}' <<<"$main_signature_details")"
@@ -283,7 +366,7 @@ if ((require_signature)); then
     fi
 
     if [[ "$component" == "$app_bundle" ]]; then
-      if [[ "$channel" == "direct-beta" ]]; then
+      if [[ "$channel" == "direct-beta" || "$channel" == "direct-stable" ]]; then
         allowed_keys=(
           com.apple.security.app-sandbox
           com.apple.security.files.user-selected.read-write
@@ -313,14 +396,14 @@ if ((require_signature)); then
         com.apple.application-identifier
         com.apple.developer.team-identifier
       )
-    elif [[ "$channel" == "direct-beta" \
+    elif [[ ( "$channel" == "direct-beta" || "$channel" == "direct-stable" ) \
         && "$component" == "$contents/MacOS/BlocksActionBroker" ]]; then
       allowed_keys=(
         com.apple.security.app-sandbox
         com.apple.application-identifier
         com.apple.developer.team-identifier
       )
-    elif [[ "$channel" == "direct-beta" \
+    elif [[ ( "$channel" == "direct-beta" || "$channel" == "direct-stable" ) \
         && "$component" == "$contents/Resources/CLI/blocks" ]]; then
       # The bundled Direct CLI receives no capability entitlements.
       allowed_keys=(
@@ -357,10 +440,13 @@ if ((require_signature)); then
           [[ "$(plutil -extract "$key" raw "$entitlement_file")" == "true" ]] \
             || fail "Direct app entitlement is not true: $key"
         done
-        [[ "$(plutil -extract 'com.apple.security.temporary-exception.mach-lookup.global-name.0' raw "$entitlement_file")" == "app.blocks.action-broker.xpc" ]] \
-          || fail "Direct app ActionBroker Mach exception differs from the allowed service"
-        if plutil -extract 'com.apple.security.temporary-exception.mach-lookup.global-name.1' raw "$entitlement_file" >/dev/null 2>&1; then
-          fail "Direct app ActionBroker Mach exception must contain exactly one service"
+        expected_mach_services=(app.blocks.action-broker.xpc app.blocks.app-spks app.blocks.app-spki)
+        for mach_index in 0 1 2; do
+          [[ "$(plutil -extract "com.apple.security.temporary-exception.mach-lookup.global-name.$mach_index" raw "$entitlement_file")" == "${expected_mach_services[$mach_index]}" ]] \
+            || fail "Direct app Sparkle/ActionBroker Mach exception differs at index $mach_index"
+        done
+        if plutil -extract 'com.apple.security.temporary-exception.mach-lookup.global-name.3' raw "$entitlement_file" >/dev/null 2>&1; then
+          fail "Direct app Mach exceptions must contain exactly ActionBroker and Sparkle spks/spki"
         fi
         [[ "$(plutil -extract 'com.apple.security.temporary-exception.files.absolute-path.read-only.0' raw "$entitlement_file")" == "/Applications/Blocks Selection Helper.app/" ]] \
           || fail "Direct app Helper read exception differs from the stable bundle"
@@ -418,6 +504,37 @@ if ((require_signature)); then
       || fail "signature does not enable Hardened Runtime: ${component#"$app_bundle/"}"
     validate_component_entitlements "$component" "$component_identifier"
   done
+
+  validate_sparkle_entitlements() {
+    local component="$1" entitlement_file entitlement_key
+    entitlement_file="$(mktemp "${TMPDIR:-/tmp}/blocks-sparkle-entitlements.XXXXXX.plist")"
+    codesign -d --entitlements :- "$component" > "$entitlement_file" 2>/dev/null \
+      || fail "cannot read Sparkle signed entitlements: ${component#"$app_bundle/"}"
+    if [[ -s "$entitlement_file" ]]; then
+      plutil -lint "$entitlement_file" >/dev/null \
+        || fail "Sparkle signed entitlements are invalid: ${component#"$app_bundle/"}"
+      # Sparkle's Downloader metadata is preserved when signing, but release
+      # artifacts must never retain development debugging or accessibility
+      # capabilities.
+      for entitlement_key in com.apple.security.get-task-allow com.apple.security.accessibility com.apple.security.automation.apple-events; do
+        if plutil -extract "$entitlement_key" raw "$entitlement_file" >/dev/null 2>&1; then
+          fail "forbidden Sparkle entitlement for ${component#"$app_bundle/"}: $entitlement_key"
+        fi
+      done
+    fi
+    /bin/rm -f -- "$entitlement_file"
+  }
+
+  if [[ "$channel" == "direct-beta" || "$channel" == "direct-stable" ]]; then
+    for sparkle_component in "$sparkle_installer" "$sparkle_downloader" "$sparkle_autoupdate" "$sparkle_updater" "$sparkle_framework"; do
+      verify_component_signing_identity "$sparkle_component"
+      grep -q 'flags=.*runtime' <<<"$component_signature_details" \
+        || fail "Sparkle signature does not enable Hardened Runtime: ${sparkle_component#"$app_bundle/"}"
+      grep -q '^Timestamp=' <<<"$component_signature_details" \
+        || fail "Sparkle signature lacks a secure timestamp: ${sparkle_component#"$app_bundle/"}"
+      validate_sparkle_entitlements "$sparkle_component"
+    done
+  fi
 
   if [[ "$channel" == "app-store-beta" ]]; then
     signed_entitlements="$(mktemp "${TMPDIR:-/tmp}/blocks-store-entitlements.XXXXXX.plist")"
@@ -487,6 +604,23 @@ if ((require_signature)); then
         || fail "Store embedded provisioning profile lacks required entitlement: $entitlement"
     done
   fi
+
+  if [[ "$channel" == "direct-beta" || "$channel" == "direct-stable" ]]; then
+    helper_audit_args=("$embedded_helper" --require-signature --expected-team-id "$expected_team_id" --expected-authority "$expected_authority" --expected-cert-sha1 "$expected_cert_sha1")
+    if [[ -n "$expected_version" ]]; then
+      helper_audit_args+=(--expected-version "$expected_version" --expected-build "$expected_build" --expected-release-name "$expected_release_name")
+    fi
+    "$repo_root/script/release/audit_selection_helper_bundle.sh" "${helper_audit_args[@]}"
+  fi
+fi
+
+if [[ ( "$channel" == "direct-beta" || "$channel" == "direct-stable" ) && -n "$expected_version" ]]; then
+  for key_and_value in "CFBundleShortVersionString:$expected_version" "CFBundleVersion:$expected_build" "BLOCKS_RELEASE_NAME:$expected_release_name"; do
+    key="${key_and_value%%:*}"
+    value="${key_and_value#*:}"
+    actual="$(plutil -extract "$key" raw -expect string -n "$info_plist" 2>/dev/null && printf '.')" && actual="${actual%.}" || fail "main app $key is missing or not a string"
+    [[ "$actual" == "$value" ]] || fail "main app $key differs from requested release identity"
+  done
 fi
 
 if ((require_signature)); then

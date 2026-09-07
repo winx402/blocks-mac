@@ -2,6 +2,13 @@ import BlocksCore
 import Foundation
 import OSLog
 
+/// Translation settings and every panel run share one update boundary. A
+/// lease is obtained before an adapter task is queued, so an idle-looking
+/// debounced panel cannot slip in after an update has paused admission.
+enum TranslationApplicationOperationAdmission {
+    static let gate = ApplicationOperationAdmissionGate(name: "translation")
+}
+
 struct TranslationServiceRequest: Sendable {
     let invocation: TranslationSourceInvocation
     let attachments: [TranslationSourceAttachmentPayload]
@@ -385,6 +392,8 @@ final class TranslationRunCoordinator {
         subsystem: "app.blocks.app",
         category: "TranslationRun"
     )
+    private let applicationOperationAdmissionGate:
+        ApplicationOperationAdmissionGate
 
     private var revision: UInt64 = 0
     private var serviceTasks: [String: Task<Void, Never>] = [:]
@@ -397,6 +406,14 @@ final class TranslationRunCoordinator {
     private var sessionSourceContext: TranslationSourceContext?
     private var adaptersByID: [String: any TranslationServiceAdapter] = [:]
     private var updateHandler: UpdateHandler?
+
+    init(
+        applicationOperationAdmissionGate:
+            ApplicationOperationAdmissionGate =
+                TranslationApplicationOperationAdmission.gate
+    ) {
+        self.applicationOperationAdmissionGate = applicationOperationAdmissionGate
+    }
 
     deinit {
         serviceTasks.values.forEach { $0.cancel() }
@@ -1020,7 +1037,7 @@ final class TranslationRunCoordinator {
         guard allowedServiceIDs.contains(serviceID) else {
             return
         }
-        serviceTasks[serviceID] = Task { [weak self] in
+        guard let task = applicationOperationAdmissionGate.task({ [weak self] in
             await self?.run(
                 adapter: adapter,
                 request: TranslationServiceRequest(
@@ -1033,7 +1050,24 @@ final class TranslationRunCoordinator {
                 revision: requestRevision,
                 attemptGeneration: attemptGeneration
             )
+        }) else {
+            replaceResult(
+                serviceID: serviceID,
+                state: .failed,
+                translatedText: "",
+                errorCode: "application_update_paused",
+                errorMessage: L10n.string("translation.error.generic"),
+                isRetryable: true,
+                warnings: [],
+                startedAt: nil,
+                completedAt: Date(),
+                diagnostics: nil,
+                revision: requestRevision,
+                attemptGeneration: attemptGeneration
+            )
+            return
         }
+        serviceTasks[serviceID] = task
     }
 
     private static func requiresScreenshotAttachment(

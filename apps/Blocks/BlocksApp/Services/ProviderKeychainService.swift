@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import BlocksCore
 import Security
 
 enum ProviderKeychainGateAction: String {
@@ -180,7 +181,7 @@ private struct SystemProviderKeychainSecurityAPI: ProviderKeychainSecurityAPI {
 }
 
 struct ProviderKeychainService {
-    static let defaultService = "app.blocks.provider.dev"
+    static let defaultService = BlocksRuntimeIdentity.providerKeychainService
     static let fixtureSecretV1 = "blocks-p5g-low-sensitive-test-secret-v1"
     static let fixtureSecretV2 = "blocks-p5g-low-sensitive-test-secret-v2"
 
@@ -795,12 +796,12 @@ struct ProviderKeychainService {
     }
 
     private func baseQuery(account: String) -> [String: Any] {
-        [
+        BlocksKeychainNamespace.queryForCurrentBuild([
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        ]
+        ])
     }
 
     private func result(

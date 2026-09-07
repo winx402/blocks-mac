@@ -2,6 +2,55 @@ import BlocksCore
 import Darwin
 import Dispatch
 import Foundation
+import Security
+
+private final class LocalBrokerProbe: @unchecked Sendable {
+    let ready = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var trusted = false
+    func complete(_ result: Bool) {
+        lock.lock(); trusted = result; lock.unlock()
+        ready.signal()
+    }
+    func wait() -> Bool {
+        guard ready.wait(timeout: .now() + 2) == .success else { return false }
+        lock.lock(); defer { lock.unlock() }
+        return trusted
+    }
+}
+
+private func verifyBroker(_ proxy: BlocksActionBrokerClientXPCProtocol, connection: NSXPCConnection) -> Bool {
+    let probe = LocalBrokerProbe()
+    proxy.probe?(withReply: {
+        #if BLOCKS_LOCAL_DEVELOPMENT
+        probe.complete(BlocksLocalBuildTrust.accepts(
+            processIdentifier: connection.processIdentifier,
+            userIdentifier: connection.effectiveUserIdentifier, role: "broker"
+        ))
+        #else
+        // The pre-resume signing requirement authenticates each XPC message.
+        probe.complete(connection.processIdentifier > 0 && connection.effectiveUserIdentifier == getuid())
+        #endif
+    })
+    return probe.wait()
+}
+
+private func brokerConnectionRequirement() -> String? {
+    #if BLOCKS_LOCAL_DEVELOPMENT
+    return BlocksLocalBuildTrust.connectionRequirement(role: "broker")
+    #else
+    var own: SecCode?
+    var staticCode: SecStaticCode?
+    var information: CFDictionary?
+    guard SecCodeCopySelf([], &own) == errSecSuccess, let own,
+          SecCodeCopyStaticCode(own, [], &staticCode) == errSecSuccess, let staticCode,
+          SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess,
+          let values = information as? [CFString: Any],
+          let team = values[kSecCodeInfoTeamIdentifier] as? String,
+          team.range(of: "^[A-Z0-9]{10}$", options: .regularExpression) != nil else { return nil }
+    return "anchor apple generic and identifier \"app.blocks.action-broker\" and certificate leaf[subject.OU] = \"\(team)\""
+    #endif
+}
 
 func emit<T: Encodable>(_ value: T, exitCode: Int32 = 0) -> Never {
     let encoder = JSONEncoder()
@@ -732,6 +781,10 @@ func submitToBroker<Payload: Codable, Result: Codable>(
 ) throws -> ActionBrokerTerminalResponse<Result> {
     let requestData = try JSONEncoder().encode(request)
     let connection = NSXPCConnection(machServiceName: BlocksActionBrokerXPC.machServiceName)
+    guard let requirement = brokerConnectionRequirement() else {
+        throw ScreenshotCLITransportError.proxyUnavailable
+    }
+    connection.setCodeSigningRequirement(requirement)
     connection.remoteObjectInterface = NSXPCInterface(with: BlocksActionBrokerClientXPCProtocol.self)
 
     let result = BrokerReplyBox<Result>()
@@ -757,6 +810,10 @@ func submitToBroker<Payload: Codable, Result: Codable>(
         )))
     } as? BlocksActionBrokerClientXPCProtocol
     guard let proxy else {
+        connection.invalidate()
+        throw ScreenshotCLITransportError.proxyUnavailable
+    }
+    guard verifyBroker(proxy, connection: connection) else {
         connection.invalidate()
         throw ScreenshotCLITransportError.proxyUnavailable
     }

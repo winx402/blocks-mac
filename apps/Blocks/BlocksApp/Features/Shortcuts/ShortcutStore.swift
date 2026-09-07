@@ -32,6 +32,13 @@ struct ShortcutRegistrationSummary {
 
 @MainActor
 final class ShortcutStore: ObservableObject {
+    private var applicationUpdatePaused = false
+
+    func prepareForApplicationUpdate() async throws {
+        applicationUpdatePaused = true
+    }
+
+    func resumeAfterCancelledApplicationUpdate() async { applicationUpdatePaused = false }
     @Published private(set) var shortcutRegistrationResults: [ShortcutRegistrationResult] = []
     @Published private(set) var lastDeliveryEvent: ShortcutDeliveryEvent?
     @Published private(set) var registrationGeneration: UInt64 = 0
@@ -196,6 +203,11 @@ final class ShortcutStore: ObservableObject {
                 actions.clipboardQuickPaste(index)
             }
         }
-        return actionsByCommand
+        return actionsByCommand.mapValues { action in
+            { [weak self] in
+                guard let self, !self.applicationUpdatePaused else { return }
+                action()
+            }
+        }
     }
 }

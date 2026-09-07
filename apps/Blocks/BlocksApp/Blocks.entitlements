@@ -20,6 +20,8 @@
 	<key>com.apple.security.temporary-exception.mach-lookup.global-name</key>
 	<array>
 		<string>app.blocks.action-broker.xpc</string>
+		<string>app.blocks.app-spks</string>
+		<string>app.blocks.app-spki</string>
 	</array>
 </dict>
 </plist>

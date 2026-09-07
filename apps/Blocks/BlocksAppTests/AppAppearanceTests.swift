@@ -253,82 +253,137 @@ final class AppAppearanceTests: XCTestCase {
     func testTerminationCoordinatorRepliesAfterDispatcherCompletes() async {
         var dispatchCount = 0
         var replyCount = 0
+        let replied = expectation(description: "completed dispatcher replies")
         let coordinator = AppTerminationCoordinator(
             dispatcher: {
                 dispatchCount += 1
             },
-            timeoutSleeper: { _ in
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-            },
-            replyHandler: { _ in
+            timeoutSleeper: { _ in },
+            replyHandler: { accepted in
+                XCTAssertTrue(accepted)
                 replyCount += 1
+                replied.fulfill()
             }
         )
 
         XCTAssertEqual(coordinator.requestTermination(), .terminateLater)
-        await Task.yield()
+        await fulfillment(of: [replied], timeout: 1)
 
         XCTAssertEqual(dispatchCount, 1)
         XCTAssertEqual(replyCount, 1)
         XCTAssertEqual(coordinator.requestTermination(), .terminateNow)
     }
 
-    func testTerminationCoordinatorRepliesAfterTimeoutOnlyOnce() async {
+    func testTerminationCoordinatorNeverUsesElapsedTimeoutToKillBusyWork() async {
         var dispatchCount = 0
         var replyCount = 0
+        var finalizerCount = 0
+        var finishWork: CheckedContinuation<Void, Never>?
+        let started = expectation(description: "dispatcher owns unfinished work")
+        let replied = expectation(description: "drained dispatcher replies once")
         let coordinator = AppTerminationCoordinator(
             dispatcher: {
                 dispatchCount += 1
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                await withCheckedContinuation { continuation in
+                    finishWork = continuation
+                    started.fulfill()
+                }
             },
+            finalizer: { finalizerCount += 1 },
             timeoutSleeper: { _ in },
-            replyHandler: { _ in
+            replyHandler: { accepted in
+                XCTAssertTrue(accepted)
                 replyCount += 1
+                replied.fulfill()
             }
         )
 
         XCTAssertEqual(coordinator.requestTermination(), .terminateLater)
-        await Task.yield()
-        await Task.yield()
+        await fulfillment(of: [started], timeout: 1)
 
         XCTAssertEqual(dispatchCount, 1)
+        XCTAssertEqual(replyCount, 0)
+        XCTAssertEqual(finalizerCount, 0)
+        XCTAssertEqual(coordinator.requestTermination(), .terminateLater)
+        finishWork?.resume()
+        await fulfillment(of: [replied], timeout: 1)
         XCTAssertEqual(replyCount, 1)
+        XCTAssertEqual(finalizerCount, 1)
         XCTAssertEqual(coordinator.requestTermination(), .terminateNow)
+        coordinator.finalizeTerminationResourcesIfNeeded()
+        XCTAssertEqual(finalizerCount, 1)
     }
 
     func testTerminationCoordinatorCoalescesRepeatedRequests() async {
         var dispatchCount = 0
         var replyCount = 0
+        var finishWork: CheckedContinuation<Void, Never>?
+        let started = expectation(description: "one dispatcher started")
+        let replied = expectation(description: "coalesced requests finish")
         let coordinator = AppTerminationCoordinator(
             dispatcher: {
                 dispatchCount += 1
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                await withCheckedContinuation { continuation in
+                    finishWork = continuation
+                    started.fulfill()
+                }
             },
-            timeoutSleeper: { _ in
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
-            },
+            timeoutSleeper: { _ in },
             replyHandler: { _ in
                 replyCount += 1
+                replied.fulfill()
             }
         )
 
         XCTAssertEqual(coordinator.requestTermination(), .terminateLater)
         XCTAssertEqual(coordinator.requestTermination(), .terminateLater)
-        await Task.yield()
+        await fulfillment(of: [started], timeout: 1)
 
         XCTAssertEqual(dispatchCount, 1)
         XCTAssertEqual(replyCount, 0)
+        finishWork?.resume()
+        await fulfillment(of: [replied], timeout: 1)
+        XCTAssertEqual(replyCount, 1)
     }
 
-    func testTerminationCoordinatorWithoutRuntimeTerminatesImmediately() {
+    func testTerminationCoordinatorWithoutRuntimeCancelsUntilConfigured() async {
         var replyCount = 0
+        let replied = expectation(description: "configured coordinator can retry")
         let coordinator = AppTerminationCoordinator(replyHandler: { _ in
             replyCount += 1
+            replied.fulfill()
         })
 
-        XCTAssertEqual(coordinator.requestTermination(), .terminateNow)
+        XCTAssertEqual(coordinator.requestTermination(), .terminateCancel)
         XCTAssertEqual(replyCount, 0)
+        XCTAssertEqual(coordinator.requestTermination(), .terminateCancel)
+        coordinator.installDispatcher { }
+        XCTAssertEqual(coordinator.requestTermination(), .terminateLater)
+        await fulfillment(of: [replied], timeout: 1)
         XCTAssertEqual(coordinator.requestTermination(), .terminateNow)
+    }
+
+    func testTerminationCoordinatorRejectedPreparationCanRetryWithoutFinalizing() async {
+        var reject = true
+        var replies: [Bool] = []
+        var finalized = 0
+        let rejected = expectation(description: "busy preparation cancels quit")
+        let accepted = expectation(description: "retry completes after work finishes")
+        let coordinator = AppTerminationCoordinator(dispatcher: {
+            if reject { throw ApplicationOperationAdmissionGate.AdmissionError.busy("fixture") }
+        }, finalizer: { finalized += 1 }, replyHandler: { reply in
+            replies.append(reply)
+            if reply { accepted.fulfill() } else { rejected.fulfill() }
+        })
+        XCTAssertEqual(coordinator.requestTermination(), .terminateLater)
+        await fulfillment(of: [rejected], timeout: 1)
+        XCTAssertEqual(replies, [false])
+        XCTAssertEqual(finalized, 0)
+        reject = false
+        XCTAssertEqual(coordinator.requestTermination(), .terminateLater)
+        await fulfillment(of: [accepted], timeout: 1)
+        XCTAssertEqual(replies, [false, true])
+        XCTAssertEqual(finalized, 1)
     }
 
     func testApplicationChromeTypographyUsesNativeSystemFontsForEveryWeight() {

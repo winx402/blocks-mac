@@ -620,7 +620,8 @@ public enum ClipboardRecorderFixture {
 }
 
 public enum ClipboardRecorderStore {
-    public static let applicationGroupIdentifier = "group.app.blocks.app"
+    public static let applicationGroupIdentifier =
+        BlocksRuntimeIdentity.clipboardRecorderApplicationGroupIdentifier
     public static let schemaVersion = "0.2.0"
 
     public static func fixtureDocument(
@@ -806,7 +807,12 @@ public enum ClipboardRecorderStore {
             appropriateFor: nil,
             create: true
         )
-        return base.appendingPathComponent("Blocks/ClipboardRecorder", isDirectory: true)
+        return base
+            .appendingPathComponent(
+                BlocksRuntimeIdentity.applicationSupportDirectoryName,
+                isDirectory: true
+            )
+            .appendingPathComponent("ClipboardRecorder", isDirectory: true)
     }
 
     public static func debugDirectory() throws -> URL {

@@ -1,5 +1,6 @@
 import BlocksCore
 import Foundation
+import Security
 
 private struct ActionBrokerRequestHeader: Decodable, Sendable {
     let requestID: ActionRequestID
@@ -44,6 +45,46 @@ protocol ActionBrokerHosting: AnyObject {
         onInvalidated: @escaping () -> Void
     )
     func stop()
+    func pauseAndDrainForApplicationUpdate() async throws
+    func resumeAfterCancelledApplicationUpdate()
+    func prepareBrokerForApplicationUpdate(token: String) async throws -> Int32
+    func resumeBrokerAfterCancelledApplicationUpdate(token: String) async throws
+}
+
+extension ActionBrokerHosting {
+    func pauseAndDrainForApplicationUpdate() async throws {
+        throw ApplicationOperationAdmissionGate.AdmissionError.paused("Action Broker lifecycle adapter is unavailable")
+    }
+    func resumeAfterCancelledApplicationUpdate() {}
+    func prepareBrokerForApplicationUpdate(token: String) async throws -> Int32 { throw ActionBrokerUpdateError.unsupportedPeer }
+    func resumeBrokerAfterCancelledApplicationUpdate(token: String) async throws { throw ActionBrokerUpdateError.unsupportedPeer }
+}
+
+private func actionBrokerConnectionRequirement() -> String? {
+    #if BLOCKS_LOCAL_DEVELOPMENT
+    return BlocksLocalBuildTrust.connectionRequirement(role: "broker")
+    #else
+    var code: SecCode?
+    var staticCode: SecStaticCode?
+    var information: CFDictionary?
+    guard SecCodeCopySelf([], &code) == errSecSuccess, let code,
+          SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode,
+          SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess,
+          let values = information as? [CFString: Any],
+          let team = values[kSecCodeInfoTeamIdentifier] as? String,
+          team.range(of: "^[A-Z0-9]{10}$", options: .regularExpression) != nil else { return nil }
+    return "anchor apple generic and identifier \"app.blocks.action-broker\" and certificate leaf[subject.OU] = \"\(team)\""
+    #endif
+}
+
+private final class ActionBrokerLifecycleReply<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value, Error>?
+    init(_ continuation: CheckedContinuation<Value, Error>) { self.continuation = continuation }
+    func finish(_ result: Result<Value, Error>) {
+        let continuation = lock.withLock { defer { self.continuation = nil }; return self.continuation }
+        continuation?.resume(with: result)
+    }
 }
 
 /// Keeps XPC callbacks tied to the connection that created them.  This is
@@ -53,11 +94,14 @@ final class ActionBrokerHostConnectionLifecycle {
     private(set) var generation = 0
     private(set) var isListenerResumed = false
     private var completedGeneration: Int?
+    private var registeredGeneration: Int?
+    private var serviceResumeRequested = false
 
     func beginConnection() -> (generation: Int, shouldResumeListener: Bool) {
         let shouldResumeListener = !isListenerResumed
         generation &+= 1
         completedGeneration = nil
+        registeredGeneration = nil
         isListenerResumed = true
         return (generation, shouldResumeListener)
     }
@@ -67,6 +111,7 @@ final class ActionBrokerHostConnectionLifecycle {
         generation &+= 1
         completedGeneration = nil
         isListenerResumed = false
+        registeredGeneration = nil
         return shouldSuspendListener
     }
 
@@ -80,6 +125,22 @@ final class ActionBrokerHostConnectionLifecycle {
         }
         completedGeneration = candidate
         return true
+    }
+
+    /// Keep local request admission closed while a replacement endpoint is
+    /// being registered; otherwise a request through the old endpoint could
+    /// be interrupted when the Broker invalidates that connection.
+    func requestServiceResume() -> Bool {
+        if isListenerResumed, registeredGeneration == generation { return true }
+        serviceResumeRequested = true
+        return false
+    }
+
+    func didRegisterTrustedHost(for candidate: Int) -> Bool {
+        guard isCurrent(candidate), completedGeneration == candidate else { return false }
+        registeredGeneration = candidate
+        defer { serviceResumeRequested = false }
+        return serviceResumeRequested
     }
 }
 
@@ -105,6 +166,87 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
     private var brokerConnection: NSXPCConnection?
     private var activeRequestID: ActionRequestID?
     private let connectionLifecycle: ActionBrokerHostConnectionLifecycle
+
+    @MainActor func pauseAndDrainForApplicationUpdate() async throws {
+        try exportedService.pauseForApplicationUpdate()
+    }
+
+    @MainActor func resumeAfterCancelledApplicationUpdate() {
+        if connectionLifecycle.requestServiceResume() {
+            exportedService.resumeAfterCancelledApplicationUpdate()
+        }
+    }
+
+    @MainActor func prepareBrokerForApplicationUpdate(token: String) async throws -> Int32 {
+        let connection = try await authenticatedLifecycleConnection()
+        defer { connection.invalidate() }
+        try await lifecycleCommand(connection: connection, token: token, preparing: true)
+        let processID = connection.processIdentifier
+        guard processID > 0 else { throw ActionBrokerUpdateError.untrustedPeer }
+        return processID
+    }
+
+    @MainActor func resumeBrokerAfterCancelledApplicationUpdate(token: String) async throws {
+        let connection = try await authenticatedLifecycleConnection()
+        defer { connection.invalidate() }
+        try await lifecycleCommand(connection: connection, token: token, preparing: false)
+    }
+
+    @MainActor private func authenticatedLifecycleConnection() async throws -> NSXPCConnection {
+        guard let requirement = actionBrokerConnectionRequirement() else { throw ActionBrokerUpdateError.untrustedPeer }
+        let connection = NSXPCConnection(machServiceName: BlocksActionBrokerXPC.machServiceName)
+        connection.setCodeSigningRequirement(requirement)
+        connection.remoteObjectInterface = NSXPCInterface(with: BlocksActionBrokerHostXPCProtocol.self)
+        connection.resume()
+        do {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                let reply = ActionBrokerLifecycleReply(continuation)
+                let proxy = connection.remoteObjectProxyWithErrorHandler { _ in
+                    reply.finish(.failure(ActionBrokerUpdateError.unsupportedPeer))
+                } as? BlocksActionBrokerHostXPCProtocol
+                guard let proxy else { reply.finish(.failure(ActionBrokerUpdateError.unsupportedPeer)); return }
+                let invoked: Void? = proxy.probeUpdateLifecycle?(withReply: {
+                    guard connection.effectiveUserIdentifier == getuid(), connection.processIdentifier > 0 else {
+                        reply.finish(.failure(ActionBrokerUpdateError.untrustedPeer)); return
+                    }
+                    #if BLOCKS_LOCAL_DEVELOPMENT
+                    guard BlocksLocalBuildTrust.accepts(processIdentifier: connection.processIdentifier,
+                        userIdentifier: connection.effectiveUserIdentifier, role: "broker") else {
+                        reply.finish(.failure(ActionBrokerUpdateError.untrustedPeer)); return
+                    }
+                    #endif
+                    reply.finish(.success(()))
+                })
+                if invoked == nil { reply.finish(.failure(ActionBrokerUpdateError.unsupportedPeer)) }
+                Task {
+                    try? await Task.sleep(for: .seconds(2))
+                    reply.finish(.failure(ActionBrokerUpdateError.unsupportedPeer))
+                }
+            }
+            return connection
+        } catch { connection.invalidate(); throw error }
+    }
+
+    @MainActor private func lifecycleCommand(connection: NSXPCConnection, token: String, preparing: Bool) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let reply = ActionBrokerLifecycleReply(continuation)
+            let proxy = connection.remoteObjectProxyWithErrorHandler { _ in
+                reply.finish(.failure(ActionBrokerUpdateError.unsupportedPeer))
+            } as? BlocksActionBrokerHostXPCProtocol
+            guard let proxy else { reply.finish(.failure(ActionBrokerUpdateError.unsupportedPeer)); return }
+            let completion: (Bool, String?) -> Void = { accepted, _ in
+                reply.finish(accepted ? .success(()) : .failure(ActionBrokerUpdateError.busy))
+            }
+            let invoked: Void? = preparing
+                ? proxy.prepareForApplicationUpdate?(token, withReply: completion)
+                : proxy.resumeAfterCancelledApplicationUpdate?(token, withReply: completion)
+            if invoked == nil { reply.finish(.failure(ActionBrokerUpdateError.unsupportedPeer)) }
+            Task {
+                try? await Task.sleep(for: .seconds(2))
+                reply.finish(.failure(ActionBrokerUpdateError.unsupportedPeer))
+            }
+        }
+    }
 
     @MainActor init(
         screenshotStore: ScreenshotStore,
@@ -134,6 +276,11 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
         }
         previousConnection?.invalidate()
         let connection = NSXPCConnection(machServiceName: BlocksActionBrokerXPC.machServiceName)
+        guard let requirement = actionBrokerConnectionRequirement() else {
+            completion(.failure(ActionBrokerUpdateError.untrustedPeer))
+            return
+        }
+        connection.setCodeSigningRequirement(requirement)
         connection.remoteObjectInterface = NSXPCInterface(with: BlocksActionBrokerHostXPCProtocol.self)
         connection.invalidationHandler = { [weak self] in
             Task { @MainActor [weak self] in
@@ -170,12 +317,25 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
             return
         }
         proxy.registerHost(listener.endpoint) { accepted, message in
+            #if BLOCKS_LOCAL_DEVELOPMENT
+            let trustedBroker = BlocksLocalBuildTrust.accepts(
+                processIdentifier: connection.processIdentifier,
+                userIdentifier: connection.effectiveUserIdentifier,
+                role: "broker"
+            )
+            #else
+            let trustedBroker = connection.processIdentifier > 0 && connection.effectiveUserIdentifier == getuid()
+            #endif
             Task { @MainActor [weak self] in
                 guard let self,
                       self.connectionLifecycle.claimCompletion(for: generation) else {
                     return
                 }
-                accepted
+                if accepted && trustedBroker,
+                   self.connectionLifecycle.didRegisterTrustedHost(for: generation) {
+                    self.exportedService.resumeAfterCancelledApplicationUpdate()
+                }
+                (accepted && trustedBroker)
                     ? completion(.success(()))
                     : completion(.failure(ScreenshotActionHostError.registrationRejected(message)))
             }
@@ -196,6 +356,15 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
         shouldAcceptNewConnection newConnection: NSXPCConnection
     ) -> Bool {
         guard newConnection.effectiveUserIdentifier == getuid() else { return false }
+        guard let requirement = actionBrokerConnectionRequirement() else { return false }
+        newConnection.setCodeSigningRequirement(requirement)
+        #if BLOCKS_LOCAL_DEVELOPMENT
+        guard BlocksLocalBuildTrust.accepts(
+            processIdentifier: newConnection.processIdentifier,
+            userIdentifier: newConnection.effectiveUserIdentifier,
+            role: "broker"
+        ) else { return false }
+        #endif
         newConnection.exportedInterface = NSXPCInterface(with: BlocksActionHostXPCProtocol.self)
         newConnection.exportedObject = exportedService
         newConnection.resume()
@@ -570,6 +739,10 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
 }
 
 final class ScreenshotActionHostService: NSObject, BlocksActionHostXPCProtocol {
+    private let applicationUpdateGate = ApplicationOperationAdmissionGate(name: "Action Broker requests")
+
+    func pauseForApplicationUpdate() throws { try applicationUpdateGate.pauseIfIdle() }
+    func resumeAfterCancelledApplicationUpdate() { applicationUpdateGate.resume() }
     typealias Handler = @MainActor (Data, FileHandle?) async -> Data
     typealias CancelHandler = @MainActor (String) async -> Bool
     private let handler: Handler
@@ -595,6 +768,18 @@ final class ScreenshotActionHostService: NSObject, BlocksActionHostXPCProtocol {
             from: requestData
         )
         let requestID = requestHeader?.requestID.rawValue ?? UUID().uuidString
+        guard let lease = applicationUpdateGate.begin() else {
+            if let requestHeader {
+                reply((try? JSONEncoder().encode(
+                    ActionBrokerTerminalResponse<JSONValue>.failed(
+                        requestID: requestHeader.requestID, actionID: requestHeader.actionID,
+                        error: ActionBrokerError(category: .invalidRequest, code: "application_update_preparing",
+                            message: "Blocks is preparing to update. Retry after it restarts.", retryable: true)
+                    )
+                )) ?? Data())
+            } else { reply(Data()) }
+            return
+        }
         let execution = Execution(requestID: requestID)
         lock.lock()
         let isDuplicate = requestHeader != nil && executions[requestID] != nil
@@ -610,6 +795,7 @@ final class ScreenshotActionHostService: NSObject, BlocksActionHostXPCProtocol {
             return
         }
         let task = Task { @MainActor [weak self, execution] in
+            defer { lease.release() }
             defer { self?.remove(execution) }
             guard let self else { return }
             reply(await self.handler(requestData, outputFile))
@@ -643,8 +829,10 @@ final class ScreenshotActionHostService: NSObject, BlocksActionHostXPCProtocol {
         _ requestID: String,
         withReply reply: @escaping (Bool) -> Void
     ) {
+        guard let lease = applicationUpdateGate.begin() else { reply(false); return }
         let execution = markCancelled(requestID: requestID)
         Task { @MainActor [weak self] in
+            defer { lease.release() }
             guard let self else {
                 reply(execution != nil)
                 return

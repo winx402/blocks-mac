@@ -7,7 +7,8 @@ usage: notarize_dmg.sh /path/to/signed.dmg \
   --evidence-dir /path/to/new-or-empty-evidence-directory \
   --expected-team-id TEAMID \
   --expected-authority 'Developer ID Application: ... (TEAMID)' \
-  --expected-cert-sha1 SHA1
+  --expected-cert-sha1 SHA1 \
+  [--expected-version X.Y.Z --expected-build N --expected-release-name NAME]
 EOF
 }
 
@@ -17,12 +18,18 @@ evidence_dir=""
 expected_team_id=""
 expected_authority=""
 expected_cert_sha1=""
+expected_version=""
+expected_build=""
+expected_release_name=""
 while (($#)); do
   case "$1" in
     --evidence-dir) evidence_dir="${2:-}"; shift 2 ;;
     --expected-team-id) expected_team_id="${2:-}"; shift 2 ;;
     --expected-authority) expected_authority="${2:-}"; shift 2 ;;
     --expected-cert-sha1) expected_cert_sha1="${2:-}"; shift 2 ;;
+    --expected-version) expected_version="${2:-}"; shift 2 ;;
+    --expected-build) expected_build="${2:-}"; shift 2 ;;
+    --expected-release-name) expected_release_name="${2:-}"; shift 2 ;;
     -*) usage; exit 2 ;;
     *) [[ -z "$dmg_path" ]] || { usage; exit 2; }; dmg_path="$1"; shift ;;
   esac
@@ -39,9 +46,15 @@ expected_authority_pattern="^Developer ID Application: .+ \\(${expected_team_id}
 expected_cert_sha1_compact="${expected_cert_sha1//:/}"
 [[ "$expected_cert_sha1_compact" =~ ^[A-Fa-f0-9]{40}$ ]] \
   || { echo "error: --expected-cert-sha1 must be the explicit 40-hex signing certificate SHA-1" >&2; exit 2; }
+if [[ -n "$expected_version$expected_build$expected_release_name" ]] && ! [[ "$expected_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$expected_build" =~ ^[1-9][0-9]*$ && "$expected_release_name" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*$ ]]; then
+  echo "error: --expected-version, --expected-build, and --expected-release-name must be supplied together and valid" >&2
+  exit 2
+fi
 profile="${BLOCKS_NOTARY_KEYCHAIN_PROFILE:-}"
 [[ -f "$dmg_path" ]] || { echo "error: DMG not found: $dmg_path" >&2; exit 66; }
 dmg_path="$(cd "$(dirname "$dmg_path")" && pwd)/$(basename "$dmg_path")"
+[[ "$(basename "$dmg_path")" =~ ^[0-9A-Za-z][0-9A-Za-z._+-]*\.dmg$ ]] \
+  || { echo "error: DMG filename is unsafe" >&2; exit 2; }
 sha256_path="$dmg_path.sha256"
 [[ ! -e "$sha256_path" && ! -L "$sha256_path" ]] \
   || { echo "error: refusing to overwrite an existing final checksum: $sha256_path" >&2; exit 73; }
@@ -115,7 +128,7 @@ detach_readonly_dmg() {
 }
 
 audit_mounted_artifact() {
-  local mounted_apps=() root_entry root_name bundle_identifier applications_count=0
+  local mounted_apps=() root_entry root_name bundle_identifier artifact_channel applications_count=0
   audited_mounted_app=""
   while IFS= read -r -d '' root_entry; do
     root_name="${root_entry##*/}"
@@ -139,10 +152,21 @@ audit_mounted_artifact() {
   bundle_identifier="$(plutil -extract CFBundleIdentifier raw "${audited_mounted_app}/Contents/Info.plist")"
   case "$bundle_identifier" in
     app.blocks.app)
-      "$repo_root/script/release/audit_app_bundle.sh" --channel direct-beta --app "$audited_mounted_app" --require-signature --expected-team-id "$expected_team_id" --expected-authority "$expected_authority" --expected-cert-sha1 "$expected_cert_sha1"
+      artifact_channel="$(plutil -extract BLOCKS_DISTRIBUTION_CHANNEL raw "$audited_mounted_app/Contents/Info.plist")"
+      [[ "$artifact_channel" == "direct-beta" || "$artifact_channel" == "direct-stable" ]] \
+        || { echo "error: notarization requires a direct-beta or direct-stable App" >&2; return 1; }
+      audit_args=(--channel "$artifact_channel" --app "$audited_mounted_app" --require-signature --expected-team-id "$expected_team_id" --expected-authority "$expected_authority" --expected-cert-sha1 "$expected_cert_sha1")
+      if [[ -n "$expected_version" ]]; then
+        audit_args+=(--expected-version "$expected_version" --expected-build "$expected_build" --expected-release-name "$expected_release_name")
+      fi
+      "$repo_root/script/release/audit_app_bundle.sh" "${audit_args[@]}"
       ;;
     app.blocks.selection-helper)
-      "$repo_root/script/release/audit_selection_helper_bundle.sh" "$audited_mounted_app" --require-signature --expected-team-id "$expected_team_id" --expected-authority "$expected_authority" --expected-cert-sha1 "$expected_cert_sha1"
+      helper_audit_args=("$audited_mounted_app" --require-signature --expected-team-id "$expected_team_id" --expected-authority "$expected_authority" --expected-cert-sha1 "$expected_cert_sha1")
+      if [[ -n "$expected_version" ]]; then
+        helper_audit_args+=(--expected-version "$expected_version" --expected-build "$expected_build" --expected-release-name "$expected_release_name")
+      fi
+      "$repo_root/script/release/audit_selection_helper_bundle.sh" "${helper_audit_args[@]}"
       ;;
     *) echo "error: mounted App has an unsupported bundle identifier: $bundle_identifier" >&2; return 1 ;;
   esac

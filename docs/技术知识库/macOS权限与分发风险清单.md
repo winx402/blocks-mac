@@ -14,7 +14,6 @@
 - Sandbox / entitlements：[Security entitlements](https://developer.apple.com/documentation/bundleresources/security-entitlements)；[User Selected File read-write entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.files.user-selected.read-write)；[Automation Apple Events entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.automation.apple-events)
 - Login item / helpers：[SMAppService](https://developer.apple.com/documentation/servicemanagement/smappservice)
 - Distribution：[Signing your apps for Gatekeeper](https://developer.apple.com/developer-id/)；[Hardened Runtime](https://developer.apple.com/documentation/security/hardened-runtime)；[Notarizing macOS software before distribution](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)
-- Subscriptions / StoreKit：[Offer auto-renewable subscriptions](https://developer.apple.com/help/app-store-connect/manage-subscriptions/offer-auto-renewable-subscriptions/)；[Explore testing in-app purchases](https://developer.apple.com/videos/play/wwdc2023/10142/)
 
 ## 风险表
 
@@ -26,21 +25,19 @@
 | 选中文本翻译 | Accessibility、Services、快捷键复制或 AppleScript 等候选路径 | 读取当前 App 选区可能需要辅助功能或自动化权限；兼容性不稳定。 | 分别验证 Accessibility、复制桥接、Services/快捷指令路径，选择权限最少的方案。 |
 | 剪贴板历史 | NSPasteboard | 长期记录剪贴板是高敏感行为；格式保留、隐私排除、暂停记录必须可靠。 | P2-D 已验证文本、RTF、PNG、URL、file URL 的低敏 fixture 恢复写回；P2-I 已验证 recorder 数据链路；P2-K 已验证复杂低敏 fixture 和 helper recorder roundtrip；后续补第三方实物样本、长期功耗和正式 UI。 |
 | 粘贴历史回填到前台 App | NSPasteboard + 可能的事件发送/Accessibility | 写入剪贴板后触发粘贴可能需要辅助功能或事件发送权限。 | 先验证“选择条目后只写入剪贴板”；自动粘贴作为高风险增强单独验证。 |
-| 文件保存/另存为/拖拽 | App Sandbox 文件权限、安全范围书签 | App Store 与直接分发的文件访问能力和用户提示不同。 | 验证用户选择文件夹、保存截图、拖拽导出和后续访问权限。 |
+| 文件保存/另存为/拖拽 | App Sandbox 文件权限、安全范围书签 | 官方沙盒直发包必须保持可解释的文件访问与用户提示。 | 验证用户选择文件夹、保存截图、拖拽导出和后续访问权限。 |
 | 调用外部 CLI provider | 子进程、PATH、配置文件、凭据 | CLI 能力、输出格式、交互模式和许可边界不一致。 | 先只做 `--help`/无头能力探测；真实调用必须隔离工作目录、超时和输出 schema。 |
 | API / LLM / OCR provider | 网络、API key、Keychain、接口错误 | 不能把密钥写仓库；外发数据需要确认；OCR 图片比普通文本更敏感。 | P2-E 已验证 Keychain 低敏 dummy secret 生命周期；P2-K 已验证 provider 设置确认 smoke；P5-G 已在正式 App 中验证固定低敏 Keychain fixture UI gate；P5-H 已加入 LLM / Translation / OCR profile catalog；P5-I 已加入 LLM adapter boundary 和本地 mock adapter；P5-K 已加入用户 API key Keychain 保存门禁和 OpenAI connection dry-run；P5-L 已加入低敏 OpenAI-compatible test connection 和主 App network client entitlement；真实工具内容调用前仍需接口路由、错误归一化、本地化错误文案和必要的外发确认。 |
 | Hook runtime | 本地脚本/配置/agent 生成代码 | 任意脚本执行风险高；自动拦截和修改用户内容风险更高。 | V1 只定义 manifest 草案；P2-L 决定 helper 默认不运行 hook，hook 默认关闭，agent 只能生成草稿。 |
 | 登录项/后台常驻 | SMAppService | 剪贴板历史和快捷键通常需要常驻；用户需要可见控制。 | P2-J 已验证 sandbox 下最小 Login Item/helper 的注册、状态、launchd 启动心跳、注销和清理；P2-K 已验证低敏 recorder roundtrip 和非零退出观察；P2-L 决定 helper 首轮优先承载 recorder、心跳和轻量事件采集；后续验证长期 recorder、功耗和用户撤销。 |
-| 直接下载分发 | Developer ID、Hardened Runtime、Notarization | 未签名/未 notarize 会损害信任和安装体验；自有订阅/license 需要后续服务设计。 | P2-G 决策为 sandbox-first + Direct Download/App Store 双出口；Developer ID/notarization 到 Alpha 外部分发前准备。 |
-| App Store 分发 | Sandbox、Review、entitlements、StoreKit/IAP | 剪贴板、辅助功能、自动化、外部 CLI/hook 可能存在审核和能力约束。 | P2-G 不锁死 App Store；Apple 订阅只作为 App Store 路线候选，不写成直接下载默认收费方案。 |
+| 官方沙盒直发 | Developer ID、Hardened Runtime、Notarization | 未签名/未 notarize 会损害信任和安装体验；安装、更新和恢复链路必须真实验收。 | 当前规则固定为 MIT 开源、Developer ID 沙盒直发；不计划 App Store。 |
 
 ## 当前判断
 
 - 截图、剪贴板、翻译三类工具都触碰高敏感本地数据，权限解释和数据流预览必须是产品基础能力，不是设置页附属能力。
-- 正式 App 当前锁定 sandbox-first；直接下载和 App Store 保留双出口，前期本地开发不要求 Developer ID、不购买云服务器、不接真实支付。
+- 官方发行当前锁定为 Developer ID 沙盒直发；`LocalDevelopment` 非沙盒且与官方身份、数据和 Keychain 隔离。前期不购买云服务器、不接真实支付。
 - V1 不应默认启用自动粘贴、自动外发 AI、自动 hook 拦截这三类行为。
-- 直接分发更可能支持外部 CLI、hook 和高级系统集成，但会增加签名、notarization 和用户信任成本。
-- App Store 分发更利于信任，但可能压缩外部 CLI、hook、后台监听和自动化能力边界；必须单独验证，不应现在假定可行。
+- 官方直发的签名、公证、更新和用户信任成本必须真实验证；不得以 App Store 路线替代这些验收。
 
 ## P2-B 本机实测摘要
 
@@ -171,11 +168,11 @@
 - 多屏、权限撤销、第三方复杂样本和长期 helper 性能仍是环境依赖复测项。
 - P2-K 不证明 App Store 审核边界、真实 API 调用或完整 hook runtime。
 
-## P2-L 正式 App scaffold 架构摘要
+## P2-L 正式 App scaffold 架构摘要（历史，运行/分发规则已被当前规则取代）
 
 执行时间：2026-07-02
 
-| 约束 | 当前结论 | 风险影响 |
+| 约束 | 当时结论 | 风险影响 |
 | --- | --- | --- |
 | scaffold 形态 | `SwiftUI + AppKit + sandbox-first + SMAppService helper + shared action core` | P3 起步约束，不代表完整 App 已创建。 |
 | Main App | UI、权限引导、设置、确认卡片、Keychain、审计展示 | 用户可见授权集中在主 App，降低 helper/CLI 绕过确认风险。 |
@@ -281,18 +278,18 @@
 - P5-K 代表用户 API key 可显式保存到 Keychain；P5-L 代表低敏 OpenAI-compatible test connection 可在显式确认后短生命周期读取 Keychain secret。
 - P5-L 不代表真实翻译、OCR、总结、截图/剪贴板内容外发、streaming、重试或持久审计已完成。
 
-## P2-G sandbox-first 分发约束摘要
+## P2-G sandbox-first 分发约束摘要（历史，已被当前规则取代）
 
 执行时间：2026-07-01
 
 | 约束 | 当前结论 | 说明 |
 | --- | --- | --- |
 | sandbox-first | 已作为当前决策记录 | 正式 App 从一开始按 App Sandbox 约束设计，敏感能力要列 entitlement/TCC/确认/失败路径。 |
-| 分发渠道 | 不锁死 | Local Dev、Direct Download、App Store 保留分阶段路线。 |
-| 本地开发 | 不需要 Developer ID | 先用 Xcode/local signing；macOS 原生 App 不依赖 iOS 风格模拟器。 |
+| 分发渠道 | 历史上未锁死 | 当时保留 Local Dev、Direct Download、App Store 分阶段路线；现已固定为官方 Developer ID 沙盒直发。 |
+| 本地开发 | 历史上不需要 Developer ID | 当时使用 Xcode/local signing；现行 LocalDevelopment 另有非沙盒隔离规则。 |
 | 外部分发 | Alpha 前准备 Developer ID + Hardened Runtime + notarization | 现在不把证书、profile 或 notarization 配置写入仓库。 |
 | 服务器 | 前期不购买 | 只有账号、订阅、远程撤销、设备绑定、云同步等需要后端或第三方服务。 |
-| 订阅 | 不接真实支付 | Apple 自动续订订阅属于 App Store Connect/StoreKit 路线；直接下载不写成 Apple 订阅默认方案。 |
+| 订阅 | 不接真实支付 | 当时记录 Apple 自动续订订阅路线；现行规则不计划 App Store/StoreKit。 |
 
 ## 待实测清单
 

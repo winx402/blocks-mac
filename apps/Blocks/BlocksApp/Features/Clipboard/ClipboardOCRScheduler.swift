@@ -1,8 +1,10 @@
 import Foundation
+import BlocksCore
 
 @MainActor
 final class ClipboardOCRScheduler {
     private let queue: ClipboardVisionOCRQueue
+    private let applicationUpdateGate: ApplicationOperationAdmissionGate
     private let onRecordsUpdated: @MainActor (Set<String>) -> Void
     private var processingTask: Task<Void, Never>?
     private var retryTasks: [String: Task<Void, Never>] = [:]
@@ -12,9 +14,11 @@ final class ClipboardOCRScheduler {
 
     init(
         queue: ClipboardVisionOCRQueue,
+        applicationUpdateGate: ApplicationOperationAdmissionGate = ApplicationOperationAdmissionGate(name: "Clipboard OCR scheduler"),
         onRecordsUpdated: @escaping @MainActor (Set<String>) -> Void
     ) {
         self.queue = queue
+        self.applicationUpdateGate = applicationUpdateGate
         self.onRecordsUpdated = onRecordsUpdated
     }
 
@@ -31,7 +35,7 @@ final class ClipboardOCRScheduler {
         guard processingTask == nil else { return }
 
         let queue = queue
-        processingTask = Task { @MainActor [weak self] in
+        processingTask = applicationUpdateGate.task { @MainActor [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
                 let delay = self.notBefore.timeIntervalSinceNow
@@ -66,7 +70,7 @@ final class ClipboardOCRScheduler {
     func retry(recordID: String) {
         retryTasks[recordID]?.cancel()
         let queue = queue
-        retryTasks[recordID] = Task { @MainActor [weak self] in
+        retryTasks[recordID] = applicationUpdateGate.task { @MainActor [weak self] in
             let result = await queue.retryOCR(recordID: recordID)
             guard let self, !Task.isCancelled else { return }
             let recordIDs = Self.updatedRecordIDs(in: [result])
@@ -83,6 +87,11 @@ final class ClipboardOCRScheduler {
         processingTask = nil
         retryTasks.values.forEach { $0.cancel() }
         retryTasks.removeAll()
+    }
+
+    func resumeAfterCancelledApplicationUpdate() {
+        guard drainRequested, processingTask == nil else { return }
+        schedule(context: pendingContext, quietDelay: 0)
     }
 
     nonisolated func requestShutdown() {

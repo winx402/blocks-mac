@@ -9,6 +9,10 @@ retain their own service terms, and their credentials are not included.
 
 ## Locked development dependencies
 
+The native app integrates Sparkle 2.9.6 under its MIT license and bundled
+third-party notices: https://github.com/sparkle-project/Sparkle/tree/2.9.6.
+Preserve Sparkle's complete LICENSE and resource notices in release artifacts.
+
 The website lockfile identifies these non-MIT components. They are not
 relicensed; retain their original notices and source availability requirements
 when distributing outputs that include them.

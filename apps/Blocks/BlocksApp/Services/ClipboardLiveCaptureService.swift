@@ -194,6 +194,7 @@ final class ClipboardLiveCaptureService {
     private let deferredFirstTimeout: Duration
     private let deferredRetryTimeout: Duration
     private let broker: any ClipboardBrokerServing
+    private let applicationUpdateGate: ApplicationOperationAdmissionGate
     private let monitoringOwnerID = UUID()
     private var timer: Timer?
     private var serviceGeneration: UInt64 = 0
@@ -219,7 +220,8 @@ final class ClipboardLiveCaptureService {
         deferredRetryDelay: Duration = .milliseconds(1_500),
         deferredFirstTimeout: Duration = .seconds(1),
         deferredRetryTimeout: Duration = .milliseconds(250),
-        broker: any ClipboardBrokerServing = ClipboardBrokerClient.shared
+        broker: any ClipboardBrokerServing = ClipboardBrokerClient.shared,
+        applicationUpdateGate: ApplicationOperationAdmissionGate = ApplicationOperationAdmissionGate(name: "Clipboard live capture")
     ) {
         self.pollInterval = pollInterval
         self.deferredInitialDelay = deferredInitialDelay
@@ -227,6 +229,7 @@ final class ClipboardLiveCaptureService {
         self.deferredFirstTimeout = deferredFirstTimeout
         self.deferredRetryTimeout = deferredRetryTimeout
         self.broker = broker
+        self.applicationUpdateGate = applicationUpdateGate
     }
 
     func start(
@@ -241,7 +244,7 @@ final class ClipboardLiveCaptureService {
         self.prefilterProvider = prefilterProvider
         self.onCapture = onCapture
         lastObservedChangeCount = nil
-        monitoringActivationTask = Task { @MainActor [weak self] in
+        monitoringActivationTask = applicationUpdateGate.task { @MainActor [weak self] in
             guard let self, !Task.isCancelled else { return }
             await self.broker.updatePassiveMonitoring(
                 ownerID: self.monitoringOwnerID,
@@ -257,9 +260,7 @@ final class ClipboardLiveCaptureService {
                 withTimeInterval: self.pollInterval,
                 repeats: true
             ) { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    self?.pollPasteboard()
-                }
+                self?.pollPasteboard()
             }
             self.pollPasteboard()
         }
@@ -310,8 +311,7 @@ final class ClipboardLiveCaptureService {
         let baseline = lastObservedChangeCount
         let startedAt = ContinuousClock.now
         let taskID = UUID()
-        observationTaskID = taskID
-        observationTask = Task { @MainActor [weak self] in
+        guard let task = applicationUpdateGate.task({ @MainActor [weak self] in
             guard let self else { return }
             defer {
                 // A cancelled task may finish after stop/start has installed a
@@ -369,7 +369,11 @@ final class ClipboardLiveCaptureService {
                     "stage=observe-failed elapsedMS=\(Self.elapsedMilliseconds(since: startedAt))"
                 )
             }
+        }) else {
+            return
         }
+        observationTaskID = taskID
+        observationTask = task
     }
 
     private func handle(
@@ -451,7 +455,6 @@ final class ClipboardLiveCaptureService {
         cancelDeferredResolution()
         deferredChangeCount = ticket.changeCount
         let taskID = UUID()
-        resolutionTaskID = taskID
         clipboardLiveCaptureLogger.info(
             "stage=deferred changeCount=\(ticket.changeCount) family=\(ticket.family.rawValue, privacy: .public) delayMS=500"
         )
@@ -459,7 +462,7 @@ final class ClipboardLiveCaptureService {
             "Defer",
             "family=\(ticket.family.rawValue, privacy: .public)"
         )
-        resolutionTask = Task { @MainActor [weak self] in
+        guard let task = applicationUpdateGate.task({ @MainActor [weak self] in
             guard let self else { return }
             defer {
                 if self.resolutionTaskID == taskID {
@@ -543,7 +546,12 @@ final class ClipboardLiveCaptureService {
                     "stage=resolve-terminal result=cancelled-or-failed changeCount=\(ticket.changeCount) attempts=1"
                 )
             }
+        }) else {
+            deferredChangeCount = nil
+            return
         }
+        resolutionTaskID = taskID
+        resolutionTask = task
     }
 
     private func finishDeferredResolution(

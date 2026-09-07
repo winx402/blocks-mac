@@ -50,8 +50,7 @@ extension ClipboardFeatureCoordinator {
             return
         }
         let privacyCaptureAuthorizationGeneration = privacyCaptureAdmissionToken.generation
-        liveCaptureTaskOwner = taskOwner
-        liveCaptureTask = Task { @MainActor [weak self] in
+        guard let task = clipboardStore.applicationUpdateGate.task({ @MainActor [weak self] in
             guard let self else { return }
             defer { self.finishLiveCapturePersistence(owner: taskOwner) }
             guard self.liveCaptureAuthorizationIsCurrent(
@@ -232,7 +231,14 @@ extension ClipboardFeatureCoordinator {
                     _ = await self.dispatchPluginEvent(didEvent)
                 }
             }
+        }) else {
+            // Keep the coalesced capture for cancellation recovery rather than
+            // pretending it persisted while update admission is paused.
+            latestPendingLiveCapture = snapshot
+            return
         }
+        liveCaptureTaskOwner = taskOwner
+        liveCaptureTask = task
     }
 
     private func finishLiveCapturePersistence(owner: UUID) {

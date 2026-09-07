@@ -29,7 +29,7 @@ extension AppModel {
                     uniqueKeysWithValues: plugins.map { ($0.id, $0) }
                 )
                 pluginLifecycleSnapshotByID = current
-                Task { @MainActor in
+                self.applicationOperationGate.task { @MainActor in
                     await self.pluginRuntimeCoordinator.reloadSchedules()
                 }
                 self.pluginRuntimeCoordinator.dispatchAsync(

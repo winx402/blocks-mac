@@ -2,16 +2,21 @@ import Foundation
 
 enum DistributionChannel: String, CaseIterable {
     case development
+    case localDevelopment = "local-development"
+    case directStable = "direct-stable"
     case directBeta = "direct-beta"
     case appStoreBeta = "app-store-beta"
 
     static var current: Self {
-        #if BLOCKS_APP_STORE_BETA
-        .appStoreBeta
+        #if BLOCKS_LOCAL_DEVELOPMENT
+        return .localDevelopment
+        #elseif BLOCKS_APP_STORE_BETA
+        return .appStoreBeta
         #elseif BLOCKS_DIRECT_BETA
-        .directBeta
+        return Bundle.main.object(forInfoDictionaryKey: "BLOCKS_DISTRIBUTION_CHANNEL") as? String == "direct-stable"
+            ? .directStable : .directBeta
         #else
-        .development
+        return .development
         #endif
     }
 
@@ -33,6 +38,10 @@ enum DistributionChannel: String, CaseIterable {
 
     var localizedName: String {
         switch self {
+        case .localDevelopment:
+            "Blocks Dev"
+        case .directStable:
+            "GitHub Release"
         case .development:
             L10n.string("release.channel.development")
         case .directBeta:

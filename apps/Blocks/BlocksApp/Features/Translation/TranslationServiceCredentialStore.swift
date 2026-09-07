@@ -1,4 +1,5 @@
 import Foundation
+import BlocksCore
 import Security
 
 enum TranslationServiceCredentialStoreError: Error, LocalizedError {
@@ -75,7 +76,10 @@ struct TranslationServiceCredentialStore:
 {
     private let service: String
 
-    init(service: String = "app.blocks.translation-service-credential") {
+    init(
+        service: String =
+            BlocksRuntimeIdentity.translationServiceCredentialKeychainService
+    ) {
         self.service = service
     }
 
@@ -129,7 +133,7 @@ struct TranslationServiceCredentialStore:
         item[kSecValueData as String] = data
         item[kSecAttrAccessible as String] =
             kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        let addStatus = SecItemAdd(item as CFDictionary, nil)
+        let addStatus = SecItemAdd(BlocksKeychainNamespace.queryForCurrentBuild(item) as CFDictionary, nil)
         guard addStatus == errSecSuccess else {
             throw TranslationServiceCredentialStoreError.keychain(addStatus)
         }
@@ -160,10 +164,10 @@ struct TranslationServiceCredentialStore:
     }
 
     private func baseQuery(account: String) -> [String: Any] {
-        [
+        BlocksKeychainNamespace.queryForCurrentBuild([
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
-        ]
+        ])
     }
 }

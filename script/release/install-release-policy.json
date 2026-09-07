@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "repository": "winx402/blocks-mac",
+  "bundle_id": "app.blocks.app",
+  "team_id": "KF86YN2FLJ",
+  "certificate_sha1": "05C7DCBAAFA122DBB6E78D5C5CD3C0C5FF7298A4",
+  "dmg_asset_template": "Blocks-{tag}-arm64.dmg"
+}

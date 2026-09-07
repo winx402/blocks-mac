@@ -1,0 +1,41 @@
+name: Source verification
+on:
+  pull_request:
+  push:
+    branches: [main, 'codex/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check build environment
+        run: ./script/dev.sh doctor
+      - name: Check secrets without disclosing matches
+        run: |
+          if ! command -v gitleaks >/dev/null; then brew install gitleaks; fi
+          gitleaks git --redact --no-banner .
+      - name: Verify installation and release failure paths
+        run: |
+          python3 tools/verification/install_entry_self_test.py
+          python3 tools/verification/release_pipeline_self_test.py
+          python3 tools/verification/application_update_safety_self_test.py
+          python3 tools/verification/development_entry_self_test.py
+          python3 tools/verification/local_development_security_self_test.py
+          ./script/test_ui_design_system.sh
+      - name: Build certificate-free development targets
+        run: ./script/dev.sh build
+      - name: Run isolated tests without signing credentials
+        run: ./script/dev.sh test

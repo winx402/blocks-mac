@@ -1,8 +1,10 @@
 import Foundation
 
 public enum BlocksNativePluginXPC {
-    public static let serviceName = "app.blocks.plugin-runner"
-    public static let hostAppBundleIdentifier = "app.blocks.app"
+    public static let serviceName =
+        BlocksRuntimeIdentity.nativePluginRunnerServiceName
+    public static let hostAppBundleIdentifier =
+        BlocksRuntimeIdentity.applicationBundleIdentifier
     public static let protocolVersion = 2
 }
 

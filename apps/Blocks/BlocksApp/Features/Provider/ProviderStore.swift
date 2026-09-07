@@ -1,4 +1,5 @@
 import Combine
+import BlocksCore
 import Foundation
 
 struct ProviderAuditToken: Equatable, Sendable {
@@ -476,6 +477,8 @@ final class ProviderStore: ObservableObject {
     private let openAIConnectionService: OpenAICompatibleConnectionService
     private let llmProviderAdapter: LLMProviderAdapter
     private let defaults: UserDefaults
+    private let applicationOperationAdmissionGate:
+        ApplicationOperationAdmissionGate
     private let providerAuditCapacity = 20
     private var activeOpenAIConnectionConfiguration: ProviderConnectionConfigurationFingerprint?
     private let providerAuditEpochSource = ProviderAuditEpochSource()
@@ -490,6 +493,9 @@ final class ProviderStore: ObservableObject {
         openAIConnectionService: OpenAICompatibleConnectionService = OpenAICompatibleConnectionService(),
         llmProviderAdapter: LLMProviderAdapter = LLMProviderMockAdapter(),
         defaults: UserDefaults = .standard,
+        applicationOperationAdmissionGate:
+            ApplicationOperationAdmissionGate =
+                ApplicationOperationAdmissionGate(name: "provider"),
         /// Keeps production startup recovery enabled while allowing isolated
         /// worker race tests to own the recovery timing deterministically.
         recoverPendingCredentialStateOnInitialization: Bool = true
@@ -505,12 +511,13 @@ final class ProviderStore: ObservableObject {
         self.openAIConnectionService = openAIConnectionService
         self.llmProviderAdapter = llmProviderAdapter
         self.defaults = defaults
+        self.applicationOperationAdmissionGate = applicationOperationAdmissionGate
         providerCredentialRevision = ProviderSettingsPersistence
             .credentialRevision(defaults: defaults)
         cancelledAliasMigrationRecoveryNoticeState = ProviderSettingsPersistence
             .cancelledAliasMigrationRecoveryNoticeState(defaults: defaults)
         if recoverPendingCredentialStateOnInitialization {
-            Task { @MainActor [weak self] in
+            applicationOperationAdmissionGate.task { [weak self] in
                 guard let self else { return }
                 let recovery = await self.providerKeychainWorker
                     .recoverPendingCredentialRecovery()
@@ -534,6 +541,14 @@ final class ProviderStore: ObservableObject {
                 self.openAIConnectionLastResult = nil
             }
         }
+    }
+
+    func prepareForApplicationUpdate() async throws {
+        try applicationOperationAdmissionGate.pauseIfIdle()
+    }
+
+    func resumeAfterCancelledApplicationUpdate() async {
+        applicationOperationAdmissionGate.resume()
     }
 
     var selectedLLMProvider: LLMProviderProfile {
@@ -639,6 +654,14 @@ final class ProviderStore: ObservableObject {
         accountAlias: String,
         providerSummary: String
     ) async -> ProviderKeychainGateUIOutcome {
+        guard let lease = applicationOperationAdmissionGate.begin() else {
+            return ProviderKeychainGateUIOutcome(
+                lifecycleRawValue: "update_paused",
+                auditID: ProviderAuditID.make(prefix: "kc_ui"),
+                operationSucceeded: false
+            )
+        }
+        defer { lease.release() }
         let auditID = ProviderAuditID.make(prefix: "kc_ui")
         switch await providerKeychainWorker.performKeychainGate(action: action, alias: accountAlias) {
         case let .success(result):
@@ -692,6 +715,14 @@ final class ProviderStore: ObservableObject {
         authorizationIntent:
             ProviderExternalTransferAuthorizationIntent? = nil
     ) async -> ProviderKeychainGateUIOutcome {
+        guard let lease = applicationOperationAdmissionGate.begin() else {
+            return ProviderKeychainGateUIOutcome(
+                lifecycleRawValue: "update_paused",
+                auditID: ProviderAuditID.make(prefix: "kc_user"),
+                operationSucceeded: false
+            )
+        }
+        defer { lease.release() }
         let auditID = ProviderAuditID.make(prefix: "kc_user")
         let mutationResult = await providerKeychainWorker.performUserSecretGate(
             action: action,
@@ -920,6 +951,10 @@ final class ProviderStore: ObservableObject {
         keychainAccountAlias: String,
         configurationFingerprint: ProviderConnectionConfigurationFingerprint? = nil
     ) async -> ProviderConnectionExecutionOutcome {
+        guard let lease = applicationOperationAdmissionGate.begin() else {
+            return .publicationRejected
+        }
+        defer { lease.release() }
         let auditToken = providerAuditEpochSource.capture()
         let provider = openAICompatibleLLMProvider()
         let externalTransferTarget = ProviderExternalTransferTarget(

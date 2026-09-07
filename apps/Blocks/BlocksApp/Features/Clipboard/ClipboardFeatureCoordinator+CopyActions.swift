@@ -7,19 +7,26 @@ extension ClipboardFeatureCoordinator {
     func copyRecordAsPlainText(recordID: String) {
         invalidatePlainTextCopy()
         let owner = UUID()
-        plainTextCopyTaskOwner = owner
-        plainTextCopyTask = Task { @MainActor [weak self] in
+        guard let task = clipboardStore.applicationUpdateGate.task({ @MainActor [weak self] in
             await self?.copyRecordAsPlainTextAsync(
                 recordID: recordID,
                 owner: owner
             )
+        }) else {
+            return
         }
+        plainTextCopyTaskOwner = owner
+        plainTextCopyTask = task
     }
 
     func copyExplicitText(
         _ text: String,
         source: ClipboardCopyEventSource
     ) async -> ClipboardExplicitTextCopyOutcome {
+        guard let applicationLease = clipboardStore.applicationUpdateGate.begin() else {
+            return .failed
+        }
+        defer { applicationLease.release() }
         let captureGeneration = captureLiveCaptureGeneration()
         let privacyCaptureAdmissionToken = privacyStore.captureAdmissionToken
         let operationID = UUID()

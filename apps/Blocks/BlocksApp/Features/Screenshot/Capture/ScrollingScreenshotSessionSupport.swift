@@ -1,4 +1,5 @@
 import BlocksScreenshotCore
+import BlocksCore
 import CoreGraphics
 import Darwin
 import Foundation
@@ -94,7 +95,7 @@ enum ScrollingScreenshotCompositeSupport {
 extension ScrollingScreenshotSessionCoordinator {
     static func defaultRootDirectory() -> URL {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Blocks/ScrollingScreenshot", isDirectory: true)
+            .appendingPathComponent("\(BlocksRuntimeIdentity.applicationSupportDirectoryName)/ScrollingScreenshot", isDirectory: true)
     }
 
     static func removeAbandonedSessions(
