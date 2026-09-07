@@ -23,10 +23,14 @@ jobs:
           persist-credentials: false
       - name: Check build environment
         run: ./script/dev.sh doctor
-      - name: Check secrets without disclosing matches
+      - name: Install verification tools
         run: |
+          if ! command -v rg >/dev/null; then brew install ripgrep; fi
           if ! command -v gitleaks >/dev/null; then brew install gitleaks; fi
-          gitleaks git --redact --no-banner .
+          rg --version
+          gitleaks version
+      - name: Check secrets without disclosing matches
+        run: gitleaks git --redact --no-banner .
       - name: Verify installation and release failure paths
         run: |
           python3 tools/verification/install_entry_self_test.py
