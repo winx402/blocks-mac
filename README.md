@@ -1,9 +1,25 @@
-# 积木 AI 工具箱
+# Blocks for Mac（积木工具）
 
-状态：初始化
-最后审阅：2026-07-05
+面向 macOS 的截图、剪贴板和翻译工具，使用 SwiftUI 与 AppKit。
+项目自有代码采用 [MIT](LICENSE)，第三方材料遵守各自许可，见
+[第三方声明](THIRD_PARTY_NOTICES.md)。不再计划上架 App Store。
 
-本仓库是「积木 AI 工具箱」项目的独立项目空间，简称「积木工具」。`blocks` 是 P2 阶段暂定技术前缀，用于 CLI、spike 和 action namespace；它不代表最终品牌定稿。初始资料来自 `/Users/bot/Documents/管家/docs/项目管理库/AI-native-Mac工具集合/`，后续本仓库应作为该项目的主要工作空间和文档归属地。
+## 安装与发行状态
+
+首版目标为 Apple Silicon / macOS 14+。目前尚未发布可供普通用户下载的官方
+签名、公证安装包，不要把源码构建产物当作正式发行版。
+
+无开发证书的完整 `LocalDevelopment`、统一安装/发布入口、内置 Helper 和
+App 内更新正在实施；没有完成真实验证的能力不会标为可用。现有签名开发流程
+见 [App 开发说明](apps/Blocks/README.md)。源码构建仍需要完整 Xcode。
+
+贡献前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 和 [SECURITY.md](SECURITY.md)。
+请勿在公开 Issue 上传 API key、配对密钥、剪贴板内容或个人截图。
+
+## 历史资料
+
+以下项目说明保留自 2026-07-05 的早期阶段，不代表当前功能或发行状态；当前实现
+应以代码、测试及最新验收记录为准。
 
 ## 项目定义
 
