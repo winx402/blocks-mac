@@ -28,7 +28,7 @@ source "$ROOT_DIR/script/stable_app_install.sh"
 PROJECT="$ROOT_DIR/apps/Blocks/Blocks.xcodeproj"
 SCHEME="Blocks"
 CONFIGURATION="Debug"
-DERIVED_DATA="$ROOT_DIR/DerivedData/Blocks"
+DERIVED_DATA="${BLOCKS_DERIVED_DATA_DIR:-$HOME/Library/Caches/BlocksDev/DerivedData.noindex/Blocks}"
 APP_NAME="Blocks"
 BUILT_APP_BUNDLE="$DERIVED_DATA/Build/Products/$CONFIGURATION/$APP_NAME.app"
 CLI_BINARY="$DERIVED_DATA/Build/Products/$CONFIGURATION/blocks"
@@ -81,8 +81,7 @@ if has_code_signing_identity; then
 fi
 
 if [[ "$HAS_SIGNING_IDENTITY" != "1" ]]; then
-  echo "warning: no valid macOS code signing identity found; Blocks will run with ad-hoc signing and TCC permissions may not bind reliably." >&2
-  echo "warning: create an Apple Development certificate or set BLOCKS_REQUIRE_STABLE_SIGNING=0 for local UI-only runs." >&2
+  echo "warning: no valid macOS code signing identity found." >&2
   if [[ "$REQUIRE_STABLE_SIGNING" == "1" ]]; then
     echo "error: BLOCKS_REQUIRE_STABLE_SIGNING=1 but no code signing identity is available." >&2
     exit 66
@@ -112,7 +111,7 @@ case "$USE_STABLE_SIGNING" in
     if [[ "$HAS_SIGNING_IDENTITY" == "1" && "$HAS_INVALID_TRUST_SETTINGS" != "1" ]]; then
       SHOULD_USE_STABLE_SIGNING=1
     elif [[ "$HAS_INVALID_TRUST_SETTINGS" == "1" ]]; then
-      echo "warning: falling back to ad-hoc signing for this run; TCC permissions may not bind reliably until certificate trust is fixed." >&2
+      echo "warning: stable signing is unavailable until certificate trust is fixed." >&2
     fi
     ;;
   *)
@@ -120,6 +119,13 @@ case "$USE_STABLE_SIGNING" in
     exit 2
     ;;
 esac
+
+if [[ "$SKIP_BUILD" != "1" && ( "$SHOULD_USE_STABLE_SIGNING" != "1" || "$HAS_SIGNING_IDENTITY" != "1" ) ]]; then
+  echo "error: this Debug App requires Apple Development signing and a provisioning profile authorizing its keychain-access-groups; ad-hoc fallback is not supported." >&2
+  echo "error: configure apps/Blocks/Config/Signing.local.xcconfig using Signing.local.example.xcconfig, then rerun with BLOCKS_USE_STABLE_SIGNING=1." >&2
+  echo "error: existing installed apps can still be opened with --open-existing; no app or build product has been changed." >&2
+  exit 66
+fi
 
 stable_app_runtime_records() {
   BLOCKS_VERIFY_APP_BUNDLE="$APP_BUNDLE" /usr/bin/osascript \

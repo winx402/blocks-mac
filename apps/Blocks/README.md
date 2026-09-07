@@ -7,7 +7,11 @@
 
 ## Targets
 
-- `Blocks`：主 App，bundle id `app.blocks.app`，sandbox-first；`build_and_run.sh` 会把 Debug App 固定 staging 到 `~/Applications/BlocksDev/Debug/Blocks.app`，优先支持 Apple Development 稳定签名，若本机没有 code signing identity 则显示 TCC 稳定性诊断。
+- `Blocks`：主 App，bundle id `app.blocks.app`，sandbox-first；`build_and_run.sh` 会把 Debug App 固定 staging 到 `~/Applications/BlocksDev/Debug/Blocks.app`。完整 Debug App 的 Keychain 访问组要求 Apple Development 证书及匹配的 provisioning profile，不支持无证书 ad-hoc 回退。
+
+首次构建前，将 `Config/Signing.local.example.xcconfig` 复制为被 Git 忽略的 `Config/Signing.local.xcconfig`，按模板填写自己的 Team、签名及 profile 配置，并安装授权对应 Keychain 组的开发 profile。不要提交本机配置、证书或 profile。缺少签名时脚本会在修改安装包前停止；`BLOCKS_REQUIRE_STABLE_SIGNING=0` 不会取消系统对 profile 的要求。
+
+运行脚本默认把构建产物放在 `~/Library/Caches/BlocksDev/DerivedData.noindex/Blocks`，避免 Spotlight 将其当作第二个应用；可用 `BLOCKS_DERIVED_DATA_DIR` 显式覆盖（自定义路径也应位于非索引目录）。请从稳定安装路径启动 App。旧版本在仓库 `DerivedData/` 生成的副本不会自动删除；确认不再使用后可自行移除旧构建目录。
 - `BlocksCore`：共享 action 与 XPC contract module，提供 action envelope、audit id、permission status 和通用 Action Broker DTO。
 - `BlocksScreenshotCore`：截图领域 framework，提供智能选择状态机、跨屏几何、编辑文档、渲染和编码。
 - `BlocksActionBroker`：用户显式启用的 LaunchAgent，负责在 CLI 与 App 之间路由本地 action。
@@ -28,28 +32,29 @@
 BLOCKS_REQUIRE_STABLE_SIGNING=1 ./script/build_and_run.sh --verify
 ```
 
-如果本机没有 Apple Development 或等价 code signing identity，上述门禁会 fail fast。普通 `./script/build_and_run.sh --verify` 仍可本地启动，但 Screen Recording / Accessibility 的真实授权结果不应写成已通过。
+如果本机没有有效开发签名，普通构建和上述门禁都会 fail fast。配置好证书及匹配 profile 后再构建；已有安装包可用 `--open-existing` 启动，但不能因此将 Screen Recording / Accessibility 验收标为通过。
 
 等价 App 构建命令：
 
 ```bash
-xcodebuild -project apps/Blocks/Blocks.xcodeproj -scheme Blocks -configuration Debug -derivedDataPath DerivedData/Blocks build
+xcodebuild -project apps/Blocks/Blocks.xcodeproj -scheme Blocks -configuration Debug -derivedDataPath "$HOME/Library/Caches/BlocksDev/DerivedData.noindex/Blocks" build
 ```
 
 CLI target 单独构建：
 
 ```bash
-xcodebuild -project apps/Blocks/Blocks.xcodeproj -scheme BlocksCLI -configuration Debug -derivedDataPath DerivedData/Blocks build
+xcodebuild -project apps/Blocks/Blocks.xcodeproj -scheme BlocksCLI -configuration Debug -derivedDataPath "$HOME/Library/Caches/BlocksDev/DerivedData.noindex/Blocks" build
 ```
 
 CLI 示例：
 
 ```bash
-DerivedData/Blocks/Build/Products/Debug/blocks list
-DerivedData/Blocks/Build/Products/Debug/blocks run blocks.screenshot.capture --interactive
-DerivedData/Blocks/Build/Products/Debug/blocks run blocks.screenshot.capture --interactive --kind smart
-DerivedData/Blocks/Build/Products/Debug/blocks run blocks.screenshot.capture --no-editor --kind display --display-scope current --copy
-DerivedData/Blocks/Build/Products/Debug/blocks run blocks.screenshot.capture --no-editor --kind region --output /tmp/blocks-shot.png
+BLOCKS_CLI="$HOME/Library/Caches/BlocksDev/DerivedData.noindex/Blocks/Build/Products/Debug/blocks"
+"$BLOCKS_CLI" list
+"$BLOCKS_CLI" run blocks.screenshot.capture --interactive
+"$BLOCKS_CLI" run blocks.screenshot.capture --interactive --kind smart
+"$BLOCKS_CLI" run blocks.screenshot.capture --no-editor --kind display --display-scope current --copy
+"$BLOCKS_CLI" run blocks.screenshot.capture --no-editor --kind region --output /tmp/blocks-shot.png
 ```
 
 P3-C 截图稳定化验证：
@@ -320,4 +325,4 @@ python3 tools/verification/p8n_clipboard_capture_font_settings_checks.py
 - CLI/action JSON 字段名、action 名和结构化错误机器字段不本地化。
 - OCR 真实执行、截图/OCR 图片外发、剪贴板历史完整内容外发、总结、标注、拖拽导出、完整设置页、真实 CLI execution、开机常驻剪贴板 recorder、App Group 共享 store、真实用户剪贴板可恢复保存、持久审计日志和 hook runtime 仍不在 P5-O/P4-H。
 - Permission Assist revoked-flow、真实多屏、权限撤销/重授权仍需单独验收；Region 已在 P7-O 完成一次真实捕获，Window / Fullscreen 已在 P7-Q 完成真实捕获。
-- 运行时截图不得进入仓库；构建产物走 ignored `DerivedData/`。
+- 运行时截图不得进入仓库；运行脚本构建产物使用 Library 下的 `.noindex` 缓存目录，历史 `DerivedData/` 仍被 Git 忽略。

@@ -5,5 +5,7 @@ CODE_SIGN_IDENTITY = -
 DEVELOPMENT_TEAM =
 BLOCKS_SELECTION_HELPER_DOWNLOAD_URL =
 
-// This file is intentionally optional so a fresh checkout can still use ad-hoc Debug signing.
+// Local credentials are never committed. The Debug App Keychain groups require
+// Apple Development signing and a matching provisioning profile; these ad-hoc
+// defaults alone cannot build the full App.
 #include? "Signing.local.xcconfig"

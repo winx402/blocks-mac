@@ -143,7 +143,7 @@ def main() -> None:
         shims = root / "bin"
         shims.mkdir()
         for name, body in {
-            "security": "#!/bin/bash\necho '0 valid identities found'\n",
+            "security": "#!/bin/bash\nif [[ $1 == find-identity ]]; then echo '  1) AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA Apple Development'; fi\n",
             "xcodebuild": "#!/bin/bash\nexit 65\n",
         }.items():
             path = shims / name
@@ -153,7 +153,7 @@ def main() -> None:
         bundle(installed, "old")
         result = subprocess.run(
             ["/bin/bash", "-x", str(root / "script/build_and_run.sh"), "--verify"],
-            env={"HOME": tmp, "PATH": f"{shims}:/usr/bin:/bin", "BLOCKS_STABLE_APP_DIR": str(installed.parent), "BLOCKS_USE_STABLE_SIGNING": "0"},
+            env={"HOME": tmp, "PATH": f"{shims}:/usr/bin:/bin", "BLOCKS_STABLE_APP_DIR": str(installed.parent), "BLOCKS_USE_STABLE_SIGNING": "1", "BLOCKS_DEVELOPMENT_TEAM": "TEST_TEAM"},
             text=True, capture_output=True, timeout=10, check=False,
         )
         assert result.returncode == 65, result.stderr
@@ -161,6 +161,21 @@ def main() -> None:
         assert "\n+ stop_stable_app\n" not in result.stderr
         assert "\n+ install_stable_app\n" not in result.stderr
         reports.append({"case": "entry_build_failure_preserves_host_and_install", "ok": True})
+
+        (shims / "security").write_text("#!/bin/bash\necho '0 valid identities found'\n")
+        for signing_mode in ("auto", "0", "1"):
+            result = subprocess.run(
+                ["/bin/bash", "-x", str(root / "script/build_and_run.sh"), "run"],
+                env={"HOME": tmp, "PATH": f"{shims}:/usr/bin:/bin", "BLOCKS_USE_STABLE_SIGNING": signing_mode},
+                text=True, capture_output=True, timeout=10, check=False,
+            )
+            assert result.returncode == 66, result.stderr
+            assert "ad-hoc fallback is not supported" in result.stderr
+            assert "\n+ xcodebuild " not in result.stderr
+            assert "\n+ rm -rf " not in result.stderr
+            assert "Library/Caches/BlocksDev/DerivedData.noindex/Blocks" in result.stderr
+            assert (installed / "Contents/MacOS/Blocks").read_text() == "old"
+            reports.append({"case": "unsigned_preflight:" + signing_mode, "ok": True})
 
     # A synthetic ad-hoc bundle exercises actual ditto/codesign/mv without
     # accessing a developer certificate, real App data, TCC or any live host.
