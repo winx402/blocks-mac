@@ -76,6 +76,29 @@ enum SettingsLayout {
     }
 }
 
+/// The navigation row expands its interaction background over the section
+/// surface, while these matching insets preserve the row title and value
+/// column's established geometry.
+enum SettingsNavigationRowSurfaceLayout {
+    static let horizontalOutset = SettingsLayout.sectionContentHorizontalInset
+    static let verticalOutset = BlocksVisualTokens.Spacing.xxs
+
+    static func interactionSurfaceInsets(position: SettingsRowSectionPosition) -> EdgeInsets {
+        EdgeInsets(
+            top: position == .only || position == .first ? verticalOutset : 0,
+            leading: horizontalOutset,
+            bottom: position == .only || position == .last ? verticalOutset : 0,
+            trailing: horizontalOutset
+        )
+    }
+}
+
+/// Only the first and last row may extend into the section's outer padding.
+/// Interior hit targets must never overlap across a divider.
+enum SettingsRowSectionPosition: Equatable {
+    case only, first, middle, last
+}
+
 struct SettingsAlignmentGeometry: Equatable {
     let sectionTitleLeading: CGFloat
     let rowTitleLeading: CGFloat
@@ -139,6 +162,16 @@ struct SettingsSection<Content: View, HeaderActions: View>: View {
             .padding(.vertical, BlocksVisualTokens.Spacing.xxs)
             .frame(maxWidth: .infinity, alignment: .leading)
             .blocksSurface(.section)
+            // Navigation-row interaction chrome may reach the surface edge.
+            // Clipping the complete section—not each row—keeps first, middle
+            // and last rows continuous with the card's outer corners.
+            .clipShape(
+                RoundedRectangle(
+                    cornerRadius: BlocksVisualTokens.CornerRadius.section,
+                    style: .continuous
+                )
+            )
+            .settingsGeometryProbe("section.surface.\(title)")
         }
     }
 }
@@ -570,10 +603,18 @@ struct SettingsNavigationRow: View {
     let title: String
     let detail: String?
     var value: String?
+    var sectionPosition: SettingsRowSectionPosition = .only
     let action: () -> Void
 
     var body: some View {
-        BlocksInteractiveRowButton(action: action) {
+        BlocksInteractiveRowButton(
+            action: action,
+            interactionSurfaceInsets:
+                SettingsNavigationRowSurfaceLayout.interactionSurfaceInsets(position: sectionPosition),
+            highlightCornerStyle: .none,
+            highlightCornerRadius: BlocksVisualTokens.CornerRadius.section,
+            interactionSurfaceProbeIdentifier: "navigation.surface.\(title)"
+        ) {
             SettingsRowShell(title: title, detail: detail) {
                 HStack(spacing: BlocksVisualTokens.Spacing.sm) {
                     if let value, !value.isEmpty {
@@ -882,7 +923,8 @@ struct SettingsDesignSystemGallery: View {
                     SettingsNavigationRow(
                         title: "Secondary page",
                         detail: "The complete row is interactive.",
-                        value: "3 items"
+                        value: "3 items",
+                        sectionPosition: .first
                     ) {}
                     SettingsRowDivider()
                     SettingsActionRow(title: "Action") {

@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B90700000000000000000003 /* FloatingPanelGeometryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F90700000000000000000003 /* FloatingPanelGeometryTests.swift */; };
+		B90700000000000000000001 /* SettingsNavigationInteractionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F90700000000000000000001 /* SettingsNavigationInteractionTests.swift */; };
+		B90700000000000000000002 /* SettingsNavigationRowSurfaceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F90700000000000000000002 /* SettingsNavigationRowSurfaceTests.swift */; };
 		B15L00000000000000000001 /* TranslationModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = F15L00000000000000000001 /* TranslationModels.swift */; };
 		B15L00000000000000000002 /* TranslationFavoriteRepository.swift in Sources */ = {isa = PBXBuildFile; fileRef = F15L00000000000000000002 /* TranslationFavoriteRepository.swift */; };
 		B15L00000000000000000003 /* BlocksNativePluginManifest.swift in Sources */ = {isa = PBXBuildFile; fileRef = F15L00000000000000000003 /* BlocksNativePluginManifest.swift */; };
@@ -490,6 +493,9 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		F90700000000000000000003 /* FloatingPanelGeometryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FloatingPanelGeometryTests.swift; sourceTree = "<group>"; };
+		F90700000000000000000001 /* SettingsNavigationInteractionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsNavigationInteractionTests.swift; sourceTree = "<group>"; };
+		F90700000000000000000002 /* SettingsNavigationRowSurfaceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsNavigationRowSurfaceTests.swift; sourceTree = "<group>"; };
 		F15L00000000000000000001 /* TranslationModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranslationModels.swift; sourceTree = "<group>"; };
 		F15L00000000000000000002 /* TranslationFavoriteRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranslationFavoriteRepository.swift; sourceTree = "<group>"; };
 		F15L00000000000000000003 /* BlocksNativePluginManifest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlocksNativePluginManifest.swift; sourceTree = "<group>"; };
@@ -990,6 +996,9 @@
 		A14G00000000000000000001 /* BlocksAppTests */ = {
 			isa = PBXGroup;
 			children = (
+				F90700000000000000000003 /* FloatingPanelGeometryTests.swift */,
+				F90700000000000000000001 /* SettingsNavigationInteractionTests.swift */,
+				F90700000000000000000002 /* SettingsNavigationRowSurfaceTests.swift */,
 				F16R00000000000000000001 /* Fixtures */,
 				F14G00000000000000000002 /* ScreenshotAppStateTests.swift */,
 				F28T00000000000000000001 /* ClipboardIOBrokerTests.swift */,
@@ -2030,6 +2039,9 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B90700000000000000000003 /* FloatingPanelGeometryTests.swift in Sources */,
+				B90700000000000000000001 /* SettingsNavigationInteractionTests.swift in Sources */,
+				B90700000000000000000002 /* SettingsNavigationRowSurfaceTests.swift in Sources */,
 				B14G00000000000000000001 /* ScreenshotAppStateTests.swift in Sources */,
 				B28T00000000000000000001 /* ClipboardIOBrokerTests.swift in Sources */,
 				B30T00000000000000000001 /* ClipboardBrokerBehaviorTests.swift in Sources */,

@@ -8,6 +8,7 @@ struct SettingsShellView: View {
     let mode: SettingsViewMode
 
     var body: some View {
+        let restorationID = routeStateStore.scrollRestorationID(for: mode)
         Group {
             if mode == .translationFavorites {
                 TranslationFavoritesPane { favorite in
@@ -40,8 +41,7 @@ struct SettingsShellView: View {
                         }
                         .background {
                             SettingsScrollPositionBridge(
-                                restorationID: routeStateStore
-                                    .scrollRestorationID(for: mode),
+                                restorationID: restorationID,
                                 offset: routeStateStore.scrollOffsetBinding(for: mode)
                             )
                             .frame(width: 0, height: 0)
@@ -315,6 +315,14 @@ struct SettingsScrollPositionBridge: NSViewRepresentable {
     let restorationID: String
     @Binding var offset: CGFloat
 
+    init(
+        restorationID: String,
+        offset: Binding<CGFloat>
+    ) {
+        self.restorationID = restorationID
+        _offset = offset
+    }
+
     func makeCoordinator() -> Coordinator {
         Coordinator(
             restorationID: restorationID,
@@ -399,13 +407,17 @@ struct SettingsScrollPositionBridge: NSViewRepresentable {
                     object: candidate.contentView,
                     queue: .main
                 ) { [weak self, weak candidate] _ in
-                    Task { @MainActor [weak self, weak candidate] in
-                        guard let self, let candidate,
-                              !self.isApplyingRestoration else {
+                        Task { @MainActor [weak self, weak candidate] in
+                        guard let self, let candidate else {
                             return
                         }
+                        guard !self.isApplyingRestoration else { return }
                         self.offset.wrappedValue =
-                            candidate.contentView.bounds.origin.y
+                            max(
+                                0,
+                                candidate.contentView.bounds.origin.y
+                                    - self.topOffset(in: candidate)
+                            )
                     }
                 }
                 restorationGeneration &+= 1
@@ -424,22 +436,77 @@ struct SettingsScrollPositionBridge: NSViewRepresentable {
                       candidate === self.scrollView else {
                     return
                 }
-                let documentHeight = candidate.documentView?.bounds.height ?? 0
-                let maximumOffset = max(
-                    0,
-                    documentHeight - candidate.contentView.bounds.height
+                self.applyRestoration(
+                    offset: restoredOffset,
+                    to: candidate
                 )
-                candidate.contentView.scroll(
-                    to: NSPoint(
-                        x: candidate.contentView.bounds.origin.x,
-                        y: min(max(0, restoredOffset), maximumOffset)
-                    )
+                // SwiftUI can update the document geometry in the turn after
+                // the bridge first attaches. Reapply the same route-owned
+                // offset once that layout settles so a fresh route cannot
+                // retain the outgoing page's vertical origin.
+                await Task.yield()
+                guard self.restorationGeneration == generation,
+                      candidate === self.scrollView else {
+                    return
+                }
+                self.applyRestoration(
+                    offset: restoredOffset,
+                    to: candidate
                 )
-                candidate.reflectScrolledClipView(candidate.contentView)
                 self.isApplyingRestoration = false
                 self.offset.wrappedValue =
-                    candidate.contentView.bounds.origin.y
+                    max(
+                        0,
+                        candidate.contentView.bounds.origin.y
+                            - self.topOffset(in: candidate)
+                    )
             }
+        }
+
+        private func applyRestoration(
+            offset: CGFloat,
+            to candidate: NSScrollView
+        ) {
+            scroll(to: topOffset(in: candidate) + max(0, offset), in: candidate)
+        }
+
+        private func topOffset(in candidate: NSScrollView) -> CGFloat {
+            constrainedOrigin(
+                for: -CGFloat.greatestFiniteMagnitude,
+                in: candidate
+            )
+        }
+
+        private func scroll(to offset: CGFloat, in candidate: NSScrollView) {
+            candidate.contentView.scroll(
+                to: NSPoint(
+                    x: candidate.contentView.bounds.origin.x,
+                    y: constrainedOrigin(for: offset, in: candidate)
+                )
+            )
+            candidate.reflectScrolledClipView(candidate.contentView)
+        }
+
+        private func constrainedOrigin(
+            for offset: CGFloat,
+            in candidate: NSScrollView
+        ) -> CGFloat {
+            let bounds = candidate.contentView.bounds
+            func nativeLimit(_ y: CGFloat) -> CGFloat {
+                candidate.contentView.constrainBoundsRect(
+                    NSRect(x: bounds.origin.x, y: y, width: bounds.width, height: bounds.height)
+                ).origin.y
+            }
+            // NSClipView's document-only constraint excludes NSScrollView's
+            // automatic titlebar inset. The real top is negative when that
+            // inset is present, even though constrainBoundsRect returns zero.
+            let lower = min(nativeLimit(-CGFloat.greatestFiniteMagnitude), -max(0, candidate.contentInsets.top))
+            // SwiftUI's clip view may return zero for an extreme proposed
+            // rectangle instead of its actual maximum. Use document geometry
+            // for the lower edge rather than probing with an enormous origin.
+            let documentMaxY = candidate.documentView?.frame.maxY ?? bounds.height
+            let upper = max(lower, documentMaxY - bounds.height + max(0, candidate.contentInsets.bottom))
+            return min(upper, max(lower, offset))
         }
 
         private func enclosingScrollView(from view: NSView?) -> NSScrollView? {

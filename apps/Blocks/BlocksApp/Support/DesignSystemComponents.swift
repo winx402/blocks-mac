@@ -73,6 +73,14 @@ struct BlocksToolbarContainer<Content: View>: View {
 struct BlocksInteractiveRowButton<Content: View>: View {
   let action: () -> Void
   let content: Content
+  /// Insets by which the interaction chrome can extend beyond the label's
+  /// layout bounds. The label receives matching inner padding, so its visible
+  /// content does not move when a parent surface needs edge-to-edge feedback.
+  let interactionSurfaceInsets: EdgeInsets
+  let highlightCornerStyle: BlocksInteractiveRowHighlightCornerStyle
+  let highlightCornerRadius: CGFloat
+  /// Debug-only geometry identity for real NSHostingView contract tests.
+  let interactionSurfaceProbeIdentifier: String?
 
   @State private var isHovered = false
   @FocusState private var isFocused: Bool
@@ -80,9 +88,17 @@ struct BlocksInteractiveRowButton<Content: View>: View {
 
   init(
     action: @escaping () -> Void,
+    interactionSurfaceInsets: EdgeInsets = EdgeInsets(),
+    highlightCornerStyle: BlocksInteractiveRowHighlightCornerStyle = .all,
+    highlightCornerRadius: CGFloat = BlocksVisualTokens.CornerRadius.control,
+    interactionSurfaceProbeIdentifier: String? = nil,
     @ViewBuilder content: () -> Content
   ) {
     self.action = action
+    self.interactionSurfaceInsets = interactionSurfaceInsets
+    self.highlightCornerStyle = highlightCornerStyle
+    self.highlightCornerRadius = highlightCornerRadius
+    self.interactionSurfaceProbeIdentifier = interactionSurfaceProbeIdentifier
     self.content = content()
   }
 
@@ -90,15 +106,23 @@ struct BlocksInteractiveRowButton<Content: View>: View {
     Button(action: action) {
       content
         .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(interactionSurfaceInsets)
         .contentShape(Rectangle())
     }
     .buttonStyle(
       BlocksInteractiveRowButtonStyle(
         isHovered: isHovered,
         isFocused: isFocused,
-        isEnabled: isEnabled
+        isEnabled: isEnabled,
+        cornerStyle: highlightCornerStyle,
+        cornerRadius: highlightCornerRadius
       )
     )
+    .blocksInteractionGeometryProbe(interactionSurfaceProbeIdentifier)
+    .padding(.top, -interactionSurfaceInsets.top)
+    .padding(.leading, -interactionSurfaceInsets.leading)
+    .padding(.bottom, -interactionSurfaceInsets.bottom)
+    .padding(.trailing, -interactionSurfaceInsets.trailing)
     .focused($isFocused)
     .onHover { isHovered = $0 }
     .blocksAnimation(.hoverFocus, value: isHovered)
@@ -106,10 +130,22 @@ struct BlocksInteractiveRowButton<Content: View>: View {
   }
 }
 
+/// Identifies which outer corners of a full-width row highlight should follow
+/// its containing surface. This keeps first, middle and last rows visually
+/// continuous instead of turning every row into an inset pill.
+enum BlocksInteractiveRowHighlightCornerStyle: Equatable {
+  case all
+  case top
+  case bottom
+  case none
+}
+
 private struct BlocksInteractiveRowButtonStyle: ButtonStyle {
   let isHovered: Bool
   let isFocused: Bool
   let isEnabled: Bool
+  let cornerStyle: BlocksInteractiveRowHighlightCornerStyle
+  let cornerRadius: CGFloat
 
   func makeBody(configuration: Configuration) -> some View {
     let state: BlocksInteractionState
@@ -128,7 +164,8 @@ private struct BlocksInteractiveRowButtonStyle: ButtonStyle {
     return configuration.label
       .blocksInteractionChrome(
         state,
-        cornerRadius: BlocksVisualTokens.CornerRadius.control
+        cornerStyle: cornerStyle,
+        cornerRadius: cornerRadius
       )
       .blocksAnimation(.press, value: configuration.isPressed)
   }
@@ -307,6 +344,7 @@ struct BlocksSelectableControlStyle: ButtonStyle {
 
 struct BlocksInteractionChromeModifier: ViewModifier {
   let state: BlocksInteractionState
+  let cornerStyle: BlocksInteractiveRowHighlightCornerStyle
   let cornerRadius: CGFloat
 
   @Environment(\.colorSchemeContrast) private var colorSchemeContrast
@@ -316,7 +354,13 @@ struct BlocksInteractionChromeModifier: ViewModifier {
       state,
       increasesContrast: colorSchemeContrast == .increased
     )
-    let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+    let shape = UnevenRoundedRectangle(
+      topLeadingRadius: cornerStyle.includesTop ? cornerRadius : 0,
+      bottomLeadingRadius: cornerStyle.includesBottom ? cornerRadius : 0,
+      bottomTrailingRadius: cornerStyle.includesBottom ? cornerRadius : 0,
+      topTrailingRadius: cornerStyle.includesTop ? cornerRadius : 0,
+      style: .continuous
+    )
     let usesAccent = state == .selected || state == .focused
 
     content
@@ -341,11 +385,113 @@ struct BlocksInteractionChromeModifier: ViewModifier {
 extension View {
   func blocksInteractionChrome(
     _ state: BlocksInteractionState,
+    cornerStyle: BlocksInteractiveRowHighlightCornerStyle = .all,
     cornerRadius: CGFloat = BlocksVisualTokens.CornerRadius.control
   ) -> some View {
-    modifier(BlocksInteractionChromeModifier(state: state, cornerRadius: cornerRadius))
+    modifier(
+      BlocksInteractionChromeModifier(
+        state: state,
+        cornerStyle: cornerStyle,
+        cornerRadius: cornerRadius
+      )
+    )
   }
 }
+
+private extension BlocksInteractiveRowHighlightCornerStyle {
+  var includesTop: Bool {
+    self == .all || self == .top
+  }
+
+  var includesBottom: Bool {
+    self == .all || self == .bottom
+  }
+}
+
+#if DEBUG
+private struct BlocksInteractionGeometryProbeReporterKey: EnvironmentKey {
+  static let defaultValue: ((String, CGRect) -> Void)? = nil
+}
+
+extension EnvironmentValues {
+  var blocksInteractionGeometryProbeReporter: ((String, CGRect) -> Void)? {
+    get { self[BlocksInteractionGeometryProbeReporterKey.self] }
+    set { self[BlocksInteractionGeometryProbeReporterKey.self] = newValue }
+  }
+}
+
+private struct BlocksInteractionGeometryProbe: NSViewRepresentable {
+  let identifier: String
+  let reporter: (String, CGRect) -> Void
+
+  func makeNSView(context: Context) -> BlocksInteractionGeometryProbeNSView {
+    BlocksInteractionGeometryProbeNSView(identifier: identifier, reporter: reporter)
+  }
+
+  func updateNSView(
+    _ nsView: BlocksInteractionGeometryProbeNSView,
+    context: Context
+  ) {
+    nsView.probeIdentifier = identifier
+    nsView.reporter = reporter
+    nsView.needsLayout = true
+  }
+}
+
+private struct BlocksInteractionGeometryProbeModifier: ViewModifier {
+  let identifier: String?
+  @Environment(\.blocksInteractionGeometryProbeReporter) private var reporter
+
+  @ViewBuilder
+  func body(content: Content) -> some View {
+    if let identifier, let reporter {
+      content.background(
+        BlocksInteractionGeometryProbe(identifier: identifier, reporter: reporter)
+      )
+    } else {
+      content
+    }
+  }
+}
+
+private final class BlocksInteractionGeometryProbeNSView: NSView {
+  var probeIdentifier: String
+  var reporter: ((String, CGRect) -> Void)?
+
+  init(identifier: String, reporter: @escaping (String, CGRect) -> Void) {
+    self.probeIdentifier = identifier
+    self.reporter = reporter
+    super.init(frame: .zero)
+  }
+
+  @available(*, unavailable)
+  required init?(coder: NSCoder) {
+    fatalError("init(coder:) has not been implemented")
+  }
+
+  override func layout() {
+    super.layout()
+    guard let window else { return }
+    reporter?(probeIdentifier, window.convertToScreen(convert(bounds, to: nil)))
+  }
+}
+
+extension View {
+  func blocksInteractionGeometryProbe(_ identifier: String?) -> some View {
+    modifier(BlocksInteractionGeometryProbeModifier(identifier: identifier))
+  }
+
+  func blocksInteractionGeometryProbeReporter(
+    _ reporter: @escaping (String, CGRect) -> Void
+  ) -> some View {
+    environment(\.blocksInteractionGeometryProbeReporter, reporter)
+  }
+}
+#else
+extension View {
+  func blocksInteractionGeometryProbe(_: String?) -> some View { self }
+}
+#endif
 
 struct BlocksPanelChrome<Title: View, Actions: View>: View {
   let title: Title

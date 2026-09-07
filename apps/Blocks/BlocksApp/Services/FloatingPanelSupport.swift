@@ -668,6 +668,122 @@ enum FloatingPanelKind: String {
     case translation
 }
 
+/// Owns the process-wide screen-parameter subscription for one visible panel.
+///
+/// `NSScreen.visibleFrame` is intentionally read by the presenter when this
+/// fires; caching it here would leave an anchored surface using stale Dock or
+/// display geometry. Screen-parameter notifications do not replace the
+/// window-delegate screen-change callback: a panel can move to a different
+/// display without a global configuration change.
+@MainActor
+final class FloatingPanelVisibleFrameObserver {
+    private let notificationCenter: NotificationCenter
+    private var screenParametersObserver: NSObjectProtocol?
+    private var generation: UInt64 = 0
+    private var onVisibleFrameChange: (@MainActor () -> Void)?
+
+    private(set) var isObserving = false
+
+    init(notificationCenter: NotificationCenter = .default) {
+        self.notificationCenter = notificationCenter
+    }
+
+    deinit {
+        if let screenParametersObserver {
+            notificationCenter.removeObserver(screenParametersObserver)
+        }
+    }
+
+    func start(onVisibleFrameChange: @escaping @MainActor () -> Void) {
+        self.onVisibleFrameChange = onVisibleFrameChange
+        guard screenParametersObserver == nil else {
+            return
+        }
+        generation &+= 1
+        let observerGeneration = generation
+        screenParametersObserver = notificationCenter.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: NSApp,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.generation == observerGeneration else {
+                    return
+                }
+                self.onVisibleFrameChange?()
+            }
+        }
+        isObserving = true
+    }
+
+    func stop() {
+        generation &+= 1
+        if let screenParametersObserver {
+            notificationCenter.removeObserver(screenParametersObserver)
+            self.screenParametersObserver = nil
+        }
+        onVisibleFrameChange = nil
+        isObserving = false
+    }
+}
+
+enum FloatingPanelScreenResolver {
+    /// Resolves a current `NSScreen` instead of retaining a possibly stale
+    /// screen object across display-parameter changes. It preserves AppKit's
+    /// display identity first, then falls back only to a real intersection.
+    @MainActor
+    static func screen(
+        for panel: NSPanel,
+        screens: [NSScreen] = NSScreen.screens,
+        fallback: NSScreen? = NSScreen.main
+    ) -> NSScreen? {
+        if let currentDisplayIdentifier = displayIdentifier(for: panel.screen),
+           let exact = screens.first(where: {
+               displayIdentifier(for: $0) == currentDisplayIdentifier
+           }) {
+            return exact
+        }
+        guard let screenIndex = screenIndex(
+            containingMostOf: panel.frame,
+            screenFrames: screens.map(\.frame)
+        ) else {
+            return fallback
+        }
+        return screens[screenIndex]
+    }
+
+    static func screenIndex(
+        containingMostOf frame: CGRect,
+        screenFrames: [CGRect]
+    ) -> Int? {
+        guard !screenFrames.isEmpty,
+              let index = screenFrames.indices.max(by: { lhs, rhs in
+            intersectionArea(frame, with: screenFrames[lhs])
+                < intersectionArea(frame, with: screenFrames[rhs])
+              }),
+              intersectionArea(frame, with: screenFrames[index]) > 0 else {
+            return nil
+        }
+        return index
+    }
+
+    static func displayIdentifier(for screen: NSScreen?) -> String? {
+        guard let number = screen?.deviceDescription[
+            NSDeviceDescriptionKey("NSScreenNumber")
+        ] as? NSNumber else {
+            return nil
+        }
+        return String(number.uint32Value)
+    }
+
+    private static func intersectionArea(_ lhs: CGRect, with rhs: CGRect) -> CGFloat {
+        let intersection = lhs.intersection(rhs)
+        guard !intersection.isNull else { return 0 }
+        return intersection.width * intersection.height
+    }
+}
+
 enum FloatingPanelFrameStore {
     private static let margin: CGFloat = 22
     private static let clipboardSideDefaultWidth: CGFloat = 390

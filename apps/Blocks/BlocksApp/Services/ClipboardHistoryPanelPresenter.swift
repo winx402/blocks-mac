@@ -269,6 +269,7 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
     private var closeStartNotified = false
     private var onClosed: ((UUID?) -> Void)?
     private var appResignActiveObserver: NSObjectProtocol?
+    private let visibleFrameObserver = FloatingPanelVisibleFrameObserver()
     private let quickPasteHintState = ClipboardQuickPasteHintState()
     private let pinState = ClipboardPanelPinState()
     private let externalTargetTracker: ClipboardExternalTargetTracker
@@ -477,6 +478,7 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
         anchorPanel(panel)
         dismissMonitor.stop()
         self.panel = panel
+        startVisibleFrameObservation()
         regularWindowVisibilitySession.hideRegularWindows(excluding: panel)
         presentationCoordinator.present(
             window: panel,
@@ -773,13 +775,29 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
         for panel: NSPanel,
         preservingBottomHeight height: CGFloat? = nil
     ) -> CGRect {
-        let screen = panel.screen ?? NSScreen.main
+        let screen = FloatingPanelScreenResolver.screen(for: panel)
         switch currentPosition {
         case .bottom:
             return FloatingPanelFrameStore.clipboardBottomFrame(screen: screen, height: height)
         case .left, .right:
             return FloatingPanelFrameStore.clipboardSideFrame(position: currentPosition, screen: screen)
         }
+    }
+
+    private func startVisibleFrameObservation() {
+        visibleFrameObserver.start { [weak self] in
+            self?.refreshAnchoredPanelForVisibleFrameChange()
+        }
+    }
+
+    private func refreshAnchoredPanelForVisibleFrameChange() {
+        guard !isClosePending,
+              currentPosition == .bottom,
+              let panel,
+              panel.isVisible else {
+            return
+        }
+        anchorPanel(panel, preservingBottomHeight: panel.frame.height)
     }
 
     private func applyTopBorderResize(proposedHeight: CGFloat, panel: NSPanel) {
@@ -804,7 +822,7 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
         }
         let frame = FloatingPanelFrameStore.clipboardSideFrame(
             position: currentPosition,
-            screen: panel.screen ?? NSScreen.main,
+            screen: FloatingPanelScreenResolver.screen(for: panel),
             width: proposedWidth
         )
         isApplyingAnchoredFrame = true
@@ -940,6 +958,10 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
         notificationPresenter?.reposition()
     }
 
+    func windowDidChangeScreen(_ notification: Notification) {
+        refreshAnchoredPanelForVisibleFrameChange()
+    }
+
     func windowDidResignKey(_ notification: Notification) {
         quickPasteHintState.reset()
         guard let window = notification.object as? NSWindow else {
@@ -977,6 +999,7 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
         let closedPasteSessionID = pasteInitiatedCloseSessionID
         invocationContext = nil
         stopApplicationObservation()
+        visibleFrameObserver.stop()
         notificationPresenter?.detach()
         presentationCoordinator.reset()
         if let panel {

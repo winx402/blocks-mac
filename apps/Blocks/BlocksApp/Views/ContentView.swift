@@ -88,13 +88,7 @@ struct SettingsNavigationShell: View {
         } set: { section in
             guard let section else { return }
             guard appModel.selectedSection != section else { return }
-            // List(selection:) may invoke its setter while SwiftUI is still
-            // reconciling the sidebar row. Publish navigation on the next main
-            // actor turn to avoid mutating AppModel during a view update.
-            Task { @MainActor in
-                guard appModel.selectedSection != section else { return }
-                appModel.selectedSection = section
-            }
+            appModel.selectedSection = section
         }
     }
 }
@@ -245,8 +239,12 @@ struct SettingsSourceListBridge: NSViewRepresentable {
 
         func didSelect(_ section: AppSection) {
             guard selection.wrappedValue != section else { return }
-            onUserSelection(section)
+            // This originates from NSOutlineView's user-selection callback,
+            // outside SwiftUI's view-update transaction. Publish the route
+            // synchronously before auxiliary state triggers a render; otherwise
+            // that render can apply the old binding value back to AppKit.
             selection.wrappedValue = section
+            onUserSelection(section)
         }
     }
 }
