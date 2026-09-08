@@ -33,6 +33,7 @@
 - 安装版 CLI 离线真实测试：init 成功 exit 0；重复目录 exit 2/output_exists；包内相对 event 和 expect exit 0/matched_expectation=true；缺失相对文件不回退 cwd，exit 2/event_fixture_read_failed；路径穿越 exit 2/event_fixture_invalid_path；pack 缺输出 exit 2/invalid_arguments，正常 pack exit 0 且哈希匹配。所有错误 command 为规范名称，不含输入路径。CLI self-test 10/10。
 - 独立只读审查覆盖 broker 熔断代次去重、可用状态恢复、开发/正式 entitlement 分离、启动恢复时序及玻璃前后景裁剪，未发现可靠阻断性回归。审查不替代未完成实机矩阵。
 - 辅助功能系统证据：用户重新添加后，tccd 日志先记录当前开发包 requirement 的 Allowed 写入；随后新进程的 Accessibility preflight 却仍按旧 requirement 检查，报 Failed to match existing code requirement 并返回 authValue=0。当前包 deep/strict 签名有效，录屏检查正常。尚不能确定旧规则来自缓存还是其他记录；请求用户确认仅针对 app.blocks.dev 的 Accessibility 重置，未自行修改 TCC 数据库或绕过系统权限。
+- 用户明确允许定向重置后，正常退出开发版并执行系统命令 `tccutil reset Accessibility app.blocks.dev`，系统报告成功。重新启动并通过系统设置恢复授权后，应用自身显示辅助功能已授权；再次正常退出重启后仍已授权，录屏权限保持有效。没有修改 TCC 数据库、重签安装包或重置其他 App 权限。这只证明授权恢复，不替代外部 App 自动粘贴插入验收。
 
 ## 工作区与授权
 
