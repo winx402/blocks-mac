@@ -80,7 +80,7 @@ public enum BlocksLocalBuildTrust {
         guard let url = manifestURL,
               let home = getpwuid(getuid())?.pointee.pw_dir else { return nil }
         let expectedRoot = URL(fileURLWithPath: String(cString: home))
-            .appendingPathComponent("Applications/BlocksDev/Local/Blocks Dev.app").path
+            .appendingPathComponent("Applications/Blocks.app").path
         return loadManifest(at: url, expectedRoot: expectedRoot)
     }
 
@@ -93,7 +93,7 @@ public enum BlocksLocalBuildTrust {
               manifest.peers.count == 4,
               Set(manifest.peers.map(\.role)).count == manifest.peers.count else { return nil }
         let layout = [
-            "app": ("app.blocks.dev", "Contents/MacOS/Blocks Dev"),
+            "app": ("app.blocks.dev", "Contents/MacOS/Blocks"),
             "cli": ("app.blocks.dev.cli", "Contents/Resources/CLI/blocks"),
             "broker": ("app.blocks.dev.action-broker", "Contents/MacOS/BlocksActionBroker"),
             "helper": ("app.blocks.dev.selection-helper", "Contents/Helpers/Blocks Selection Helper.app/Contents/MacOS/Blocks Selection Helper"),

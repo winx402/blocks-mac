@@ -3044,7 +3044,7 @@
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MARKETING_VERSION = 0.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = app.blocks.dev;
-				PRODUCT_NAME = "Blocks Dev";
+				PRODUCT_NAME = Blocks;
 				PRODUCT_MODULE_NAME = Blocks;
 				SKIP_INSTALL = NO;
 				SUPPORTED_PLATFORMS = macosx;
@@ -3120,7 +3120,7 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = macosx;
 				SWIFT_ENABLE_EXPLICIT_MODULES = NO;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Blocks Dev.app/Contents/MacOS/Blocks Dev";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Blocks.app/Contents/MacOS/Blocks";
 			};
 			name = LocalDevelopment;
 		};

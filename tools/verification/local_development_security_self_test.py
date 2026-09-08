@@ -56,7 +56,7 @@ do {
     #if BLOCKS_LOCAL_DEVELOPMENT
     try check(BlocksRuntimeIdentity.isLocalDevelopment, "local-compile-identity")
     try check(BlocksRuntimeIdentity.applicationBundleIdentifier == "app.blocks.dev", "local-app-identity")
-    try check(BlocksRuntimeIdentity.mainExecutableName == "Blocks Dev", "local-main-executable")
+    try check(BlocksRuntimeIdentity.mainExecutableName == "Blocks", "local-main-executable")
     try check(BlocksRuntimeIdentity.actionBrokerMachServiceName == "app.blocks.dev.action-broker.xpc", "local-mach-namespace")
     try check(BlocksRuntimeIdentity.nativePluginRunnerServiceName == "app.blocks.dev.plugin-runner", "local-native-runner-namespace")
     try check(BlocksRuntimeIdentity.providerKeychainService == "app.blocks.dev.provider.dev", "local-provider-service")
@@ -82,11 +82,11 @@ do {
 
     let directory = root.appendingPathComponent("secure/Installation", isDirectory: true)
     let url = directory.appendingPathComponent("peers.json")
-    let expectedRoot = root.appendingPathComponent("Applications/BlocksDev/Local/Blocks Dev.app").path
+    let expectedRoot = root.appendingPathComponent("Applications/Blocks.app").path
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
                                            attributes: [.posixPermissions: 0o700])
     let layout: [(String, String, String)] = [
-        ("app", "app.blocks.dev", "Contents/MacOS/Blocks Dev"),
+        ("app", "app.blocks.dev", "Contents/MacOS/Blocks"),
         ("cli", "app.blocks.dev.cli", "Contents/Resources/CLI/blocks"),
         ("broker", "app.blocks.dev.action-broker", "Contents/MacOS/BlocksActionBroker"),
         ("helper", "app.blocks.dev.selection-helper", "Contents/Helpers/Blocks Selection Helper.app/Contents/MacOS/Blocks Selection Helper"),

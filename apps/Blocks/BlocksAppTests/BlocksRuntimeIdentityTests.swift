@@ -8,7 +8,7 @@ final class BlocksRuntimeIdentityTests: XCTestCase {
         XCTAssertTrue(BlocksRuntimeIdentity.isLocalDevelopment)
         XCTAssertEqual(BlocksRuntimeIdentity.applicationBundleIdentifier, "app.blocks.dev")
         XCTAssertEqual(BlocksRuntimeIdentity.identifierPrefix, "app.blocks.dev")
-        XCTAssertEqual(BlocksRuntimeIdentity.mainExecutableName, "Blocks Dev")
+        XCTAssertEqual(BlocksRuntimeIdentity.mainExecutableName, "Blocks")
         XCTAssertEqual(BlocksRuntimeIdentity.applicationSupportDirectoryName, "Blocks Dev")
         XCTAssertEqual(
             BlocksRuntimeIdentity.actionBrokerLaunchAgentLabel,

@@ -21,7 +21,10 @@ cd blocks-mac
 
 环境检查使用 `./script/dev.sh doctor`，测试使用 `./script/dev.sh test`，
 干净工作树的快进更新与重新运行使用 `./script/dev.sh update`。
-源码版显示为 **Blocks Dev**，不替换正式版或复用正式版数据。
+源码版统一显示为 **Blocks**，固定安装到 `~/Applications/Blocks.app`。
+内部仍保留 `app.blocks.dev` 及原有独立数据/钥匙串，不因改名清空或混用正式版数据。
+本机可配置固定证书签名，升级时验证签名身份连续性；未配置证书时仍可临时签名构建，
+但临时签名重新编译可能需要重新授权。
 
 统一入口、身份隔离和迁移边界见 [源码安装与独立发布](docs/技术知识库/源码安装与独立发布.md)。
 

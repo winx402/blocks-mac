@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Certificate-free, explicitly isolated local development. No production install."""
+"""Stable local Blocks installation, with optional pinned certificate signing."""
 from __future__ import annotations
 
 import argparse
@@ -17,12 +17,16 @@ import stat
 import subprocess
 import sys
 import tempfile
+import uuid
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "script"))
+import development_signing as signing
 HOME = Path(pwd.getpwuid(os.getuid()).pw_dir)
 DERIVED = HOME / "Library/Caches/BlocksDev/LocalDevelopment.noindex"
-DESTINATION = HOME / "Applications/BlocksDev/Local/Blocks Dev.app"
+DESTINATION = HOME / "Applications/Blocks.app"
+LEGACY_DESTINATION = HOME / "Applications/BlocksDev/Local/Blocks Dev.app"
 MANIFEST = HOME / "Library/Application Support/Blocks Dev/Installation/peers.json"
 EMPTY_ENTITLEMENTS = ROOT / "apps/Blocks/BlocksApp/Blocks-LocalDevelopment.entitlements"
 RENAME_EXCL = 0x00000004
@@ -49,7 +53,9 @@ def doctor() -> None:
         if shutil.which(tool) is None:
             raise RuntimeError(f"Required tool is missing: {tool}")
     print(version.strip())
-    print("Configuration: LocalDevelopment; ad-hoc signing; app.blocks.dev; no provisioning profile.")
+    profile = signing.configuration()
+    label = "pinned certificate " + profile['identity'] if profile['mode'] == 'certificate' else "ad-hoc (rebuilds may require permission approval)"
+    print(f"Configuration: LocalDevelopment; {label}; app.blocks.dev; no provisioning profile.")
     print("Official app data, credentials, and installation are not used.")
 
 
@@ -57,7 +63,7 @@ def build() -> Path:
     doctor()
     sys.path.insert(0, str(ROOT / "tools/verification"))
     from verification_build_helpers import isolated_build_registration
-    with isolated_build_registration(DERIVED, "LocalDevelopment", ("Blocks Dev.app", "Blocks Selection Helper.app")):
+    with isolated_build_registration(DERIVED, "LocalDevelopment", ("Blocks.app", "Blocks Dev.app", "Blocks Selection Helper.app")):
         for scheme in ("Blocks", "BlocksCLI", "BlocksSelectionHelper"):
             run(["xcodebuild", "-project", str(ROOT / "apps/Blocks/Blocks.xcodeproj"),
                  "-scheme", scheme, "-configuration", "LocalDevelopment", "-destination",
@@ -81,7 +87,7 @@ def running_local_processes() -> list[int]:
     found = []
     for line in output.splitlines():
         fields = line.strip().split(None, 1)
-        if len(fields) == 2 and fields[1].startswith(str(DESTINATION) + "/"):
+        if len(fields) == 2 and any(fields[1].startswith(str(path) + "/") for path in (DESTINATION, LEGACY_DESTINATION)):
             found.append(int(fields[0]))
     return found
 
@@ -102,7 +108,7 @@ def rename_display(bundle: Path, name: str) -> None:
 
 
 def sign(path: Path, identifier: str, entitlements: Path | None = None) -> None:
-    args = ["/usr/bin/codesign", "--force", "--sign", "-", "--timestamp=none", "--identifier", identifier]
+    args = ["/usr/bin/codesign", "--force", "--sign", signing.identity(), "--timestamp=none", "--identifier", identifier]
     if entitlements is not None:
         args += ["--entitlements", str(entitlements), "--generate-entitlement-der"]
     run([*args, str(path)])
@@ -111,9 +117,36 @@ def sign(path: Path, identifier: str, entitlements: Path | None = None) -> None:
 def signature(path: Path) -> dict[str, str]:
     result = subprocess.run(["/usr/bin/codesign", "-dvvv", str(path)], capture_output=True, text=True, check=True)
     values = dict(line.split("=", 1) for line in result.stderr.splitlines() if "=" in line)
-    if values.get("Signature") != "adhoc" or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", values.get("CDHash", "")):
-        raise RuntimeError("Expected an ad-hoc local-development signature.")
+    signing.validate_metadata(values)
     return values
+
+
+def resign_nested_code(bundle: Path) -> None:
+    # Preserve each nested component's sandbox/flags, but regenerate its
+    # requirement from the pinned certificate (never preserve an old cdhash DR).
+    components = []
+    for path in bundle.rglob("*"):
+        if path.is_symlink():
+            continue  # Framework version symlinks refer to the real file below.
+        if path.is_dir() and path.suffix in (".framework", ".xpc", ".app"):
+            components.append(path)
+        elif path.is_file():
+            with path.open("rb") as stream:
+                header = stream.read(8)
+            thin = header[:4] in (b"\xfe\xed\xfa\xce", b"\xce\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xcf\xfa\xed\xfe")
+            fat = header[:4] in (b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf") and 0 < int.from_bytes(header[4:8], "big") <= 16
+            if thin or fat:
+                components.append(path)
+    for component in sorted(components, key=lambda path: len(path.parts), reverse=True):
+        if component.is_symlink():
+            raise RuntimeError("Nested code bundle must not be a symlink.")
+        run(["/usr/bin/codesign", "--force", "--sign", signing.identity(), "--timestamp=none",
+             "--preserve-metadata=identifier,entitlements,flags,runtime", str(component)])
+        signature(component)
+
+
+def verify_upgrade_identity(previous: Path, staged: Path) -> None:
+    signing.verify_stable_upgrade(previous, staged)
 
 
 def promote_without_replacing(source: Path, destination: Path) -> None:
@@ -133,7 +166,7 @@ def install_development(products: Path) -> None:
     try:
         lock.mkdir(mode=0o700)
     except FileExistsError as error:
-        raise RuntimeError("Another or interrupted Blocks Dev installation owns the lock.") from error
+        raise RuntimeError("Another or interrupted Blocks installation owns the lock.") from error
     try:
         _install_development_locked(products)
     finally:
@@ -145,18 +178,21 @@ def install_development(products: Path) -> None:
 
 def _install_development_locked(products: Path) -> None:
     if running_local_processes():
-        raise RuntimeError("Quit Blocks Dev and its Helper before replacing this local build; no process was killed.")
-    if DESTINATION.exists():
-        if DESTINATION.is_symlink() or DESTINATION.stat().st_uid != os.getuid():
+        raise RuntimeError("Quit Blocks and the previous Blocks Dev before replacing this local build; no process was killed.")
+    if DESTINATION.exists() and LEGACY_DESTINATION.exists():
+        raise RuntimeError("Both old and new local install paths exist; review them before replacing either.")
+    existing = DESTINATION if DESTINATION.exists() else LEGACY_DESTINATION if LEGACY_DESTINATION.exists() else None
+    if existing is not None:
+        if existing.is_symlink() or existing.stat().st_uid != os.getuid():
             raise RuntimeError("Refusing an unowned or linked existing destination.")
-        info = plistlib.loads((DESTINATION / "Contents/Info.plist").read_bytes())
+        info = plistlib.loads((existing / "Contents/Info.plist").read_bytes())
         if info.get("CFBundleIdentifier") != "app.blocks.dev":
-            raise RuntimeError("Destination is not Blocks Dev; refusing to replace it.")
-        run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(DESTINATION)])
+            raise RuntimeError("Destination has a different Blocks identity; refusing to replace it.")
+        run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(existing)])
     staging_root = HOME / "Library/Caches/BlocksDev/DevelopmentInstall.noindex"
     ensure_real_directory(staging_root)
     stage = Path(tempfile.mkdtemp(prefix=".BlocksDev-install-", dir=staging_root))
-    staged = stage / "Blocks Dev.app"
+    staged = stage / "Blocks.app"
     previous = stage / "previous.app"
     previous_manifest = stage / "previous-manifest.json"
     manifest_stage = stage / "peers.json"
@@ -166,11 +202,12 @@ def _install_development_locked(products: Path) -> None:
     new_manifest_identity = None
     manifest_identity = None
     original_identity = None
-    if DESTINATION.exists():
-        source_stat = DESTINATION.stat()
+    if existing is not None:
+        source_stat = existing.stat()
         original_identity = (source_stat.st_dev, source_stat.st_ino)
+    destination_identity = path_identity(DESTINATION)
     try:
-        run(["/usr/bin/ditto", str(products / "Blocks Dev.app"), str(staged)])
+        run(["/usr/bin/ditto", str(products / "Blocks.app"), str(staged)])
         helper = staged / "Contents/Helpers/Blocks Selection Helper.app"
         helper.parent.mkdir(parents=True, exist_ok=True)
         run(["/usr/bin/ditto", str(products / "Blocks Selection Helper.app"), str(helper)])
@@ -180,8 +217,14 @@ def _install_development_locked(products: Path) -> None:
         wrapper = cli.with_name("blocks-dev")
         wrapper.write_text("#!/bin/sh\nexec " + shlex.quote(str(DESTINATION / "Contents/Resources/CLI/blocks")) + ' "$@"\n')
         wrapper.chmod(0o755)
-        rename_display(staged, "Blocks Dev")
-        rename_display(helper, "Blocks Dev Helper")
+        rename_display(staged, "Blocks")
+        rename_display(helper, "Blocks Helper")
+        # A distinct build receipt makes repeated installations distinguishable
+        # without changing product identity or pretending an unchanged code hash
+        # proves permission retention across an upgrade.
+        update_plist(staged / "Contents/Info.plist", lambda data: data.update(
+            BlocksLocalBuildIdentifier=str(uuid.uuid4())
+        ))
         def helper_info(data):
             for item in data.get("CFBundleURLTypes", []):
                 item["CFBundleURLName"] = "app.blocks.dev.selection-helper"
@@ -194,16 +237,20 @@ def _install_development_locked(products: Path) -> None:
                      MachServices={"app.blocks.dev.action-broker.xpc": True})
         (agents / "app.blocks.dev.action-broker.plist").write_bytes(plistlib.dumps(agent))
         original_agent.unlink()
+        resign_nested_code(staged)
         sign(cli, "app.blocks.dev.cli")
         sign(helper, "app.blocks.dev.selection-helper", EMPTY_ENTITLEMENTS)
+        sign(staged / "Contents/MacOS/BlocksClipboardBroker", "app.blocks.dev.clipboard-broker", EMPTY_ENTITLEMENTS)
         sign(staged / "Contents/MacOS/BlocksActionBroker", "app.blocks.dev.action-broker", EMPTY_ENTITLEMENTS)
         sign(staged, "app.blocks.dev", EMPTY_ENTITLEMENTS)
         run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(staged)])
+        if existing is not None:
+            verify_upgrade_identity(existing, staged)
         # Build the manifest from the verified staged bundle before any host
         # replacement. A manifest failure must leave the old app untouched.
         peers = []
         for role, relative in {
-            "app": "Contents/MacOS/Blocks Dev", "cli": "Contents/Resources/CLI/blocks",
+            "app": "Contents/MacOS/Blocks", "cli": "Contents/Resources/CLI/blocks",
             "broker": "Contents/MacOS/BlocksActionBroker",
             "helper": "Contents/Helpers/Blocks Selection Helper.app/Contents/MacOS/Blocks Selection Helper",
         }.items():
@@ -227,11 +274,11 @@ def _install_development_locked(products: Path) -> None:
                 raise RuntimeError("Existing development manifest is not a private owned regular file.")
             shutil.copy2(MANIFEST, previous_manifest)
         if running_local_processes():
-            raise RuntimeError("Blocks Dev started during staging; refusing replacement.")
-        if path_identity(DESTINATION) != original_identity or path_identity(MANIFEST) != manifest_identity:
+            raise RuntimeError("Blocks started during staging; refusing replacement.")
+        if path_identity(DESTINATION) != destination_identity or path_identity(MANIFEST) != manifest_identity or (existing is not None and path_identity(existing) != original_identity):
             raise RuntimeError("Development app or manifest changed during staging; refusing replacement.")
-        if DESTINATION.exists():
-            promote_without_replacing(DESTINATION, previous)
+        if existing is not None:
+            promote_without_replacing(existing, previous)
         promote_without_replacing(staged, DESTINATION)
         promoted = True
         if path_identity(MANIFEST) != manifest_identity:
@@ -250,8 +297,8 @@ def _install_development_locked(products: Path) -> None:
                 if staged_identity is not None and path_identity(DESTINATION) == staged_identity:
                     promote_without_replacing(DESTINATION, staged)
                     promoted = True  # Retain this new bundle for diagnosis.
-                if previous.exists() and path_identity(DESTINATION) is None:
-                    promote_without_replacing(previous, DESTINATION)
+                if previous.exists() and existing is not None and path_identity(existing) is None:
+                    promote_without_replacing(previous, existing)
                 current_manifest = path_identity(MANIFEST)
                 if new_manifest_identity is not None and current_manifest == new_manifest_identity:
                     if previous_manifest.exists():

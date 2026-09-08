@@ -39,7 +39,7 @@ enum DistributionChannel: String, CaseIterable {
     var localizedName: String {
         switch self {
         case .localDevelopment:
-            "Blocks Dev"
+            "Blocks"
         case .directStable:
             "GitHub Release"
         case .development:

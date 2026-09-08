@@ -1,4 +1,4 @@
-// Certificate-free local builds. Never include local production signing files.
+// Certificate-free local builds keep the app.blocks.dev runtime identity isolated.
 CODE_SIGN_STYLE = Manual
 CODE_SIGN_IDENTITY = -
 DEVELOPMENT_TEAM =
@@ -11,7 +11,7 @@ BLOCKS_DISTRIBUTION_CHANNEL = local-development
 BLOCKS_RELEASE_NAME = local-development
 BLOCKS_SELECTION_HELPER_DOWNLOAD_URL =
 BLOCKS_RELEASE_PAGE_URL =
-BLOCKS_DISPLAY_NAME = Blocks Dev
+BLOCKS_DISPLAY_NAME = Blocks
 BLOCKS_IDENTIFIER_PREFIX = app.blocks.dev
 BLOCKS_SPARKLE_PUBLIC_KEY =
 BLOCKS_UPDATE_FEED_URL =

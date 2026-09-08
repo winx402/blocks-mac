@@ -8,7 +8,7 @@ public enum BlocksRuntimeIdentity {
     public static let isLocalDevelopment = true
     public static let applicationBundleIdentifier = "app.blocks.dev"
     public static let identifierPrefix = "app.blocks.dev"
-    public static let mainExecutableName = "Blocks Dev"
+    public static let mainExecutableName = "Blocks"
     public static let applicationSupportDirectoryName = "Blocks Dev"
     public static let actionBrokerLaunchAgentLabel =
         "app.blocks.dev.action-broker"

@@ -37,6 +37,7 @@ jobs:
           python3 tools/verification/release_pipeline_self_test.py
           python3 tools/verification/application_update_safety_self_test.py
           python3 tools/verification/development_entry_self_test.py
+          python3 tools/verification/development_signing_self_test.py
           python3 tools/verification/local_development_security_self_test.py
           ./script/test_ui_design_system.sh
       - name: Build certificate-free development targets

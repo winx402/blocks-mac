@@ -8152,10 +8152,15 @@ final class TranslationEntryBridgeTests: XCTestCase {
             preferredSize: CGSize(width: 500, height: 420),
             visibleFrame: visible
         )
-        XCTAssertEqual(
-            panel.frame, expected,
-            "capturedVisible=\(visible) resolvedFrame=\(String(describing: panel.screen?.frame)) resolvedVisible=\(String(describing: panel.screen?.visibleFrame)) actual=\(panel.frame) contentLayout=\(panel.contentLayoutRect) scale=\(panel.backingScaleFactor)"
-        )
+        // AppKit aligns native window origins to device pixels. CI's 1x
+        // 1024x677 visible area has a half-point ideal center (188.5 -> 188).
+        // Permit at most half a physical pixel, never a saved-origin offset.
+        XCTAssertGreaterThan(panel.backingScaleFactor, 0)
+        let pixelTolerance = 0.5 / panel.backingScaleFactor
+        let diagnostic = "capturedVisible=\(visible) resolvedVisible=\(String(describing: panel.screen?.visibleFrame)) actual=\(panel.frame) expected=\(expected) scale=\(panel.backingScaleFactor)"
+        XCTAssertEqual(panel.frame.size, expected.size, diagnostic)
+        XCTAssertEqual(panel.frame.minX, expected.minX, accuracy: pixelTolerance, diagnostic)
+        XCTAssertEqual(panel.frame.minY, expected.minY, accuracy: pixelTolerance, diagnostic)
         presenter.close()
     }
 
