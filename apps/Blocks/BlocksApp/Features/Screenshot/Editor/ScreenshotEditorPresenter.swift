@@ -688,6 +688,19 @@ final class ScreenshotEditorPresenter: NSObject, NSWindowDelegate {
             guard let initialFrame = capture.editingContext?.sourceFrame else {
                 throw ScreenshotEditorError.editingContextUnavailable
             }
+            let canvasPresentation = ScreenshotEditorCanvasPresentation.resolve(
+                sourceFrame: initialFrame,
+                captureFrame: capture.sourceRect,
+                displayFrames: capture.editingContext?.screens.map(\.frame) ?? [],
+                isLongImage: store.prefersLongImageViewport
+            )
+            // The image still occupies the full display. Only chrome avoids a
+            // physical notch; do not subtract menu-bar/Dock bands from pixels.
+            let screenInsets = NSScreen.screens.first(where: { $0.frame == initialFrame })?.safeAreaInsets
+            let chromeSafeAreaInsets = EdgeInsets(
+                top: screenInsets?.top ?? 0, leading: screenInsets?.left ?? 0,
+                bottom: screenInsets?.bottom ?? 0, trailing: screenInsets?.right ?? 0
+            )
             let panel = Self.makeHostPanel(frame: initialFrame)
             panel.onEscape = store.handleEscape
             panel.delegate = self
@@ -710,6 +723,8 @@ final class ScreenshotEditorPresenter: NSObject, NSWindowDelegate {
                     store: store,
                     pluginManager: pluginManager,
                     pluginRuntime: pluginRuntime,
+                    canvasPresentation: canvasPresentation,
+                    chromeSafeAreaInsets: chromeSafeAreaInsets,
                     onFirstFrameRendered: { [weak self] in
                         self?.editorCanvasDidDraw(
                             transitionID: transitionID,

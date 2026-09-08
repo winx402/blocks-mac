@@ -209,6 +209,8 @@ final class ClipboardLiveCaptureService {
     private var latestPendingObservation: PendingObservation?
     private var prefilterProvider: PrefilterProvider = { _ in .allow }
     private var onCapture: ((ClipboardLiveCaptureSnapshot) -> Void)?
+    private var onAvailabilityChange: ((Bool) -> Void)?
+    private var captureUnavailable = false
 
     var observedChangeCount: Int? {
         lastObservedChangeCount
@@ -234,6 +236,7 @@ final class ClipboardLiveCaptureService {
 
     func start(
         prefilterProvider: @escaping PrefilterProvider = { _ in .allow },
+        onAvailabilityChange: @escaping (Bool) -> Void = { _ in },
         onCapture: @escaping (ClipboardLiveCaptureSnapshot) -> Void
     ) {
         stopObservationOnly()
@@ -243,6 +246,8 @@ final class ClipboardLiveCaptureService {
         let generation = serviceGeneration
         self.prefilterProvider = prefilterProvider
         self.onCapture = onCapture
+        self.onAvailabilityChange = onAvailabilityChange
+        onAvailabilityChange(captureUnavailable)
         lastObservedChangeCount = nil
         monitoringActivationTask = applicationUpdateGate.task { @MainActor [weak self] in
             guard let self, !Task.isCancelled else { return }
@@ -346,6 +351,10 @@ final class ClipboardLiveCaptureService {
                     return
                 }
                 self.lastObservedChangeCount = result.observedAfterChangeCount
+                if self.captureUnavailable {
+                    self.captureUnavailable = false
+                    self.onAvailabilityChange?(false)
+                }
                 if let deferredChangeCount = self.deferredChangeCount,
                    deferredChangeCount != result.changeCount {
                     self.cancelDeferredResolution()
@@ -365,6 +374,12 @@ final class ClipboardLiveCaptureService {
                 guard !Task.isCancelled, self.serviceGeneration == generation else {
                     return
                 }
+                guard error as? ClipboardBrokerClientError != .requestSuperseded else { return }
+                // A circuit-open response is a degraded service, not a healthy
+                // no-change observation. Report once until it really recovers.
+                guard !self.captureUnavailable else { return }
+                self.captureUnavailable = true
+                self.onAvailabilityChange?(true)
                 clipboardLiveCaptureLogger.error(
                     "stage=observe-failed elapsedMS=\(Self.elapsedMilliseconds(since: startedAt))"
                 )

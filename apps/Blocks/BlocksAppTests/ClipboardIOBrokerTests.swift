@@ -1508,9 +1508,6 @@ final class ClipboardBrokerProcessIntegrationTests: XCTestCase {
         defer { ClipboardBrokerDataTransport.removeRoot() }
 
         let executableProbe = ClipboardBrokerExecutableProbe()
-        let client = ClipboardBrokerClient(executableURLProvider: {
-            executableProbe.resolveUnavailableExecutable()
-        })
         let exactBoundaryRequests = [
             ClipboardBrokerWriteRequest(items: [
                 ClipboardBrokerWriteItem(representations: [
@@ -1575,6 +1572,11 @@ final class ClipboardBrokerProcessIntegrationTests: XCTestCase {
         ]
 
         for request in exactBoundaryRequests {
+            // Each case tests payload admission, not repeated launch-failure
+            // recovery. A shared client correctly trips the startup circuit.
+            let client = ClipboardBrokerClient(executableURLProvider: {
+                executableProbe.resolveUnavailableExecutable()
+            })
             do {
                 _ = try await client.write(request)
                 XCTFail("A structurally valid request should reach executable resolution.")
@@ -1584,17 +1586,17 @@ final class ClipboardBrokerProcessIntegrationTests: XCTestCase {
                     .executableUnavailable
                 )
             }
+            let diagnostics = await client.diagnostics()
+            XCTAssertNil(diagnostics.processIdentifier)
+            XCTAssertEqual(diagnostics.pendingRequestCount, 0)
+            await client.shutdown()
         }
 
-        let diagnostics = await client.diagnostics()
         XCTAssertEqual(
             executableProbe.callCount,
             exactBoundaryRequests.count
         )
-        XCTAssertNil(diagnostics.processIdentifier)
-        XCTAssertEqual(diagnostics.pendingRequestCount, 0)
         XCTAssertTrue(stagedPayloadURLs().isEmpty)
-        await client.shutdown()
     }
 
     func testLargePNGWriteKeepsMainActorResponsiveDerivesTIFFAndCleansStaging() async throws {
@@ -1982,10 +1984,12 @@ final class ClipboardBrokerProcessIntegrationTests: XCTestCase {
         }
 
         let circuitStartedAt = ContinuousClock.now
-        let skipped = try await client.observe(ClipboardBrokerObserveRequest(
-            baselineChangeCount: nil
-        ))
-        XCTAssertEqual(skipped.status, .noChange)
+        do {
+            _ = try await client.observe(ClipboardBrokerObserveRequest(baselineChangeCount: nil))
+            XCTFail("Circuit-open capture must not masquerade as a healthy no-change result.")
+        } catch {
+            XCTAssertEqual(error as? ClipboardBrokerClientError, .temporarilyUnavailable)
+        }
         XCTAssertLessThan(
             circuitStartedAt.duration(to: .now),
             .milliseconds(100)
@@ -1995,6 +1999,56 @@ final class ClipboardBrokerProcessIntegrationTests: XCTestCase {
         XCTAssertNil(diagnostics.processIdentifier)
         XCTAssertEqual(diagnostics.pendingRequestCount, 0)
         await client.shutdown()
+    }
+
+    func testBrokerExitBeforeBaselineOpensCircuitAndDoesNotKeepForking() async throws {
+        let client = ClipboardBrokerClient(
+            executableURLProvider: { URL(fileURLWithPath: "/usr/bin/false") }
+        )
+        addTeardownBlock { await client.shutdown() }
+        for _ in 0..<3 {
+            do {
+                _ = try await client.observe(ClipboardBrokerObserveRequest(baselineChangeCount: nil))
+                XCTFail("The immediately exiting child cannot observe a pasteboard.")
+            } catch {
+                XCTAssertNotNil(error as? ClipboardBrokerClientError)
+            }
+        }
+        let before = await client.diagnostics()
+        XCTAssertTrue(before.circuitIsOpen)
+        for _ in 0..<20 {
+            do {
+                _ = try await client.observe(ClipboardBrokerObserveRequest(baselineChangeCount: nil))
+                XCTFail("A failed capture service must report its unavailable state.")
+            } catch {
+                XCTAssertEqual(error as? ClipboardBrokerClientError, .temporarilyUnavailable)
+            }
+        }
+        let after = await client.diagnostics()
+        XCTAssertEqual(after.generation, before.generation, "Backoff must not fork another child.")
+        XCTAssertNil(after.processIdentifier)
+        XCTAssertEqual(after.pendingRequestCount, 0)
+    }
+
+    func testMissingBrokerExecutableAlsoOpensCircuit() async throws {
+        let client = ClipboardBrokerClient(executableURLProvider: { nil })
+        addTeardownBlock { await client.shutdown() }
+        for _ in 0..<3 {
+            do {
+                _ = try await client.observe(ClipboardBrokerObserveRequest(baselineChangeCount: nil))
+                XCTFail("Missing executable must fail closed.")
+            } catch {
+                XCTAssertEqual(error as? ClipboardBrokerClientError, .executableUnavailable)
+            }
+        }
+        let diagnostics = await client.diagnostics()
+        XCTAssertTrue(diagnostics.circuitIsOpen)
+        do {
+            _ = try await client.baseline()
+            XCTFail("Baseline must not bypass startup backoff.")
+        } catch {
+            XCTAssertEqual(error as? ClipboardBrokerClientError, .temporarilyUnavailable)
+        }
     }
 
     func testParentWatchdogExitsOrphanedBrokerWithinTwoSeconds() async throws {
@@ -2709,6 +2763,27 @@ final class ClipboardPasteboardWriterBrokerTests: XCTestCase {
 
 @MainActor
 final class ClipboardLiveCaptureBackpressureTests: XCTestCase {
+    func testCaptureAvailabilityReportsFailureOnceAndClearsOnlyAfterHealthyObservation() async {
+        let broker = ControlledObservationBroker()
+        let service = ClipboardLiveCaptureService(pollInterval: 60, broker: broker)
+        var availability: [Bool] = []
+        service.start(onAvailabilityChange: { availability.append($0) }, onCapture: { _ in
+            XCTFail("Health observations must not fabricate clipboard records.")
+        })
+        defer { service.stop() }
+        await waitUntil { await broker.observationCount() == 1 }
+        _ = await broker.failNext(.brokerTerminated)
+        await waitUntil { availability == [false, true] }
+        service.pollPasteboard()
+        await waitUntil { await broker.observationCount() == 2 }
+        _ = await broker.failNext(.temporarilyUnavailable)
+        service.pollPasteboard()
+        await waitUntil { await broker.observationCount() == 3 }
+        XCTAssertEqual(availability, [false, true], "Repeated backoff must not spam status notifications.")
+        _ = await broker.completeNext(with: Self.noChangeResult(12))
+        await waitUntil { availability == [false, true, false] }
+    }
+
     func testDeferredObservationPublishesAfterOneSuccessfulResolution() async {
         let broker = ControlledObservationBroker(
             resolutionResults: [
@@ -3569,6 +3644,12 @@ private actor ControlledObservationBroker: ClipboardBrokerServing {
         guard !pending.isEmpty else { return false }
         let next = pending.removeFirst()
         next.continuation.resume(returning: result)
+        return true
+    }
+
+    func failNext(_ error: ClipboardBrokerClientError) -> Bool {
+        guard !pending.isEmpty else { return false }
+        pending.removeFirst().continuation.resume(throwing: error)
         return true
     }
 }

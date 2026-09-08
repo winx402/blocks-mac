@@ -10,6 +10,7 @@ is outside the P5 verification threat model.
 from __future__ import annotations
 
 import codecs
+from contextlib import contextmanager
 import ctypes
 import json
 import math
@@ -49,6 +50,7 @@ _RESIDUAL_HANDOFF_MAX_BYTES = 4096
 # xcodebuild may leave trusted child services to finish their normal shutdown.
 # This extends observation only; any residual that still needs cleanup remains a failure.
 _XCODEBUILD_TERMINATION_GRACE_SECONDS = 2.0
+_LSREGISTER = "/System/Library/Frameworks/CoreServices.framework/Versions/Current/Frameworks/LaunchServices.framework/Versions/Current/Support/lsregister"
 _SUPERVISOR_INTERNAL_STATUSES = frozenset({
     "internal_start_failure",
     "internal_cleanup_failure",
@@ -64,6 +66,7 @@ import ctypes, json, os, re, secrets, signal, subprocess, sys, threading, time
 command = json.loads(sys.argv[1])
 grace = float(sys.argv[2])
 provided_target_token = json.loads(sys.argv[3])
+expected_ibtoold = json.loads(sys.argv[4]) if len(sys.argv) > 4 else None
 cancelled = False
 target_handoff_fd = None
 child = None
@@ -369,6 +372,20 @@ def residual_process_snapshot(rows, child_exit_at):
     for pid, ppid, pgid in processes[:16]:
         process = {'pid': pid, 'ppid': ppid, 'pgid': pgid}
         process.update(metadata.get(pid, {}))
+        if expected_ibtoold is not None:
+            try:
+                before = pid_start_identity(pid)
+                libproc = ctypes.CDLL('/usr/lib/libproc.dylib')
+                proc_pidpath = libproc.proc_pidpath
+                proc_pidpath.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32)
+                proc_pidpath.restype = ctypes.c_int
+                buffer = ctypes.create_string_buffer(4096)
+                length = proc_pidpath(pid, buffer, len(buffer))
+                if 0 < length < len(buffer) and before is not None and pid_start_identity(pid) == before:
+                    if os.path.realpath(os.fsdecode(buffer.value)) == expected_ibtoold:
+                        process['verified_xcode_ibtoold'] = True
+            except (AttributeError, OSError, TypeError, ValueError, ctypes.ArgumentError):
+                pass
         serialized.append(process)
     return {
         'count': len(processes),
@@ -708,7 +725,7 @@ def _parse_residual_process_handoff(payload: bytes) -> dict[str, Any] | None:
     normalized: list[dict[str, int | str | bool]] = []
     for process in processes:
         if not isinstance(process, dict) or not {"pid", "ppid", "pgid"} <= set(process) <= {
-            "pid", "ppid", "pgid", "executable", "executable_name_may_be_truncated", "elapsed_seconds"
+            "pid", "ppid", "pgid", "executable", "executable_name_may_be_truncated", "elapsed_seconds", "verified_xcode_ibtoold"
         }:
             return None
         if any(type(process[name]) is not int or process[name] <= 0 for name in ("pid", "ppid", "pgid")):
@@ -719,6 +736,8 @@ def _parse_residual_process_handoff(payload: bytes) -> dict[str, Any] | None:
         ):
             return None
         if "executable_name_may_be_truncated" in process and process["executable_name_may_be_truncated"] is not True:
+            return None
+        if "verified_xcode_ibtoold" in process and process["verified_xcode_ibtoold"] is not True:
             return None
         if "elapsed_seconds" in process and (
             type(process["elapsed_seconds"]) is not int or process["elapsed_seconds"] < 0
@@ -1333,6 +1352,7 @@ def run_controlled_xcode_test(
 def run_controlled_subprocess(
     command: list[str], *, cwd: Path, timeout: int | float, termination_grace_seconds: float = 0.5,
     _target_token: str | None = None,
+    _verified_ibtoold_path: str | None = None,
 ) -> dict[str, Any]:
     """Run a trusted target with bounded cleanup of retained inherited identity.
 
@@ -1365,7 +1385,7 @@ def run_controlled_subprocess(
         os.set_blocking(timeout_read_fd, False); os.set_blocking(target_read_fd, False)
         launched_command = [
             sys.executable, "-c", _SUPERVISOR_PROGRAM, json.dumps(command),
-            str(termination_grace_seconds), json.dumps(_target_token),
+            str(termination_grace_seconds), json.dumps(_target_token), json.dumps(_verified_ibtoold_path),
         ]
         pass_fds = (timeout_write_fd, target_write_fd)
     else:
@@ -1510,6 +1530,8 @@ def run_controlled_subprocess(
             "stderr": stderr,
             "timed_out": False,
         }
+        if child_returncode is not None:
+            result["child_returncode"] = child_returncode
         if supervisor_status == _SUPERVISOR_STATUS_RESIDUAL:
             process_cleanup: dict[str, Any] = {
                 "status": "target_group_residual_cleaned",
@@ -1616,14 +1638,179 @@ def run_controlled_subprocess(
             except FileNotFoundError: pass
 
 
+def controlled_build_failure(result: dict[str, Any]) -> str:
+    """Do not describe a successful compiler followed by unsafe cleanup as a compile failure."""
+    child_returncode = result.get("child_returncode", result.get("process_cleanup", {}).get("child_returncode"))
+    if result.get("timed_out"):
+        return "controlled build timed out; completion or process cleanup was not verified"
+    if child_returncode == 0:
+        return "xcodebuild succeeded (exit 0), but controlled process cleanup/output verification failed; tests were not started"
+    return "controlled xcodebuild failed (or compiler completion could not be verified)"
+
+
+def _selected_apple_ibtoold() -> str | None:
+    """Optional recovery identity: selected SDK path and Apple signature, never just a name."""
+    try:
+        selected = subprocess.run(["/usr/bin/xcode-select", "-p"], check=True, capture_output=True,
+                                  text=True, timeout=5).stdout.strip()
+        candidate = (Path(selected) / "usr/bin/ibtoold").resolve(strict=True)
+        subprocess.run(["/usr/bin/codesign", "--verify", "-R=anchor apple", str(candidate)],
+                       check=True, capture_output=True, timeout=5)
+        return str(candidate)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def run_controlled_xcode_build(command: list[str], *, cwd: Path, timeout: int | float,
+                               retry_cleaned_ibtoold: bool = False) -> dict[str, Any]:
+    """Keep Xcode's natural shutdown observation separate from the generic 0.5s policy."""
+    if not command or command[0] != "xcodebuild" or command[-1] not in {"build", "build-for-testing"}:
+        raise ValueError("controlled Xcode build requires xcodebuild build or build-for-testing")
+    identity = _selected_apple_ibtoold() if retry_cleaned_ibtoold else None
+    kwargs = {"_verified_ibtoold_path": identity} if identity else {}
+    first = run_controlled_subprocess(command, cwd=cwd, timeout=timeout,
+                                     termination_grace_seconds=_XCODEBUILD_TERMINATION_GRACE_SECONDS, **kwargs)
+    cleanup = first.get("process_cleanup", {})
+    processes = cleanup.get("residual_processes", [])
+    retry_allowed = (
+        retry_cleaned_ibtoold and identity is not None and not first["ok"] and not first["timed_out"]
+        and first.get("child_returncode") == 0 and not first.get("output_diagnostic")
+        and cleanup.get("status") == "target_group_residual_cleaned"
+        and cleanup.get("residual_processes_truncated") is False
+        and cleanup.get("residual_process_count") == len(processes) and bool(processes)
+        and all(process.get("verified_xcode_ibtoold") is True for process in processes)
+    )
+    if not retry_allowed:
+        return first
+    print("WARNING: xcodebuild exited 0 but verified Xcode ibtoold required cleanup; "
+          "retrying this build incrementally once. First attempt: " + json.dumps(cleanup, sort_keys=True), file=sys.stderr)
+    second = run_controlled_subprocess(command, cwd=cwd, timeout=timeout,
+                                      termination_grace_seconds=_XCODEBUILD_TERMINATION_GRACE_SECONDS, **kwargs)
+    return {**second, "incremental_retry": True, "first_attempt": first}
+
+
+_LS_REGISTRATION_ABSENCE_QUERY = r'''
+import Foundation
+import CoreServices
+
+guard CommandLine.arguments.count == 3 else { exit(2) }
+let identifier = CommandLine.arguments[1]
+let target = URL(fileURLWithPath: CommandLine.arguments[2]).standardizedFileURL.resolvingSymlinksInPath().path
+var failure: Unmanaged<CFError>?
+let copied = LSCopyApplicationURLsForBundleIdentifier(identifier as CFString, &failure)
+let error = failure?.takeRetainedValue()
+if let copied {
+    guard error == nil, let urls = copied.takeRetainedValue() as? [URL],
+          urls.allSatisfy({ $0.isFileURL }) else { exit(2) }
+    let found = urls.contains { $0.standardizedFileURL.resolvingSymlinksInPath().path == target }
+    print(found ? "{\"absent\":false}" : "{\"absent\":true}")
+} else {
+    // LSInfo.h specifies this domain/code when no application has this ID.
+    guard let error, CFErrorGetCode(error) == Int(kLSApplicationNotFoundErr),
+          CFErrorGetDomain(error) as String == NSOSStatusErrorDomain else { exit(2) }
+    print("{\"absent\":true}")
+}
+'''
+
+
+def _registration_absence_confirmed(bundle: Path) -> bool:
+    """Read only this product's bundle-ID registrations; never dump the LS database."""
+    info = bundle / "Contents/Info.plist"
+    try:
+        if info.is_symlink() or info.parent.is_symlink() or info.stat().st_size > 1024 * 1024:
+            return False
+        with info.open("rb") as stream:
+            identifier = plistlib.load(stream).get("CFBundleIdentifier")
+        if not isinstance(identifier, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,254}", identifier) is None:
+            return False
+        query = subprocess.run(
+            ["/usr/bin/xcrun", "swift", "-e", _LS_REGISTRATION_ABSENCE_QUERY, identifier, str(bundle)],
+            check=True, capture_output=True, text=True, timeout=15,
+        )
+        result = json.loads(query.stdout)
+        return isinstance(result, dict) and set(result) == {"absent"} and result["absent"] is True
+    except (OSError, ValueError, AttributeError, plistlib.InvalidFileException, subprocess.SubprocessError):
+        return False
+
+
+def _is_idempotent_unregistration(error: subprocess.CalledProcessError, bundle: Path) -> bool:
+    """Only exact -10814 diagnostics plus an independent absence query may pass."""
+    if error.returncode != 1:
+        return False
+    try:
+        output = "\n".join(
+            (value.decode("utf-8") if isinstance(value, bytes) else value).strip()
+            for value in (error.stdout, error.stderr) if value
+        )
+    except (UnicodeDecodeError, AttributeError):
+        return False
+    pattern = rf"failed to scan {re.escape(str(bundle))}: -10814(?:\s+from spotlight)?"
+    return re.fullmatch(pattern, output) is not None and _registration_absence_confirmed(bundle)
+
+
+@contextmanager
+def isolated_build_registration(derived_data: Path, configuration: str, bundle_names: tuple[str, ...]):
+    """Unregister only exact pipeline products, including on build/test failure.
+
+    Apple's LSRegisterURL.xcspec and Swift Build's app postprocessing producer
+    register macOS applications unconditionally. .noindex is not an LS opt-out.
+    Do not guess a disabling setting, scan user applications, or reset LS.
+    """
+    if not derived_data.is_absolute() or configuration not in {"Debug", "DebugTesting", "LocalDevelopment"}:
+        raise ValueError("expected an absolute isolated DerivedData path and known configuration")
+    if any(Path(name).name != name or not name.endswith(".app") for name in bundle_names):
+        raise ValueError("expected direct app product names")
+    products = derived_data / "Build/Products" / configuration
+    bundles = [products / name for name in bundle_names]
+
+    def validate_paths():
+        for bundle in bundles:
+            for path in (bundle, *bundle.parents):
+                if path.is_symlink():
+                    raise RuntimeError(f"Refusing symlink in isolated build product path: {path}")
+            if bundle.exists() and (not bundle.is_dir() or bundle.stat().st_uid != os.getuid()):
+                raise RuntimeError(f"Isolated build product is not a current-user directory: {bundle}")
+
+    validate_paths()
+    primary_error = None
+    try:
+        yield
+    except BaseException as error:
+        primary_error = error
+        raise
+    finally:
+        try:
+            validate_paths()
+            failures = []
+            for bundle in bundles:
+                if bundle.exists():
+                    try:
+                        subprocess.run([_LSREGISTER, "-u", str(bundle)], check=True,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+                    except subprocess.CalledProcessError as error:
+                        if not _is_idempotent_unregistration(error, bundle):
+                            failures.append(str(error))
+                    except (OSError, subprocess.SubprocessError) as error:
+                        failures.append(str(error))
+            if failures:
+                raise RuntimeError("; ".join(failures))
+        except (OSError, RuntimeError, subprocess.SubprocessError) as cleanup_error:
+            message = f"Isolated build Launch Services cleanup failed: {cleanup_error}"
+            if primary_error is None:
+                raise RuntimeError(message) from cleanup_error
+            primary_error.add_note(message)
+            print(message, file=sys.stderr)
+
+
 def run_blocks_no_launch_build(root: Path, timeout: int, gate_name: str) -> dict[str, Any]:
     safe_gate_name = re.sub(r"[^a-z0-9-]+", "-", gate_name.lower()).strip("-") or "gate"
     with tempfile.TemporaryDirectory(prefix=f"blocks-{safe_gate_name}-derived-data-") as derived_data:
-        completed = run_controlled_subprocess([
-            "xcodebuild", "-project", str(root / "apps" / "Blocks" / "Blocks.xcodeproj"), "-scheme", "Blocks",
-            "-configuration", "Debug", "-derivedDataPath", derived_data, "CODE_SIGNING_ALLOWED=NO",
-            "CODE_SIGNING_REQUIRED=NO", "CODE_SIGN_IDENTITY=", "-quiet", "build",
-        ], cwd=root, timeout=timeout, termination_grace_seconds=_XCODEBUILD_TERMINATION_GRACE_SECONDS)
+        with isolated_build_registration(Path(derived_data).resolve(), "Debug", ("Blocks.app", "Blocks Selection Helper.app")):
+            completed = run_controlled_xcode_build([
+                "xcodebuild", "-project", str(root / "apps" / "Blocks" / "Blocks.xcodeproj"), "-scheme", "Blocks",
+                "-configuration", "Debug", "-derivedDataPath", derived_data, "CODE_SIGNING_ALLOWED=NO",
+                "CODE_SIGNING_REQUIRED=NO", "CODE_SIGN_IDENTITY=", "-quiet", "build",
+            ], cwd=root, timeout=timeout)
         if completed["timed_out"]:
             result = {"ok": False, "returncode": completed["returncode"], "stdout": completed["stdout"], "stderr_tail": f"xcodebuild timed out after {timeout}s", "mode": "isolated_xcodebuild_no_launch", "launched_app": False, "killed_app": False, "timed_out": True}
         else:

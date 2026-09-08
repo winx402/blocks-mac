@@ -29,6 +29,15 @@ final class ClipboardNotificationCoordinator {
         )
     }
 
+    func captureUnavailable() {
+        present(
+            level: .warning,
+            titleKey: "clipboard.captureUnavailable.title",
+            detailKey: "clipboard.captureUnavailable.detail",
+            deduplicationKey: "clipboard.capture.unavailable"
+        )
+    }
+
     func repositoryUnavailable() {
         present(
             level: .error,

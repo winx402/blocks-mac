@@ -252,7 +252,7 @@ struct ClipboardPanelHeader: View {
             TextField(L10n.string("clipboard.searchPlaceholder"), text: $query)
                 .textFieldStyle(.plain)
                 .focused(searchFocused)
-                .blocksFont(size: 12)
+                .blocksFont(size: BlocksVisualTokens.Typography.body)
                 .onSubmit(actions.onSubmitSearch)
         }
         .padding(.horizontal, ClipboardPanelToolbarLayout.searchHorizontalPadding)

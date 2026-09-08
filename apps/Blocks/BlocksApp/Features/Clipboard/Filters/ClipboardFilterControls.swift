@@ -14,7 +14,7 @@ struct ClipboardFilterIslandButton: View {
     }
 
     var body: some View {
-        HStack(spacing: 5) {
+        HStack(spacing: ClipboardFilterBarLayout.islandContentSpacing) {
             if showsIcon {
                 Image(systemName: group.systemImage)
                     .font(.system(size: ClipboardFilterBarLayout.islandIconSize, weight: .semibold))
@@ -31,7 +31,7 @@ struct ClipboardFilterIslandButton: View {
             }
         }
         .foregroundStyle(hasActiveFilter ? Color.accentColor.opacity(0.9) : Color.secondary.opacity(0.82))
-        .padding(.horizontal, displayTitle.isEmpty ? 8 : 9)
+        .padding(.horizontal, ClipboardFilterBarLayout.islandHorizontalPadding)
         .padding(.vertical, ClipboardFilterBarLayout.islandVerticalPadding)
         .blocksSurface(
             .interactive,
@@ -119,7 +119,7 @@ struct ClipboardFilterMenuGroup: View {
     }
 
     var body: some View {
-        ZStack(alignment: .trailing) {
+        HStack(spacing: 0) {
             Menu {
                 switch group {
                 case .format:
@@ -166,20 +166,23 @@ struct ClipboardFilterMenuGroup: View {
                     activeTitle: activeTitle,
                     isExpanded: false,
                     hasActiveFilter: hasActiveFilter,
-                    reservesClearSlot: true,
+                    reservesClearSlot: false,
                     showsIcon: showsIcon
                 )
-                .frame(width: fixedWidth, alignment: .leading)
+                .frame(width: fixedWidth - ClipboardFilterBarLayout.clearSlotWidth, alignment: .leading)
             }
             .menuStyle(.borderlessButton)
-            .fixedSize(horizontal: true, vertical: false)
+            .frame(width: fixedWidth - ClipboardFilterBarLayout.clearSlotWidth)
             .accessibilityLabel(accessibilityPresentation.label)
             .accessibilityValue(accessibilityPresentation.value)
             .help(accessibilityPresentation.help)
 
             if hasActiveFilter {
                 ClipboardFilterClearButton(group: group, action: onClearGroup)
-                    .padding(.trailing, 4)
+            } else {
+                Color.clear
+                    .frame(width: ClipboardFilterBarLayout.clearSlotWidth, height: ClipboardFilterBarLayout.clearSlotWidth)
+                    .accessibilityHidden(true)
             }
         }
         .padding(.horizontal, ClipboardFilterBarLayout.filterHitHorizontalPadding)

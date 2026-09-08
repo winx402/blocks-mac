@@ -916,10 +916,22 @@ enum FloatingPanelFrameStore {
         screen: NSScreen? = NSScreen.main,
         height: CGFloat? = nil
     ) -> CGRect {
-        let visibleFrame = visibleFrame(screen: screen)
-        let resolvedHeight = height.map { clipboardBottomHeight(proposedHeight: $0, visibleFrame: visibleFrame) }
-            ?? savedClipboardBottomHeight(defaultHeight: 286, visibleFrame: visibleFrame)
-        return clipboardBottomFrame(visibleFrame: visibleFrame, height: resolvedHeight)
+        let visible = visibleFrame(screen: screen)
+        let bounds = clipboardBottomBounds(screenFrame: screen?.frame ?? visible, visibleFrame: visible)
+        let resolvedHeight = height.map { clipboardBottomHeight(proposedHeight: $0, visibleFrame: bounds) }
+            ?? savedClipboardBottomHeight(defaultHeight: 286, visibleFrame: bounds)
+        return clipboardBottomFrame(visibleFrame: bounds, height: resolvedHeight)
+    }
+
+    static func clipboardBottomBounds(screenFrame: CGRect, visibleFrame: CGRect) -> CGRect {
+        // Bottom is a physical-display anchor, not a Dock avoidance region.
+        // Retain horizontal usable bounds and the menu-bar ceiling only.
+        CGRect(
+            x: visibleFrame.minX,
+            y: screenFrame.minY,
+            width: visibleFrame.width,
+            height: max(0, visibleFrame.maxY - screenFrame.minY)
+        )
     }
 
     static func clipboardBottomFrame(

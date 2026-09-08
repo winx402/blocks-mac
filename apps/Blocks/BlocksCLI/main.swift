@@ -12,14 +12,14 @@ private final class LocalBrokerProbe: @unchecked Sendable {
         lock.lock(); trusted = result; lock.unlock()
         ready.signal()
     }
-    func wait() -> Bool {
-        guard ready.wait(timeout: .now() + 2) == .success else { return false }
+    func wait() -> Bool? {
+        guard ready.wait(timeout: .now() + 2) == .success else { return nil }
         lock.lock(); defer { lock.unlock() }
         return trusted
     }
 }
 
-private func verifyBroker(_ proxy: BlocksActionBrokerClientXPCProtocol, connection: NSXPCConnection) -> Bool {
+private func verifyBroker(_ proxy: BlocksActionBrokerClientXPCProtocol, connection: NSXPCConnection) -> Bool? {
     let probe = LocalBrokerProbe()
     proxy.probe?(withReply: {
         #if BLOCKS_LOCAL_DEVELOPMENT
@@ -782,7 +782,7 @@ func submitToBroker<Payload: Codable, Result: Codable>(
     let requestData = try JSONEncoder().encode(request)
     let connection = NSXPCConnection(machServiceName: BlocksActionBrokerXPC.machServiceName)
     guard let requirement = brokerConnectionRequirement() else {
-        throw ScreenshotCLITransportError.proxyUnavailable
+        throw BlocksCLITransportError.localIdentityUnavailable
     }
     connection.setCodeSigningRequirement(requirement)
     connection.remoteObjectInterface = NSXPCInterface(with: BlocksActionBrokerClientXPCProtocol.self)
@@ -811,11 +811,15 @@ func submitToBroker<Payload: Codable, Result: Codable>(
     } as? BlocksActionBrokerClientXPCProtocol
     guard let proxy else {
         connection.invalidate()
-        throw ScreenshotCLITransportError.proxyUnavailable
+        throw BlocksCLITransportError.proxyUnavailable
     }
-    guard verifyBroker(proxy, connection: connection) else {
+    guard let trustedPeer = verifyBroker(proxy, connection: connection) else {
         connection.invalidate()
-        throw ScreenshotCLITransportError.proxyUnavailable
+        throw BlocksCLITransportError.proxyUnavailable
+    }
+    guard trustedPeer else {
+        connection.invalidate()
+        throw BlocksCLITransportError.untrustedPeer
     }
     proxy.submit(requestData, outputFile: outputFile) { data in
         do {
@@ -886,8 +890,47 @@ private final class BrokerReplyBox<Result: Codable>: @unchecked Sendable {
     }
 }
 
-private enum ScreenshotCLITransportError: Error {
+/// Typed setup failures before a broker terminal response exists. In
+/// particular, a failed identity probe must not be presented as a disabled
+/// integration: it can indicate a rejected or untrusted peer.
+enum BlocksCLITransportError: Error {
     case proxyUnavailable
+    case localIdentityUnavailable
+    case untrustedPeer
+
+    var brokerError: ActionBrokerError {
+        switch self {
+        case .proxyUnavailable:
+            return ActionBrokerError(
+                category: .availability,
+                code: "broker_unavailable",
+                message: "BlocksActionBroker is unavailable. Enable CLI integration in Blocks settings.",
+                retryable: false,
+                details: ["explicit_enable_required": .bool(true)]
+            )
+        case .localIdentityUnavailable:
+            return ActionBrokerError(
+                category: .permission,
+                code: "cli_identity_unavailable",
+                message: "The Blocks CLI signing identity could not be verified.",
+                retryable: false
+            )
+        case .untrustedPeer:
+            return ActionBrokerError(
+                category: .permission,
+                code: "broker_identity_untrusted",
+                message: "The BlocksActionBroker identity could not be verified.",
+                retryable: false
+            )
+        }
+    }
+
+    var exitCode: Int32 {
+        switch self {
+        case .proxyUnavailable: return 5
+        case .localIdentityUnavailable, .untrustedPeer: return 4
+        }
+    }
 }
 
 func executeAction<Payload: Codable, Result: Codable>(
@@ -940,6 +983,15 @@ func executeAction<Payload: Codable, Result: Codable>(
             ),
             resultType: resultType,
             exitCode: 2
+        )
+    } catch let error as BlocksCLITransportError {
+        try? destination?.finish(success: false)
+        emitActionFailure(
+            actionID: actionID,
+            requestID: requestID,
+            error: error.brokerError,
+            resultType: resultType,
+            exitCode: error.exitCode
         )
     } catch {
         try? destination?.finish(success: false)

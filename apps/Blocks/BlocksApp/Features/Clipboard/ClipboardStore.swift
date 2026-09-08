@@ -1001,6 +1001,7 @@ final class ClipboardStore: ObservableObject {
     @Published var pasteAttempt: ClipboardPasteAttempt?
     @Published var floatingSelectedRecordID: String?
     @Published private(set) var repositoryUnavailable = false
+    @Published var captureServiceUnavailable = false
     @Published private(set) var cleanupMutationState: ClipboardCleanupMutationState = .idle
     @Published private(set) var pendingAttachmentCleanupCount = 0
     @Published private(set) var currentSearchResult: ClipboardSearchResultSet = .idle(records: [])

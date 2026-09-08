@@ -3,8 +3,22 @@ import BlocksCore
 import SwiftUI
 
 enum TranslationPanelSourceLayout {
-    static let sourceHeaderHeight =
-        TranslationPanelMetrics.compactIconHitTarget
+    /// A text-only source header follows the system subheadline's natural
+    /// line height. Screenshot OCR additionally exposes a compact action, so
+    /// that variant retains the shared compact-control hit target.
+    static var sourceTextHeaderHeight: CGFloat {
+        NSLayoutManager().defaultLineHeight(
+            for: NSFont.preferredFont(forTextStyle: .subheadline)
+        )
+    }
+
+    static func sourceHeaderHeight(
+        for source: TranslationInputSource
+    ) -> CGFloat {
+        source == .screenshotOCR
+            ? TranslationPanelMetrics.compactIconHitTarget
+            : sourceTextHeaderHeight
+    }
     static let sourceEditorMinimumHeight: CGFloat = 48
     static let sourceEditorDefaultHeight: CGFloat = 72
     static let screenshotEditorDefaultHeight: CGFloat = 96
@@ -53,7 +67,7 @@ enum TranslationPanelSourceLayout {
         for source: TranslationInputSource,
         scrollOffset: CGFloat
     ) -> CGFloat {
-        sourceHeaderHeight
+        sourceHeaderHeight(for: source)
             + sourceEditorSpacing
             + editorHeight(
                 for: source,

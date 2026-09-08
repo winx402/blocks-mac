@@ -104,6 +104,7 @@ enum ClipboardBrokerClientError: Error, Equatable {
     case launchFailed
     case requestTimedOut
     case brokerTerminated
+    case temporarilyUnavailable
     case requestSuperseded
     case requestOversized
     case malformedResponse
@@ -890,12 +891,7 @@ actor ClipboardBrokerClient: ClipboardBrokerServing {
         _ request: ClipboardBrokerObserveRequest
     ) async throws -> ClipboardBrokerObservationResult {
         if let circuitOpenUntil, circuitOpenUntil > Date() {
-            return ClipboardBrokerObservationResult(
-                status: .noChange,
-                changeCount: cachedChangeCount,
-                observedAfterChangeCount: cachedChangeCount,
-                brokerGeneration: generation
-            )
+            throw ClipboardBrokerClientError.temporarilyUnavailable
         }
         self.circuitOpenUntil = nil
 
@@ -1450,7 +1446,14 @@ actor ClipboardBrokerClient: ClipboardBrokerServing {
         let request = ClipboardBrokerRequestEnvelope(command: command)
         let frame = try ClipboardBrokerFrameCodec.frame(request)
         if allowsLaunch {
-            try launchBrokerIfNeeded()
+            do {
+                try launchBrokerIfNeeded()
+            } catch {
+                if error as? ClipboardBrokerClientError != .temporarilyUnavailable {
+                    recordPassiveRestart()
+                }
+                throw error
+            }
         } else {
             guard process?.isRunning == true else {
                 throw ClipboardBrokerClientError.brokerTerminated
@@ -1723,6 +1726,9 @@ actor ClipboardBrokerClient: ClipboardBrokerServing {
                 error: .brokerTerminated,
                 sendsSignal: false
             )
+        }
+        if let circuitOpenUntil, circuitOpenUntil > Date() {
+            throw ClipboardBrokerClientError.temporarilyUnavailable
         }
         guard let executableURL = executableURLProvider(),
               FileManager.default.isExecutableFile(atPath: executableURL.path) else {
@@ -2079,12 +2085,6 @@ actor ClipboardBrokerClient: ClipboardBrokerServing {
               process?.processIdentifier == processIdentifier else {
             return
         }
-        if let passive = pendingRequests.values.first(where: {
-            $0.priority == .passive && $0.operation == .observe
-        }) {
-            poisonedChangeCount = passive.startedChangeCount
-            recordPassiveRestart()
-        }
         terminateBroker(
             reason: shuttingDown ? "shutdown-complete" : "unexpected-exit",
             signal: SIGKILL,
@@ -2108,6 +2108,21 @@ actor ClipboardBrokerClient: ClipboardBrokerServing {
         error: ClipboardBrokerClientError,
         sendsSignal: Bool = true
     ) {
+        // EOF often wins the race against Process.terminationHandler. Count
+        // all unexpected exits at this one generation boundary, including a
+        // child killed before its baseline response, not only observe timeout.
+        let expectedReasons: Set<String> = [
+            "shutdown", "shutdown-complete", "idle-reap", "explicit-preempt",
+            "request-cancelled", "request-timeout",
+        ]
+        if !shuttingDown, process != nil, !expectedReasons.contains(reason) {
+            if let observation = pendingRequests.values.first(where: {
+                $0.priority == .passive && $0.operation == .observe
+            }) {
+                poisonedChangeCount = observation.startedChangeCount
+            }
+            recordPassiveRestart()
+        }
         idleReapTask?.cancel()
         idleReapTask = nil
         removeAllOutstandingPreparedWrites()

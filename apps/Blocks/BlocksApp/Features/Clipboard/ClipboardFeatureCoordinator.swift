@@ -278,6 +278,13 @@ final class ClipboardFeatureCoordinator {
                     screenSharingActive: self.screenSharingClipboardIsActive()
                 )
             },
+            onAvailabilityChange: { [weak self] unavailable in
+                guard let self else { return }
+                self.clipboardStore.captureServiceUnavailable = unavailable
+                if unavailable && !self.clipboardStore.records.isEmpty {
+                    self.notificationCoordinator.captureUnavailable()
+                }
+            },
             onCapture: { [weak self] in self?.ingestLiveCapture($0) }
         )
     }
@@ -364,6 +371,8 @@ final class ClipboardFeatureCoordinator {
             notificationCoordinator.setHostVisible(true)
             if clipboardStore.repositoryUnavailable {
                 notificationCoordinator.repositoryUnavailable()
+            } else if clipboardStore.captureServiceUnavailable && !clipboardStore.records.isEmpty {
+                notificationCoordinator.captureUnavailable()
             }
         case .suppressed:
             notificationCoordinator.setHostVisible(false)

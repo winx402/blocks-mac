@@ -915,7 +915,11 @@ final class AppAppearanceTests: XCTestCase {
         )
         XCTAssertNotNil(view.blocksContentView.superview)
         XCTAssertEqual(view.layer?.cornerRadius, 14)
-        XCTAssertEqual(view.layer?.borderWidth, BlocksVisualTokens.Stroke.width)
+        XCTAssertEqual(
+            view.layer?.borderWidth,
+            view.activeRenderingMode == .liquidGlass
+                ? 0 : BlocksVisualTokens.Stroke.width
+        )
         XCTAssertEqual(view.layer?.shadowOpacity, 0)
     }
 

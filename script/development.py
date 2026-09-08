@@ -55,12 +55,15 @@ def doctor() -> None:
 
 def build() -> Path:
     doctor()
-    for scheme in ("Blocks", "BlocksCLI", "BlocksSelectionHelper"):
-        run(["xcodebuild", "-project", str(ROOT / "apps/Blocks/Blocks.xcodeproj"),
-             "-scheme", scheme, "-configuration", "LocalDevelopment", "-destination",
-             "platform=macOS,arch=arm64", "-derivedDataPath", str(DERIVED),
-             "CODE_SIGN_IDENTITY=-", "DEVELOPMENT_TEAM=", "PROVISIONING_PROFILE_SPECIFIER=",
-             "BLOCKS_MAIN_APP_DEVELOPMENT_PROFILE=", "-quiet", "build"])
+    sys.path.insert(0, str(ROOT / "tools/verification"))
+    from verification_build_helpers import isolated_build_registration
+    with isolated_build_registration(DERIVED, "LocalDevelopment", ("Blocks Dev.app", "Blocks Selection Helper.app")):
+        for scheme in ("Blocks", "BlocksCLI", "BlocksSelectionHelper"):
+            run(["xcodebuild", "-project", str(ROOT / "apps/Blocks/Blocks.xcodeproj"),
+                 "-scheme", scheme, "-configuration", "LocalDevelopment", "-destination",
+                 "platform=macOS,arch=arm64", "-derivedDataPath", str(DERIVED),
+                 "CODE_SIGN_IDENTITY=-", "DEVELOPMENT_TEAM=", "PROVISIONING_PROFILE_SPECIFIER=",
+                 "BLOCKS_MAIN_APP_DEVELOPMENT_PROFILE=", "-quiet", "build"])
     return DERIVED / "Build/Products/LocalDevelopment"
 
 
@@ -279,12 +282,19 @@ def test() -> None:
     # The existing test scheme runs an isolated test host (BLOCKS_UNIT_TESTING).
     # Production-policy tests do not require a signing identity or profile.
     sys.path.insert(0, str(ROOT / "tools/verification"))
-    from verification_build_helpers import run_controlled_subprocess, run_controlled_xcode_test
+    from verification_build_helpers import isolated_build_registration
     derived = DERIVED / "Tests"
-    build_result = run_controlled_subprocess(["xcodebuild", "-project", str(ROOT / "apps/Blocks/Blocks.xcodeproj"), "-scheme", "BlocksAppTests", "-configuration", "DebugTesting", "-destination", "platform=macOS,arch=arm64", "-derivedDataPath", str(derived), "CODE_SIGNING_ALLOWED=NO", "CODE_SIGNING_REQUIRED=NO", "-parallel-testing-enabled", "NO", "build-for-testing"], cwd=ROOT, timeout=1800)
+    with isolated_build_registration(derived, "DebugTesting", ("Blocks.app", "Blocks Selection Helper.app")):
+        result = run_isolated_tests(derived)
+    print("PASS: isolated XCTest completed; " + json.dumps(result.get("process_cleanup", {}), sort_keys=True))
+
+
+def run_isolated_tests(derived: Path) -> dict:
+    from verification_build_helpers import controlled_build_failure, run_controlled_xcode_build, run_controlled_xcode_test
+    build_result = run_controlled_xcode_build(["xcodebuild", "-project", str(ROOT / "apps/Blocks/Blocks.xcodeproj"), "-scheme", "BlocksAppTests", "-configuration", "DebugTesting", "-destination", "platform=macOS,arch=arm64", "-derivedDataPath", str(derived), "CODE_SIGNING_ALLOWED=NO", "CODE_SIGNING_REQUIRED=NO", "-parallel-testing-enabled", "NO", "build-for-testing"], cwd=ROOT, timeout=1800, retry_cleaned_ibtoold=True)
     if not build_result["ok"]:
         print(build_result.get("stdout", ""), file=sys.stderr); print(build_result.get("stderr", ""), file=sys.stderr); print(build_result.get("process_cleanup", {}), file=sys.stderr)
-        raise RuntimeError("controlled build-for-testing failed")
+        raise RuntimeError(controlled_build_failure(build_result))
     runs = list(derived.glob("Build/Products/**/*.xctestrun"))
     if len(runs) != 1: raise RuntimeError("controlled build-for-testing did not produce exactly one xctestrun")
     result = run_controlled_xcode_test(["xcodebuild", "test-without-building", "-xctestrun", str(runs[0]), "-destination", "platform=macOS,arch=arm64", "-parallel-testing-enabled", "NO", "-quiet"], cwd=ROOT, timeout=1800)
@@ -292,7 +302,9 @@ def test() -> None:
         print(result.get("stdout", ""), file=sys.stderr); print(result.get("stderr", ""), file=sys.stderr); print(result.get("process_cleanup", {}), file=sys.stderr)
         raise RuntimeError("controlled test-without-building failed")
     print(result.get("stdout", ""))
-    print("PASS: isolated XCTest completed; " + json.dumps(result.get("process_cleanup", {}), sort_keys=True))
+    if build_result.get("incremental_retry"):
+        print("Build passed after one controlled incremental retry (not a first-attempt pass).")
+    return result
 
 
 def main() -> int:

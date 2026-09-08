@@ -6845,6 +6845,32 @@ final class TranslationEntryBridgeTests: XCTestCase {
     }
 
     func testTranslationPanelSourceLayoutKeepsStableCompactGeometry() {
+        let textHeaderHeight =
+            TranslationPanelSourceLayout.sourceTextHeaderHeight
+
+        XCTAssertLessThan(
+            textHeaderHeight,
+            TranslationPanelMetrics.compactIconHitTarget
+        )
+        for source in [
+            TranslationInputSource.manual,
+            .selection,
+            .clipboardRecord,
+        ] {
+            XCTAssertEqual(
+                TranslationPanelSourceLayout.sourceHeaderHeight(
+                    for: source
+                ),
+                textHeaderHeight
+            )
+        }
+        XCTAssertEqual(
+            TranslationPanelSourceLayout.sourceHeaderHeight(
+                for: .screenshotOCR
+            ),
+            TranslationPanelMetrics.compactIconHitTarget
+        )
+
         for source in [
             TranslationInputSource.manual,
             .selection,
@@ -6925,21 +6951,35 @@ final class TranslationEntryBridgeTests: XCTestCase {
                 for: .manual,
                 scrollOffset: 0
             ),
-            196
+            TranslationPanelMetrics.contentInset
+                + textHeaderHeight
+                + TranslationPanelSourceLayout.sourceEditorSpacing
+                + TranslationPanelSourceLayout.sourceEditorDefaultHeight
+                + TranslationPanelMetrics.sectionSpacing
+                + TranslationPanelSourceLayout.languageBarHeight
+                + TranslationPanelMetrics.sectionSpacing
         )
         XCTAssertEqual(
             TranslationPanelSourceLayout.sourceSectionHeight(
                 for: .manual,
                 scrollOffset: 0
             ),
-            108
+            textHeaderHeight
+                + TranslationPanelSourceLayout.sourceEditorSpacing
+                + TranslationPanelSourceLayout.sourceEditorDefaultHeight
         )
         XCTAssertEqual(
             TranslationPanelSourceLayout.fixedRegionHeight(
                 for: .manual,
                 scrollOffset: 24
             ),
-            172
+            TranslationPanelMetrics.contentInset
+                + textHeaderHeight
+                + TranslationPanelSourceLayout.sourceEditorSpacing
+                + TranslationPanelSourceLayout.sourceEditorMinimumHeight
+                + TranslationPanelMetrics.sectionSpacing
+                + TranslationPanelSourceLayout.languageBarHeight
+                + TranslationPanelMetrics.sectionSpacing
         )
         XCTAssertEqual(
             TranslationPanelSourceLayout.fixedRegionHeight(
@@ -6957,7 +6997,8 @@ final class TranslationEntryBridgeTests: XCTestCase {
             sourceContent: { editorHeight in
                 VStack(spacing: TranslationPanelSourceLayout.sourceEditorSpacing) {
                     Color.clear.frame(
-                        height: TranslationPanelSourceLayout.sourceHeaderHeight
+                        height: TranslationPanelSourceLayout
+                            .sourceHeaderHeight(for: .manual)
                     )
                     TranslationSourceTextEditor(
                         text: "hello",
@@ -7648,6 +7689,11 @@ final class TranslationEntryBridgeTests: XCTestCase {
             preserveTranslationPanelFramePreference()
         defer { restoreFramePreference() }
         let visible = try XCTUnwrap(NSScreen.main?.visibleFrame)
+        let displayIdentifier = try XCTUnwrap(
+            TranslationPanelScreenResolver.displayIdentifier(
+                for: NSScreen.main
+            )
+        )
         let suiteName =
             "TranslationSelectionOriginIsolation.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -7657,7 +7703,19 @@ final class TranslationEntryBridgeTests: XCTestCase {
             )
         }
         let model = TranslationPanelSessionModel(
-            input: TranslationInput(source: .selection, text: ""),
+            input: TranslationInput(
+                source: .selection,
+                text: "",
+                context: TranslationInputContext(
+                    displayIdentifier: displayIdentifier,
+                    anchor: TranslationInputAnchor(
+                        x: visible.midX,
+                        y: visible.midY,
+                        width: 1,
+                        height: 1
+                    )
+                )
+            ),
             direction: TranslationLanguageDirection(
                 target: TranslationLanguageTag("zh-Hans")!
             ),
@@ -7934,7 +7992,7 @@ final class TranslationEntryBridgeTests: XCTestCase {
         settleTranslationAppKitFixture()
     }
 
-    func testTranslationNotificationUsesSeparateNonKeyChildPanel()
+    func testTranslationNotificationUsesIndependentNonKeyPanel()
         throws
     {
         let suiteName =
@@ -7977,10 +8035,21 @@ final class TranslationEntryBridgeTests: XCTestCase {
         XCTAssertEqual(contentPanel.frame, originalFrame)
         XCTAssertTrue(notificationPanel.isVisible)
         XCTAssertFalse(notificationPanel.canBecomeKey)
-        XCTAssertTrue(notificationPanel.parent === contentPanel)
+        XCTAssertNil(notificationPanel.parent)
+        XCTAssertFalse(notificationPanel.canBecomeMain)
         XCTAssertFalse(notificationPanel.frame.intersects(originalFrame))
+        let notificationFrame = notificationPanel.frame
+        contentPanel.setFrameOrigin(
+            CGPoint(x: originalFrame.minX + 24, y: originalFrame.minY - 24)
+        )
+        XCTAssertEqual(notificationPanel.frame, notificationFrame)
+        let suspension = try XCTUnwrap(presenter.suspendForCapture())
+        XCTAssertFalse(notificationPanel.isVisible)
+        presenter.resumeAfterCapture(suspension)
         presenter.close()
         settleTranslationAppKitFixture()
+        XCTAssertFalse(notificationPanel.isVisible)
+        XCTAssertNil(presenter.notificationStateForTesting.current)
     }
 
     func testTranslationPanelRestoresSavedSizeAndRepositionsAcrossScreenOrigin() throws {
@@ -8032,6 +8101,11 @@ final class TranslationEntryBridgeTests: XCTestCase {
         let restoreFramePreference = preserveTranslationPanelFramePreference()
         defer { restoreFramePreference() }
         let visible = try XCTUnwrap(NSScreen.main?.visibleFrame)
+        let displayIdentifier = try XCTUnwrap(
+            TranslationPanelScreenResolver.displayIdentifier(
+                for: NSScreen.main
+            )
+        )
         let savedOrigin = CGPoint(
             x: visible.minX + 48,
             y: visible.minY + 52
@@ -8048,7 +8122,19 @@ final class TranslationEntryBridgeTests: XCTestCase {
             suiteName: "TranslationPanelOriginTests.\(UUID().uuidString)"
         )!
         let model = TranslationPanelSessionModel(
-            input: TranslationInput(source: .manual, text: ""),
+            input: TranslationInput(
+                source: .manual,
+                text: "",
+                context: TranslationInputContext(
+                    displayIdentifier: displayIdentifier,
+                    anchor: TranslationInputAnchor(
+                        x: visible.midX,
+                        y: visible.midY,
+                        width: 1,
+                        height: 1
+                    )
+                )
+            ),
             direction: TranslationLanguageDirection(
                 target: TranslationLanguageTag("zh-Hans")!
             ),

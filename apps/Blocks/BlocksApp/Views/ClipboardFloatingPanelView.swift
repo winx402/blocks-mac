@@ -300,7 +300,14 @@ struct ClipboardFloatingPanelView: View {
     }
 
     private var emptyStatePresentation: ClipboardSearchStatusPresentation {
-        ClipboardSearchCoordinator.presentation(
+        if clipboardStore.captureServiceUnavailable && !clipboardStore.repositoryUnavailable {
+            return ClipboardSearchStatusPresentation(
+                title: L10n.string("clipboard.captureUnavailable.title"),
+                detail: L10n.string("clipboard.captureUnavailable.detail"),
+                systemImage: "exclamationmark.triangle"
+            )
+        }
+        return ClipboardSearchCoordinator.presentation(
             for: searchResult,
             repositoryUnavailable: clipboardStore.repositoryUnavailable,
             recordsAreEmpty: clipboardStore.records.isEmpty

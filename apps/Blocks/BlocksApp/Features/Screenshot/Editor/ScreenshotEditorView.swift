@@ -41,7 +41,6 @@ private enum ScreenshotEditorStatusChipID: Hashable {
 }
 
 struct ScreenshotEditorStatusBar: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let elements: [ScreenshotElement]
     let selectedElementID: UUID?
     let isRoundedOutput: Bool
@@ -51,118 +50,48 @@ struct ScreenshotEditorStatusBar: View {
     let onToggleRounded: () -> Void
     let onSelectElement: (UUID) -> Void
     let onDeleteElement: (UUID, UUID?) -> Void
-    let onContentWidthChange: (CGFloat) -> Void
     var pluginContent: AnyView? = nil
 
-    private let leadingAnchorID = "screenshot-status-leading"
-    private let trailingAnchorID = "screenshot-status-trailing"
-    private let coordinateSpace = "screenshot-status-scroll"
-    @State private var contentFrame: CGRect = .zero
     @FocusState private var focusedChip: ScreenshotEditorStatusChipID?
 
     var body: some View {
-        ScrollViewReader { proxy in
-            GeometryReader { geometry in
-                let canScrollBackward = contentFrame != .zero && contentFrame.minX < -1
-                let canScrollForward = contentFrame != .zero && contentFrame.maxX > geometry.size.width + 1
-                ZStack {
-                    ScrollView(.horizontal) {
-                        HStack(spacing: ScreenshotEditorChromeMetrics.statusChipSpacing) {
-                            Color.clear.frame(width: 0, height: 1).id(leadingAnchorID)
-                            statusButton(
-                                id: .size,
-                                systemImage: "arrow.up.left.and.arrow.down.right",
-                                title: L10n.string("screenshot.editor.status.size"),
-                                isSelected: isSizePanelPresented,
-                                action: { isSizePanelPresented = true }
-                            )
-                            .popover(isPresented: $isSizePanelPresented, arrowEdge: .top) {
-                                sizePanel
-                            }
-                            statusButton(
-                                id: .cornerRadius,
-                                systemImage: "rectangle.roundedtop",
-                                title: L10n.string("screenshot.editor.cornerRadius"),
-                                isSelected: isRoundedOutput,
-                                accessibilityValue: L10n.string(
-                                    isRoundedOutput
-                                        ? "screenshot.editor.status.enabled"
-                                        : "screenshot.editor.status.disabled"
-                                ),
-                                action: onToggleRounded
-                            )
-                            ForEach(elements) { element in
-                                statusButton(
-                                    id: .element(element.id),
-                                    systemImage: element.kind.tool.toolbarItemID.systemImage,
-                                    title: ScreenshotEditorStatusBarModel.title(for: element),
-                                    isSelected: selectedElementID == element.id,
-                                    action: { onSelectElement(element.id) }
-                                )
-                            }
-                            if let pluginContent {
-                                pluginContent
-                            }
-                            Color.clear.frame(width: 0, height: 1).id(trailingAnchorID)
-                        }
-                        .padding(.horizontal, ScreenshotEditorChromeMetrics.statusBarPadding)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .background {
-                            GeometryReader { contentProxy in
-                                Color.clear.preference(
-                                    key: ScreenshotStatusContentFramePreferenceKey.self,
-                                    value: contentProxy.frame(in: .named(coordinateSpace))
-                                )
-                            }
-                        }
-                    }
-                    .coordinateSpace(name: coordinateSpace)
-                    .scrollIndicators(.hidden)
-                    .mask {
-                        ScreenshotPropertyEdgeMask(
-                            fadesLeadingEdge: canScrollBackward,
-                            fadesTrailingEdge: canScrollForward
-                        )
-                    }
-
-                    HStack(spacing: 0) {
-                        if canScrollBackward {
-                            overflowButton(systemImage: "chevron.backward") {
-                                withAnimation(BlocksMotionRole.hoverFocus.animation(reduceMotion: reduceMotion)) {
-                                    proxy.scrollTo(leadingAnchorID, anchor: .leading)
-                                }
-                            }
-                        }
-                        Spacer(minLength: 0)
-                        if canScrollForward {
-                            overflowButton(systemImage: "chevron.forward") {
-                                withAnimation(BlocksMotionRole.hoverFocus.animation(reduceMotion: reduceMotion)) {
-                                    proxy.scrollTo(trailingAnchorID, anchor: .trailing)
-                                }
-                            }
-                        }
-                    }
+        ScreenshotChromeContentLayout(maximumWidth: width, height: ScreenshotEditorChromeMetrics.statusBarHeight) {
+            ViewThatFits(in: .horizontal) {
+                chips.fixedSize(horizontal: true, vertical: false)
+                ScreenshotChromeOverflowRow(revealID: selectedElementID.map { AnyHashable(ScreenshotEditorStatusChipID.element($0)) }) {
+                    chips
                 }
-                .onPreferenceChange(ScreenshotStatusContentFramePreferenceKey.self) {
-                    contentFrame = $0
-                    onContentWidthChange($0.width)
-                }
-                .onChange(of: selectedElementID) { _, id in
-                    guard let id else { return }
-                    withAnimation(BlocksMotionRole.hoverFocus.animation(reduceMotion: reduceMotion)) {
-                        proxy.scrollTo(ScreenshotEditorStatusChipID.element(id), anchor: .center)
-                    }
-                }
-                .onChange(of: isSizePanelPresented) { wasPresented, isPresented in
-                    guard wasPresented, !isPresented else { return }
-                    focusedChip = .size
-                }
-                .onDeleteCommand(perform: deleteFocusedElement)
             }
         }
-        .frame(width: width, height: ScreenshotEditorChromeMetrics.statusBarHeight)
         .blocksSurface(.panel, cornerRadius: BlocksVisualTokens.CornerRadius.section)
+        .onChange(of: isSizePanelPresented) { wasPresented, isPresented in
+            guard wasPresented, !isPresented else { return }
+            focusedChip = .size
+        }
+        .onDeleteCommand(perform: deleteFocusedElement)
         .accessibilityElement(children: .contain)
+    }
+
+    private var chips: some View {
+        HStack(spacing: ScreenshotEditorChromeMetrics.statusChipSpacing) {
+            statusButton(id: .size, systemImage: "arrow.up.left.and.arrow.down.right",
+                         title: L10n.string("screenshot.editor.status.size"), isSelected: isSizePanelPresented,
+                         action: { isSizePanelPresented = true })
+                .popover(isPresented: $isSizePanelPresented, arrowEdge: .top) { sizePanel }
+            statusButton(id: .cornerRadius, systemImage: "rectangle.roundedtop",
+                         title: L10n.string("screenshot.editor.cornerRadius"), isSelected: isRoundedOutput,
+                         accessibilityValue: L10n.string(isRoundedOutput ? "screenshot.editor.status.enabled" : "screenshot.editor.status.disabled"),
+                         action: onToggleRounded)
+            ForEach(elements) { element in
+                statusButton(id: .element(element.id), systemImage: element.kind.tool.toolbarItemID.systemImage,
+                             title: ScreenshotEditorStatusBarModel.title(for: element),
+                             isSelected: selectedElementID == element.id,
+                             action: { onSelectElement(element.id) })
+            }
+            pluginContent
+        }
+        .padding(.horizontal, ScreenshotEditorChromeMetrics.statusBarPadding)
+        .fixedSize(horizontal: true, vertical: true)
     }
 
     private func statusButton(
@@ -184,6 +113,7 @@ struct ScreenshotEditorStatusBar: View {
             action()
         }
         .focused($focusedChip, equals: id)
+        .fixedSize(horizontal: true, vertical: true)
         .id(id)
         .blocksImmediateTooltip(title)
         .accessibilityValue(accessibilityValue ?? "")
@@ -201,25 +131,48 @@ struct ScreenshotEditorStatusBar: View {
         }
     }
 
-    private func overflowButton(systemImage: String, action: @escaping () -> Void) -> some View {
-        BlocksCompactIconButton(
-            systemImage: systemImage,
-            label: L10n.string(
-                systemImage == "chevron.backward"
-                    ? "screenshot.editor.properties.scrollBackward"
-                    : "screenshot.editor.properties.scrollForward"
-            ),
-            density: .micro,
-            action: action
-        )
-        .frame(width: 30, height: ScreenshotEditorChromeMetrics.statusBarHeight)
-    }
 }
 
-private struct ScreenshotStatusContentFramePreferenceKey: PreferenceKey {
-    static var defaultValue: CGRect = .zero
-    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
-        value = nextValue()
+/// Overflow controls occupy their own columns, never cover or fade a chip.
+/// The natural-content branch is selected synchronously by ViewThatFits.
+private struct ScreenshotChromeOverflowRow<Content: View>: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var revealID: AnyHashable? = nil
+    @ViewBuilder let content: () -> Content
+    private let leadingID = "screenshot-chrome-leading"
+    private let trailingID = "screenshot-chrome-trailing"
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            HStack(spacing: 0) {
+                scrollButton(forward: false) { proxy.scrollTo(leadingID, anchor: .leading) }
+                ScrollView(.horizontal) {
+                    HStack(spacing: 0) {
+                        Color.clear.frame(width: 0, height: 1).id(leadingID)
+                        content().fixedSize(horizontal: true, vertical: false)
+                        Color.clear.frame(width: 0, height: 1).id(trailingID)
+                    }
+                }
+                .scrollIndicators(.hidden)
+                scrollButton(forward: true) { proxy.scrollTo(trailingID, anchor: .trailing) }
+            }
+            .onChange(of: revealID) { _, id in
+                guard let id else { return }
+                withAnimation(BlocksMotionRole.hoverFocus.animation(reduceMotion: reduceMotion)) {
+                    proxy.scrollTo(id, anchor: .center)
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    private func scrollButton(forward: Bool, action: @escaping () -> Void) -> some View {
+        BlocksCompactIconButton(
+            systemImage: forward ? "chevron.forward" : "chevron.backward",
+            label: L10n.string(forward ? "screenshot.editor.properties.scrollForward" : "screenshot.editor.properties.scrollBackward"),
+            density: .micro, action: action
+        )
+        .fixedSize()
     }
 }
 
@@ -227,6 +180,8 @@ struct ScreenshotEditorHostView: View {
     let store: ScreenshotEditorStore
     let pluginManager: BlocksNativePluginManager?
     let pluginRuntime: BlocksPluginRuntimeCoordinator?
+    var canvasPresentation: ScreenshotEditorCanvasPresentation = .cropSurround
+    var chromeSafeAreaInsets = EdgeInsets()
     let onFirstFrameRendered: () -> Void
 
     var body: some View {
@@ -234,6 +189,8 @@ struct ScreenshotEditorHostView: View {
             store: store,
             pluginManager: pluginManager,
             pluginRuntime: pluginRuntime,
+            canvasPresentation: canvasPresentation,
+            chromeSafeAreaInsets: chromeSafeAreaInsets,
             onFirstFrameRendered: onFirstFrameRendered
         )
             .blocksImmediateTooltipHost()
@@ -302,22 +259,27 @@ struct ScreenshotUnifiedEditorView: View {
     @ObservedObject var store: ScreenshotEditorStore
     let pluginManager: BlocksNativePluginManager?
     let pluginRuntime: BlocksPluginRuntimeCoordinator?
+    let canvasPresentation: ScreenshotEditorCanvasPresentation
+    let chromeSafeAreaInsets: EdgeInsets
     let onFirstFrameRendered: () -> Void
     @StateObject private var aspectControlModel: ScreenshotAspectControlModel
     @State private var textCommitRequestID = 0
     @State private var pendingCanvasAction: ScreenshotEditorAction?
     @State private var isSizePanelPresented = false
-    @State private var measuredStatusContentWidth: CGFloat = 0
 
     init(
         store: ScreenshotEditorStore,
         pluginManager: BlocksNativePluginManager? = nil,
         pluginRuntime: BlocksPluginRuntimeCoordinator? = nil,
+        canvasPresentation: ScreenshotEditorCanvasPresentation = .cropSurround,
+        chromeSafeAreaInsets: EdgeInsets = EdgeInsets(),
         onFirstFrameRendered: @escaping () -> Void = {}
     ) {
         self.store = store
         self.pluginManager = pluginManager
         self.pluginRuntime = pluginRuntime
+        self.canvasPresentation = canvasPresentation
+        self.chromeSafeAreaInsets = chromeSafeAreaInsets
         self.onFirstFrameRendered = onFirstFrameRendered
         _aspectControlModel = StateObject(wrappedValue: ScreenshotAspectControlModel(
             selection: ScreenshotAspectSelection(
@@ -334,34 +296,35 @@ struct ScreenshotUnifiedEditorView: View {
             let statusElements = ScreenshotEditorStatusBarModel.visibleElements(
                 in: store.document.presentedSnapshot
             )
-            let estimatedStatusContentWidth = ScreenshotEditorStatusBarLayout
-                .estimatedContentWidth(elements: statusElements)
-            let statusWidth = ScreenshotEditorStatusBarLayout.resolvedWidth(
-                measuredContentWidth: measuredStatusContentWidth,
-                estimatedContentWidth: estimatedStatusContentWidth,
-                maximumWidth: ScreenshotEditorChromeMetrics.maximumWidth(in: proxy.size.width)
-            )
+            let horizontalSafeInset = canvasPresentation == .displayOverlay
+                ? chromeSafeAreaInsets.leading + chromeSafeAreaInsets.trailing : 0
+            let maximumChromeWidth = ScreenshotEditorChromeMetrics.maximumWidth(in: proxy.size.width - horizontalSafeInset)
             let frames = ScreenshotEditorCropChromeLayout.resolve(
                 availableSize: proxy.size,
                 sourceRect: store.sourceBounds,
                 cropRect: store.cropRect,
                 zoomScale: store.viewport.zoomScale,
                 panOffset: store.viewport.panOffset,
-                statusWidth: statusWidth,
-                toolbarWidth: layout.width
+                statusWidth: maximumChromeWidth,
+                toolbarWidth: maximumChromeWidth,
+                presentation: canvasPresentation,
+                safeAreaInsets: chromeSafeAreaInsets
             )
             ZStack(alignment: .topLeading) {
                 Color(nsColor: .windowBackgroundColor)
                     .ignoresSafeArea()
 
+                ScreenshotEditorOverlayLayout(
+                    availableSize: proxy.size, sourceRect: store.sourceBounds, cropRect: store.cropRect,
+                    zoomScale: store.viewport.zoomScale, panOffset: store.viewport.panOffset,
+                    presentation: canvasPresentation, safeAreaInsets: chromeSafeAreaInsets
+                ) {
                 canvas
-                    .frame(width: frames.canvas.width, height: frames.canvas.height)
-                    .position(x: frames.canvas.midX, y: frames.canvas.midY)
                 ScreenshotEditorStatusBar(
                     elements: statusElements,
                     selectedElementID: store.selectedElementID,
                     isRoundedOutput: store.isRoundedOutput,
-                    width: frames.status.width,
+                    width: maximumChromeWidth,
                     isSizePanelPresented: $isSizePanelPresented,
                     sizePanel: AnyView(ScreenshotAspectRatioCapturePopover(
                         selection: ScreenshotAspectSelection(
@@ -378,17 +341,13 @@ struct ScreenshotUnifiedEditorView: View {
                     onDeleteElement: { id, nextID in
                         store.deleteElement(id, selecting: nextID)
                     },
-                    onContentWidthChange: updateMeasuredStatusContentWidth,
                     pluginContent: AnyView(screenshotPluginSlot(
                         .screenshotStatusItem,
                         context: screenshotPluginContext
                     ))
                 )
-                .position(x: frames.status.midX, y: frames.status.midY)
-                .blocksAnimation(.reflow, value: statusElements.map(\.id))
-
-                bottomToolbarContainer(layout: layout)
-                    .position(x: frames.toolbar.midX, y: frames.toolbar.midY)
+                bottomToolbarContainer(layout: layout, maximumWidth: maximumChromeWidth)
+                }
 
                 if let panelFrame = manualOCRPanelFrame(in: proxy.size, toolbarFrame: frames.toolbar) {
                     manualOCRResultPanel
@@ -518,13 +477,8 @@ struct ScreenshotUnifiedEditorView: View {
         )
     }
 
-    private func updateMeasuredStatusContentWidth(_ width: CGFloat) {
-        guard width > 0, abs(measuredStatusContentWidth - width) > 0.5 else { return }
-        measuredStatusContentWidth = width
-    }
-
-    private func bottomToolbarContainer(layout: ScreenshotToolbarLayoutResolution) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
+    private func bottomToolbarContainer(layout: ScreenshotToolbarLayoutResolution, maximumWidth: CGFloat) -> some View {
+        ScreenshotEditorToolbarPanelLayout(maximumWidth: maximumWidth) {
             ScreenshotUnifiedEditorToolbar(
                 state: store.toolbarState,
                 presentation: layout.presentation,
@@ -545,12 +499,11 @@ struct ScreenshotUnifiedEditorView: View {
                 onMoreToolsExit: store.requestMoreToolsTriggerFocus,
                 onCanvasAction: requestCanvasAction
             )
-
-            Divider().opacity(0.5)
+            .blocksSurface(.panel, cornerRadius: BlocksVisualTokens.CornerRadius.section)
             ScreenshotExpandedPropertiesRow(
                 store: store,
                 aspectControlModel: aspectControlModel,
-                maximumWidth: layout.width,
+                maximumWidth: maximumWidth,
                 pluginContent: AnyView(screenshotPluginSlot(
                     .screenshotInspectorSection,
                     context: screenshotPluginContext,
@@ -558,13 +511,8 @@ struct ScreenshotUnifiedEditorView: View {
                     requiredDataPermission: .screenshotDocument
                 ))
             )
+            .blocksSurface(.panel, cornerRadius: BlocksVisualTokens.CornerRadius.section)
         }
-        .frame(
-            width: layout.width,
-            height: ScreenshotEditorChromeMetrics.bottomToolbarHeight,
-            alignment: .leading
-        )
-        .blocksSurface(.panel, cornerRadius: BlocksVisualTokens.CornerRadius.section)
         .onHover { hovering in
             if hovering { NSCursor.arrow.set() }
         }
@@ -702,7 +650,7 @@ struct ScreenshotToolbarLayoutResolution: Equatable {
     var requiresQuickToolScrolling: Bool { intrinsicWidth > width + 1 }
 }
 
-private struct ScreenshotUnifiedEditorToolbar: View {
+struct ScreenshotUnifiedEditorToolbar: View {
     let state: ScreenshotEditorToolbarState
     let presentation: ScreenshotToolbarPresentation
     let pluginToolContent: AnyView?
@@ -713,6 +661,25 @@ private struct ScreenshotUnifiedEditorToolbar: View {
     let onCanvasAction: (ScreenshotEditorAction) -> Void
 
     var body: some View {
+        ViewThatFits(in: .horizontal) {
+            expandedContent.fixedSize(horizontal: true, vertical: false)
+            compactContent
+        }
+        .buttonStyle(.borderless)
+        .padding(.horizontal, BlocksVisualTokens.Spacing.sm)
+        .frame(height: ScreenshotDesignTokens.toolbarMainHeight)
+        .onChange(of: state.activeToolbarItemID) { _, _ in
+            moreToolsPresentation.handle(.toolbarAction)
+        }
+        .onChange(of: presentation.overflowTools) { _, tools in
+            moreToolsPresentation.handle(.toolsChanged(hasOverflow: !tools.isEmpty))
+        }
+        .onDisappear {
+            moreToolsPresentation.handle(.disappear)
+        }
+    }
+
+    private var expandedContent: some View {
         HStack(spacing: BlocksVisualTokens.Spacing.sm) {
             BlocksCompactControlGroup {
                 ScreenshotToolbarIconButton(
@@ -726,7 +693,7 @@ private struct ScreenshotUnifiedEditorToolbar: View {
                 }
                 pluginToolContent
             }
-            .layoutPriority(1)
+            .fixedSize(horizontal: true, vertical: false)
 
             toolCluster
 
@@ -744,7 +711,7 @@ private struct ScreenshotUnifiedEditorToolbar: View {
                     action: { dispatch(.redo) }
                 )
             }
-            .layoutPriority(1)
+            .fixedSize(horizontal: true, vertical: false)
 
             BlocksCompactControlGroup {
                 ScreenshotToolbarIconButton(
@@ -777,19 +744,53 @@ private struct ScreenshotUnifiedEditorToolbar: View {
                 )
                 pluginOutputContent
             }
-            .layoutPriority(1)
+            .fixedSize(horizontal: true, vertical: false)
         }
-        .buttonStyle(.borderless)
-        .padding(.horizontal, BlocksVisualTokens.Spacing.sm)
-        .frame(height: ScreenshotDesignTokens.toolbarMainHeight)
-        .onChange(of: state.activeToolbarItemID) { _, _ in
-            moreToolsPresentation.handle(.toolbarAction)
-        }
-        .onChange(of: presentation.overflowTools) { _, tools in
-            moreToolsPresentation.handle(.toolsChanged(hasOverflow: !tools.isEmpty))
-        }
-        .onDisappear {
-            moreToolsPresentation.handle(.disappear)
+    }
+
+    private var compactContent: some View {
+        HStack(spacing: BlocksVisualTokens.Spacing.sm) {
+            BlocksCompactControlGroup {
+                ScreenshotToolbarIconButton(systemImage: "xmark", label: L10n.string("common.close"),
+                                            emphasis: .destructive, action: { dispatch(.close) })
+                ScreenshotEditorToolButton(item: .select, selectedItem: state.activeToolbarItemID) {
+                    dispatch(.selectToolbarItem($0))
+                }
+            }
+            .fixedSize(horizontal: true, vertical: false)
+            ScreenshotChromeOverflowRow(revealID: AnyHashable(state.activeToolbarItemID)) {
+                HStack(spacing: BlocksVisualTokens.Spacing.sm) {
+                    pluginToolContent
+                    toolCluster
+                    pluginOutputContent
+                }
+            }
+            .frame(minWidth: BlocksVisualTokens.Control.minimumHitTarget)
+            BlocksCompactControlGroup {
+                Menu {
+                    Button(L10n.string("screenshot.editor.undo"), systemImage: "arrow.uturn.backward") { dispatch(.undo) }
+                        .disabled(!state.canUndo)
+                    Button(L10n.string("screenshot.editor.redo"), systemImage: "arrow.uturn.forward") { dispatch(.redo) }
+                        .disabled(!state.canRedo)
+                    Divider()
+                    Button(L10n.string("screenshot.result.pin"), systemImage: "pin.fill") { dispatch(.pin) }
+                        .disabled(state.isOutputPending)
+                    Button(L10n.string("screenshot.result.saveAs"), systemImage: "square.and.arrow.down") { dispatch(.save) }
+                        .disabled(state.isOutputPending)
+                    Button(L10n.string("screenshot.result.retake"), systemImage: "camera.rotate") { dispatch(.retake) }
+                        .disabled(state.isOutputPending)
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .frame(width: BlocksVisualTokens.Control.minimumHitTarget, height: BlocksVisualTokens.Control.minimumHitTarget)
+                }
+                .menuIndicator(.hidden)
+                .accessibilityLabel(L10n.string("screenshot.editor.moreActions"))
+                .blocksImmediateTooltip(L10n.string("screenshot.editor.moreActions"))
+                ScreenshotToolbarIconButton(systemImage: "checkmark", label: L10n.string("screenshot.editor.done"),
+                                            isEnabled: !state.isOutputPending, isLoading: state.currentOutputCommand == .complete,
+                                            emphasis: .accent, action: { dispatch(.complete) })
+            }
+            .fixedSize(horizontal: true, vertical: false)
         }
     }
 
@@ -797,15 +798,12 @@ private struct ScreenshotUnifiedEditorToolbar: View {
     private var toolCluster: some View {
         if !presentation.visibleQuickTools.isEmpty || !presentation.overflowTools.isEmpty {
             BlocksCompactControlGroup {
-                ScreenshotEditorToolStrip(
-                    tools: presentation.visibleQuickTools,
-                    selectedItem: state.activeToolbarItemID,
-                    popoverItem: nil,
-                    isPopoverPresented: nil,
-                    popoverContent: nil,
-                    popoverFocusRequestID: nil,
-                    onSelect: { dispatch(action(for: $0)) }
-                )
+                ForEach(presentation.visibleQuickTools, id: \.id) { item in
+                    ScreenshotEditorToolButton(item: item, selectedItem: state.activeToolbarItemID) {
+                        dispatch(action(for: $0))
+                    }
+                    .id(item)
+                }
                 if !presentation.overflowTools.isEmpty {
                     ScreenshotMoreToolsTriggerButton(
                         systemImage: presentation.activeOverflowTool?.systemImage ?? "ellipsis",
@@ -837,8 +835,7 @@ private struct ScreenshotUnifiedEditorToolbar: View {
                     }
                 }
             }
-            .frame(maxWidth: .infinity)
-            .layoutPriority(0)
+            .fixedSize(horizontal: true, vertical: false)
         }
     }
 
@@ -1173,97 +1170,27 @@ private struct ScreenshotExpandedPropertiesRow: View {
     let maximumWidth: CGFloat
     var pluginContent: AnyView? = nil
 
-    private let leadingAnchorID = "screenshot-properties-leading"
-    private let trailingAnchorID = "screenshot-properties-trailing"
-    @State private var contentWidth: CGFloat = 0
-    @State private var overflowEdge: ScreenshotPropertyOverflowEdge = .leading
     @State private var isNamingWatermarkPreset = false
     @State private var watermarkPresetName = ""
     @FocusState private var isWatermarkTextFocused: Bool
 
     var body: some View {
-        ScrollViewReader { proxy in
-            GeometryReader { geometry in
-                let hasOverflow = contentWidth > geometry.size.width + 1
-                let canScrollBackward = hasOverflow && overflowEdge != .leading
-                let canScrollForward = hasOverflow && overflowEdge != .trailing
-                ZStack {
-                    ScrollView(.horizontal) {
-                        HStack(spacing: 0) {
-                            Color.clear.frame(width: 0, height: 1).id(leadingAnchorID)
-                            styleControls
-                                .id(inspectorPresentationID)
-                                .transition(.opacity)
-                            if let pluginContent {
-                                pluginContent
-                                    .padding(.leading, 8)
-                            }
-                            Color.clear.frame(width: 0, height: 1).id(trailingAnchorID)
-                        }
-                        .padding(.horizontal, 8)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .background {
-                            ScreenshotPropertyContentWidthReader { width in
-                                if abs(contentWidth - width) > 0.5 {
-                                    contentWidth = width
-                                }
-                            }
-                        }
-                    }
-                    .scrollIndicators(.hidden)
-                    .mask {
-                        ScreenshotPropertyEdgeMask(
-                            fadesLeadingEdge: canScrollBackward,
-                            fadesTrailingEdge: canScrollForward
-                        )
-                    }
-
-                    HStack(spacing: 0) {
-                        if canScrollBackward {
-                            overflowButton(
-                                systemImage: "chevron.backward",
-                                label: L10n.string("screenshot.editor.properties.scrollBackward")
-                            ) {
-                                withAnimation(BlocksMotionRole.hoverFocus.animation(reduceMotion: reduceMotion)) {
-                                    proxy.scrollTo(leadingAnchorID, anchor: .leading)
-                                    overflowEdge = .leading
-                                }
-                            }
-                        }
-                        Spacer(minLength: 0)
-                        if canScrollForward {
-                            overflowButton(
-                                systemImage: "chevron.forward",
-                                label: L10n.string("screenshot.editor.properties.scrollForward")
-                            ) {
-                                withAnimation(BlocksMotionRole.hoverFocus.animation(reduceMotion: reduceMotion)) {
-                                    proxy.scrollTo(trailingAnchorID, anchor: .trailing)
-                                    overflowEdge = .trailing
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            .onChange(of: store.activeToolbarItemID) { _, _ in
-                proxy.scrollTo(leadingAnchorID, anchor: .leading)
-                overflowEdge = .leading
-            }
-            .onChange(of: aspectControlModel.isEditingCustom) { _, _ in
-                proxy.scrollTo(leadingAnchorID, anchor: .leading)
-                overflowEdge = .leading
-            }
-            .onChange(of: store.selectedStepComponent) { _, _ in
-                proxy.scrollTo(leadingAnchorID, anchor: .leading)
-                overflowEdge = .leading
-            }
-            .onChange(of: store.selectedCalloutComponent) { _, _ in
-                proxy.scrollTo(leadingAnchorID, anchor: .leading)
-                overflowEdge = .leading
+        ScreenshotChromeContentLayout(maximumWidth: maximumWidth, height: ScreenshotDesignTokens.toolbarPropertyHeight) {
+            ViewThatFits(in: .horizontal) {
+                propertyContents.fixedSize(horizontal: true, vertical: false)
+                ScreenshotChromeOverflowRow { propertyContents }
+                    .id(inspectorPresentationID)
             }
         }
-        .frame(width: maximumWidth, height: ScreenshotDesignTokens.toolbarPropertyHeight, alignment: .leading)
-        .blocksAnimation(.selection, value: inspectorPresentationID)
+    }
+
+    private var propertyContents: some View {
+        HStack(spacing: BlocksVisualTokens.Spacing.sm) {
+            styleControls
+            pluginContent
+        }
+        .padding(.horizontal, BlocksVisualTokens.Spacing.sm)
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     private var inspectorPresentationID: String {

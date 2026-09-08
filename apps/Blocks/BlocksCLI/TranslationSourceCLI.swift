@@ -7,6 +7,7 @@ private let translationSourceMaximumSecretBytes = 65_536
 private let translationSourceMaximumTestTextBytes = 16_384
 private let translationSourceMaximumTestImageBytes =
     TranslationSourceImageEncoder.maximumSourceImageBytes
+private let pluginFixtureMaximumBytes = 1_048_576
 
 struct TranslationSourceCLIError: Error {
     let code: String
@@ -97,6 +98,14 @@ func runTranslationSourceCLI(
             code: "plugin_package_invalid",
             message: error.localizedDescription,
             exitCode: 2
+        )
+    } catch let error as BlocksCLITransportError {
+        emitActionFailure(
+            actionID: brokerAction.actionID,
+            requestID: requestID,
+            error: error.brokerError,
+            resultType: TranslationSourceManagementActionResult.self,
+            exitCode: error.exitCode
         )
     } catch {
         emitTranslationSourceFailure(
@@ -195,6 +204,7 @@ private func localInspectionResult(
 
 func runPluginCLI(args: [String]) -> Never {
     let operationID = UUID().uuidString.lowercased()
+    let canonicalCommand = canonicalPluginCommand(args)
     do {
         if args.first == "logs", args.dropFirst().first == "follow" {
             try followPluginLogs(
@@ -214,56 +224,113 @@ func runPluginCLI(args: [String]) -> Never {
             diagnostics: execution.diagnostics
         ))
     } catch let error as PluginCLICommandError {
-        emit(
-            PluginCLIEnvelope(
-                command: args.joined(separator: " "),
-                ok: false,
-                operationID: operationID,
-                data: nil,
-                diagnostics: [
-                    .init(
-                        level: "error",
-                        code: error.code,
-                        message: error.message
-                    ),
-                ]
-            ),
+        emitPluginFailure(
+            command: canonicalCommand,
+            operationID: operationID,
+            code: error.code,
+            message: error.message,
+            exitCode: error.exitCode
+        )
+    } catch let error as TranslationSourceCLIError {
+        emitPluginFailure(
+            command: canonicalCommand,
+            operationID: operationID,
+            code: error.code,
+            message: error.message,
+            exitCode: 2
+        )
+    } catch let error as BlocksCLITransportError {
+        let brokerError = error.brokerError
+        emitPluginFailure(
+            command: canonicalCommand,
+            operationID: operationID,
+            code: brokerError.code,
+            message: brokerError.message,
             exitCode: error.exitCode
         )
     } catch let error as BlocksNativePluginValidationError {
-        emit(
-            PluginCLIEnvelope(
-                command: args.joined(separator: " "),
-                ok: false,
-                operationID: operationID,
-                data: nil,
-                diagnostics: [
-                    .init(
-                        level: "error",
-                        code: "plugin_package_invalid",
-                        message: error.localizedDescription
-                    ),
-                ]
-            ),
+        emitPluginFailure(
+            command: canonicalCommand,
+            operationID: operationID,
+            code: "plugin_package_invalid",
+            message: error.localizedDescription,
             exitCode: 2
         )
     } catch {
-        emit(
-            PluginCLIEnvelope(
-                command: args.joined(separator: " "),
-                ok: false,
-                operationID: operationID,
-                data: nil,
-                diagnostics: [
-                    .init(
-                        level: "error",
-                        code: "plugin_command_failed",
-                        message: error.localizedDescription
-                    ),
-                ]
-            ),
+        emitPluginFailure(
+            command: canonicalCommand,
+            operationID: operationID,
+            code: "plugin_command_failed",
+            message: "The plugin command failed unexpectedly.",
             exitCode: 4
         )
+    }
+}
+
+private func emitPluginFailure(
+    command: String,
+    operationID: String,
+    code: String,
+    message: String,
+    exitCode: Int32
+) -> Never {
+    emit(
+        PluginCLIEnvelope(
+            command: command,
+            ok: false,
+            operationID: operationID,
+            data: nil,
+            diagnostics: [
+                .init(level: "error", code: code, message: message),
+            ]
+        ),
+        exitCode: exitCode
+    )
+}
+
+/// The envelope command is a stable operation identifier, never an echo of
+/// user-supplied paths, IDs, or stdin-only secret values.
+private func canonicalPluginCommand(_ args: [String]) -> String {
+    guard let command = args.first else { return "plugin" }
+    let tail = Array(args.dropFirst())
+    switch command {
+    case "init", "scaffold": return "plugin init"
+    case "api":
+        switch tail.first {
+        case "list": return "plugin api list"
+        case "show": return "plugin api show"
+        default: return "plugin api"
+        }
+    case "validate", "doctor", "test", "pack", "list", "inspect",
+         "configure", "invoke", "enable", "disable", "debug",
+         "safety-reset", "remove":
+        return "plugin \(command)"
+    case "secret":
+        return tail.first == "set" ? "plugin secret set" : "plugin secret"
+    case "install":
+        switch tail.first {
+        case "--plan": return "plugin install --plan"
+        case "--apply": return "plugin install --apply"
+        default: return "plugin install"
+        }
+    case "logs":
+        switch tail.first {
+        case "show", "follow", "export", "clear":
+            return "plugin logs \(tail[0])"
+        default: return "plugin logs"
+        }
+    case "catalog":
+        guard let catalogCommand = tail.first else { return "plugin catalog" }
+        switch catalogCommand {
+        case "list": return "plugin catalog list"
+        case "install":
+            if tail.contains("--plan") { return "plugin catalog install --plan" }
+            if tail.contains("--apply") { return "plugin catalog install --apply" }
+            return "plugin catalog install"
+        default: return "plugin catalog"
+        }
+    default:
+        return "plugin"
     }
 }
 
@@ -857,9 +924,9 @@ private func testPluginPackage(
     )
     let fixture = try JSONDecoder().decode(
         PluginEventFixture.self,
-        from: readBoundedFile(
+        from: readPluginFixture(
+            package: package,
             path: eventPath,
-            maximumBytes: 1_048_576,
             label: "event_fixture"
         )
     )
@@ -964,9 +1031,9 @@ private func testPluginPackage(
     let expected: PluginExpectedFixture? = try expectedPath.map {
         try JSONDecoder().decode(
             PluginExpectedFixture.self,
-            from: readBoundedFile(
+            from: readPluginFixture(
+                package: package,
                 path: $0,
-                maximumBytes: 1_048_576,
                 label: "expected_fixture"
             )
         )
@@ -1042,6 +1109,53 @@ private func packPlugin(_ args: [String]) throws -> PluginCLIExecution {
             "package_sha256": .string(package.packageSHA256),
         ])
     )
+}
+
+/// Relative fixture paths are package-relative and are read only from the
+/// validator's already-opened regular-file snapshot. Absolute paths retain the
+/// documented standalone-fixture workflow and go through the existing
+/// no-follow, regular-file reader.
+private func readPluginFixture(
+    package: BlocksNativePluginValidatedPackage,
+    path: String,
+    label: String
+) throws -> Data {
+    guard !path.hasPrefix("/") else {
+        return try readBoundedFile(
+            path: path,
+            maximumBytes: pluginFixtureMaximumBytes,
+            label: label
+        )
+    }
+    let components = path.split(
+        separator: "/",
+        omittingEmptySubsequences: false
+    )
+    guard !components.isEmpty,
+          components.allSatisfy({
+              !$0.isEmpty && $0 != "." && $0 != ".."
+          }) else {
+        throw TranslationSourceCLIError(
+            code: "\(label)_invalid_path",
+            message:
+                "The \(label) path must be a non-empty relative file path inside the plugin package."
+        )
+    }
+    let relativePath = components.map(String.init).joined(separator: "/")
+    guard let data = package.files[relativePath] else {
+        throw TranslationSourceCLIError(
+            code: "\(label)_read_failed",
+            message: "Unable to open the \(label) file."
+        )
+    }
+    guard data.count <= pluginFixtureMaximumBytes else {
+        throw TranslationSourceCLIError(
+            code: "\(label)_too_large",
+            message:
+                "The \(label) input exceeds \(pluginFixtureMaximumBytes) bytes."
+        )
+    }
+    return data
 }
 
 private func installPluginCommand(
@@ -2147,7 +2261,7 @@ Blocks plugin development and management
   blocks plugin validate PATH.blocksplugin [--strict]
   blocks plugin doctor
   blocks plugin test PATH.blocksplugin --event FIXTURE [--expect EXPECTED]
-  blocks plugin pack PATH.blocksplugin [--output PATH.blocksplugin]
+  blocks plugin pack PATH.blocksplugin --output OUTPUT.blocksplugin
   blocks plugin install --plan PATH.blocksplugin
   blocks plugin install --apply PATH.blocksplugin --confirm-hash SHA256
   blocks plugin list [--json]
@@ -2172,4 +2286,6 @@ Init, API discovery, validation, fixture tests, and packing work offline in an
 isolated runner. Installed operations use the same broker-backed lifecycle as
 the plugin center. Every command emits a stable JSON envelope. Secrets are
 accepted only through stdin and never emitted by list, inspect, logs, or tests.
+For `plugin test`, relative fixture paths are resolved inside the validated
+plugin package; absolute paths must name a regular, non-symlink file.
 """

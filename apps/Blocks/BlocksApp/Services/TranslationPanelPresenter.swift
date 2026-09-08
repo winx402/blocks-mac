@@ -45,8 +45,10 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
     private let actions: TranslationPanelActions
     private let pluginManager: BlocksNativePluginManager?
     private let pluginRuntime: BlocksPluginRuntimeCoordinator?
-    private let notificationPresenter =
-        BlocksAnchoredNotificationPanelPresenter()
+    private let notificationState = BlocksNotificationPresentationState()
+    private lazy var notificationPresenter =
+        BlocksNotificationPanelPresenter(state: notificationState)
+    private var notificationObservation: AnyCancellable?
     private let presentationCoordinator =
         BlocksFloatingPanelPresentationCoordinator()
     private let onClose: @MainActor (UUID) -> Void
@@ -94,7 +96,7 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
         let contentView = TranslationFloatingPanelView(
             model: model,
             actions: actions,
-            notificationState: notificationPresenter.state,
+            notificationState: notificationState,
             pluginManager: pluginManager,
             pluginRuntime: pluginRuntime,
             resultOrderDragCoordinator: resultOrderDragCoordinator,
@@ -119,7 +121,6 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
         panel.onRequestClose = { [weak self] in
             self?.requestAnimatedClose()
         }
-        notificationPresenter.attach(to: panel)
         logFrame(
             frame,
             reason: "initial",
@@ -140,6 +141,7 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
                 inputSource: model.inputSource
             )
         )
+        startNotificationObservation()
         updateDismissalHandling()
     }
 
@@ -169,6 +171,8 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
             wasKey: panel.isKeyWindow
         )
         isSuspended = true
+        notificationState.setHostVisible(false)
+        notificationPresenter.hide()
         updateDismissalHandling()
         presentationCoordinator.suspend(window: panel)
         return suspension
@@ -201,6 +205,8 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
             frame: frame,
             makeKey: suspension.wasKey
         )
+        notificationState.setHostVisible(true)
+        synchronizeNotification()
         updateDismissalHandling()
     }
 
@@ -350,6 +356,28 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
             }
     }
 
+    private func startNotificationObservation() {
+        guard notificationObservation == nil else { return }
+        notificationObservation = notificationState.$presentationRevision
+            .sink { [weak self] _ in
+                self?.synchronizeNotification()
+            }
+    }
+
+    private func synchronizeNotification() {
+        guard let panel, panel.isVisible, !isSuspended,
+              !didFinishClose, !isClosePending else {
+            notificationPresenter.hide()
+            return
+        }
+        notificationPresenter.synchronize(
+            on: panel.screen ?? TranslationPanelScreenResolver.screen(
+                for: model.inputContext
+            ),
+            avoiding: [panel.frame]
+        )
+    }
+
     private func startSystemInteractionObservation() {
         guard systemInteractionObservation == nil else { return }
         systemInteractionObservation =
@@ -383,6 +411,8 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
         systemInteractionObservation = nil
         directInteractionObservation?.cancel()
         directInteractionObservation = nil
+        notificationObservation?.cancel()
+        notificationObservation = nil
         notificationPresenter.shutdown()
         if let closingPanel {
             savePanelFrame(closingPanel.frame)
@@ -403,22 +433,15 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
     func windowDidEndLiveResize(_ notification: Notification) {
         guard let panel = notification.object as? NSPanel else { return }
         savePanelFrame(panel.frame)
-        notificationPresenter.reposition()
     }
 
     func windowDidMove(_ notification: Notification) {
         guard let panel = notification.object as? NSPanel else { return }
-        notificationPresenter.reposition()
         logFrame(
             panel.frame,
             reason: "user-or-system-move",
             screen: panel.screen
         )
-    }
-
-    func windowDidResize(_ notification: Notification) {
-        guard notification.object as? NSPanel === panel else { return }
-        notificationPresenter.reposition()
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -438,7 +461,7 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
 
     var notificationStateForTesting:
         BlocksNotificationPresentationState {
-        notificationPresenter.state
+        notificationState
     }
 
     var notificationPanelForTesting: NSPanel? {

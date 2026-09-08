@@ -564,7 +564,7 @@ def main() -> int:
         and "remoteInfo = BlocksClipboardBroker;" in project
         and required_configuration_names <= set(broker_build_configurations)
         and broker_configurations_safe,
-        "The Xcode project must define, depend on, embed, normalize to the exact inherit-only entitlements, and configure BlocksClipboardBroker as a signed command-line helper in every configuration.",
+        "Sandboxed distribution configurations must embed the signed inherit-only ClipboardBroker.",
         [PROJECT],
     )
 
@@ -591,8 +591,25 @@ def main() -> int:
             "com.apple.security.app-sandbox",
             "com.apple.security.inherit",
         },
-        "Broker source entitlements must contain only app-sandbox + inherit.",
+        "Sandboxed-host Broker entitlements must contain only app-sandbox + inherit.",
         [BROKER_ENTITLEMENTS],
+    )
+    local_entitlements = BLOCKS / "BlocksApp/Blocks-LocalDevelopment.entitlements"
+    try:
+        local_policy = plistlib.loads(local_entitlements.read_bytes())
+    except (OSError, plistlib.InvalidFileException):
+        local_policy = None
+    add_check(
+        checks,
+        failures,
+        "local_broker_matches_nonsandboxed_host",
+        local_policy == {}
+        and 'CODE_SIGN_ENTITLEMENTS = "BlocksApp/Blocks-LocalDevelopment.entitlements";'
+            in broker_build_configurations.get("LocalDevelopment", "")
+        and r'if [ \"${CONFIGURATION}\" = \"LocalDevelopment\" ]; then' in project
+        and r'entitlements=\"${SRCROOT}/BlocksApp/Blocks-LocalDevelopment.entitlements\"' in project,
+        "Only LocalDevelopment uses empty Broker entitlements, matching its nonsandboxed host; the final normalization must select that policy too.",
+        [PROJECT, local_entitlements],
     )
 
     persistence_hits = [

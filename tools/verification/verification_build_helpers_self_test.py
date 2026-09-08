@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import os
+import copy
+import ctypes
 import json
 import plistlib
 import re
 import signal
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -775,6 +778,173 @@ def run_build_wrapper_termination_grace_variant() -> None:
     assert run_controlled_subprocess.__kwdefaults__["termination_grace_seconds"] == 0.5
 
 
+def run_xcode_build_recovery_variants() -> None:
+    """Only complete verified ibtoold cleanup permits one retry; its own result decides success."""
+    helper = verification_build_helpers
+    original_run, original_identity = helper.run_controlled_subprocess, helper._selected_apple_ibtoold
+    first = {"ok": False, "returncode": 70, "child_returncode": 0, "timed_out": False,
+             "stdout": "TEST BUILD SUCCEEDED", "stderr": "", "process_cleanup": {
+                 "status": "target_group_residual_cleaned", "child_returncode": 0,
+                 "residual_processes_truncated": False, "residual_process_count": 1,
+                 "residual_processes": [{"pid": 123, "ppid": 1, "pgid": 123, "executable": "ibtoold",
+                                         "verified_xcode_ibtoold": True}]}}
+    success = {"ok": True, "returncode": 0, "child_returncode": 0, "timed_out": False, "stdout": "ok", "stderr": ""}
+    try:
+        helper._selected_apple_ibtoold = lambda: "/fixture/Xcode/usr/bin/ibtoold"
+        for final in (success, first):
+            calls = []
+            def run(command, **kwargs):
+                calls.append((command, kwargs))
+                return copy.deepcopy(first if len(calls) == 1 else final)
+            helper.run_controlled_subprocess = run
+            result = helper.run_controlled_xcode_build(["xcodebuild", "build-for-testing"], cwd=Path.cwd(), timeout=1,
+                                                       retry_cleaned_ibtoold=True)
+            assert len(calls) == 2 and result["ok"] == final["ok"] and result["first_attempt"] == first, result
+            assert all(kwargs["termination_grace_seconds"] == 2 for _, kwargs in calls)
+        for mutation in ("unknown", "name-only", "truncated", "count", "compiler-failed", "timed-out", "output-error", "not-opted-in", "identity-unavailable"):
+            candidate = copy.deepcopy(first)
+            cleanup = candidate["process_cleanup"]
+            if mutation == "unknown": cleanup["status"] = "internal_cleanup_failure"
+            elif mutation == "name-only": cleanup["residual_processes"][0].pop("verified_xcode_ibtoold")
+            elif mutation == "truncated": cleanup["residual_processes_truncated"] = True
+            elif mutation == "count": cleanup["residual_process_count"] = 2
+            elif mutation == "compiler-failed": candidate["child_returncode"] = 65
+            elif mutation == "timed-out": candidate["timed_out"] = True
+            elif mutation == "output-error": candidate["output_diagnostic"] = "invalid UTF8"
+            calls = []
+            helper._selected_apple_ibtoold = lambda: None if mutation == "identity-unavailable" else "/fixture/Xcode/usr/bin/ibtoold"
+            def run(*args, **kwargs):
+                calls.append((args, kwargs)); return candidate
+            helper.run_controlled_subprocess = run
+            result = helper.run_controlled_xcode_build(["xcodebuild", "build-for-testing"], cwd=Path.cwd(), timeout=1,
+                                                       retry_cleaned_ibtoold=mutation != "not-opted-in")
+            assert len(calls) == 1 and not result["ok"], (mutation, result)
+        assert "xcodebuild succeeded (exit 0)" in helper.controlled_build_failure(first)
+        assert "timed out" in helper.controlled_build_failure({**first, "timed_out": True})
+    finally:
+        helper.run_controlled_subprocess, helper._selected_apple_ibtoold = original_run, original_identity
+
+
+def run_residual_path_attestation_variants() -> None:
+    """Real kernel path attestation, without running or trusting a fixture named ibtoold."""
+    # Framework Python's sys.executable may be a launcher; use the kernel's path.
+    libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+    proc_pidpath = libproc.proc_pidpath
+    proc_pidpath.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32)
+    proc_pidpath.restype = ctypes.c_int
+    buffer = ctypes.create_string_buffer(4096)
+    assert proc_pidpath(os.getpid(), buffer, len(buffer)) > 0
+    executable = os.path.realpath(os.fsdecode(buffer.value))
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        for matches in (True, False):
+            fixture = "import subprocess,sys; subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)"
+            result = run_controlled_subprocess([sys.executable, "-c", fixture], cwd=root, timeout=3,
+                                               _verified_ibtoold_path=executable if matches else "/missing/ibtoold")
+            cleanup = result.get("process_cleanup", {})
+            assert not result["ok"] and cleanup.get("status") == "target_group_residual_cleaned", result
+            processes = cleanup["residual_processes"]
+            assert processes and all((process.get("verified_xcode_ibtoold") is True) == matches for process in processes), result
+            for process in processes:
+                assert_eventually_absent(process["pid"], "path-attestation fixture")
+
+
+def run_isolated_registration_variants() -> None:
+    """Never operate on installed/other apps, reject redirects, and clean on exception."""
+    helper = verification_build_helpers
+    original = helper.subprocess.run
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory).resolve()
+        derived = root / "Derived.noindex"
+        product = derived / "Build/Products/DebugTesting/Blocks.app"
+        installed = root / "Applications/Blocks Dev.app"
+        installed.mkdir(parents=True)
+        product.mkdir(parents=True)
+        calls = []
+        def run(command, **kwargs):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0, b"", b"")
+        helper.subprocess.run = run
+        try:
+            for failure in (False, True):
+                try:
+                    with helper.isolated_build_registration(derived, "DebugTesting", ("Blocks.app",)):
+                        if failure: raise ValueError("fixture build failed")
+                except ValueError:
+                    assert failure
+                assert calls[-1] == [helper._LSREGISTER, "-u", str(product)]
+            assert len(calls) == 2 and installed.is_dir() and product.is_dir()
+            product.rmdir(); product.symlink_to(installed, target_is_directory=True)
+            try:
+                with helper.isolated_build_registration(derived, "DebugTesting", ("Blocks.app",)):
+                    raise AssertionError("symlink was accepted")
+            except RuntimeError:
+                pass
+            assert len(calls) == 2 and installed.is_dir()
+            product.unlink(); product.mkdir()
+            def failing_run(command, **kwargs):
+                raise subprocess.CalledProcessError(1, command)
+            helper.subprocess.run = failing_run
+            try:
+                with helper.isolated_build_registration(derived, "DebugTesting", ("Blocks.app",)):
+                    pass
+            except RuntimeError as error:
+                assert "Launch Services cleanup failed" in str(error)
+            else:
+                raise AssertionError("cleanup failure accepted")
+        finally:
+            helper.subprocess.run = original
+
+
+def run_idempotent_registration_variants() -> None:
+    """An exit 1 is harmless only for exact -10814 plus independent proven absence."""
+    helper = verification_build_helpers
+    original = helper.subprocess.run
+    with tempfile.TemporaryDirectory() as directory:
+        derived = Path(directory).resolve() / "Derived.noindex"
+        product = derived / "Build/Products/DebugTesting/Blocks.app"
+        info = product / "Contents/Info.plist"
+        info.parent.mkdir(parents=True)
+        info.write_bytes(plistlib.dumps({"CFBundleIdentifier": "app.blocks.fixture"}))
+        try:
+            for scenario in ("absent", "present", "unknown-error", "wrong-path", "query-failure", "query-timeout", "invalid-json", "invalid-schema", "wrong-exit", "invalid-utf8"):
+                calls = []
+                diagnostic = f"failed to scan {product}: -10814\n from spotlight".encode()
+                if scenario == "unknown-error": diagnostic = diagnostic.replace(b"-10814", b"-10810")
+                elif scenario == "wrong-path": diagnostic = b"failed to scan /Applications/Other.app: -10814\n from spotlight"
+                elif scenario == "invalid-utf8": diagnostic += b"\xff"
+                def run(command, **kwargs):
+                    calls.append(command)
+                    if command[0] == helper._LSREGISTER:
+                        assert command == [helper._LSREGISTER, "-u", str(product)]
+                        raise subprocess.CalledProcessError(2 if scenario == "wrong-exit" else 1, command, stderr=diagnostic)
+                    assert command[:3] == ["/usr/bin/xcrun", "swift", "-e"]
+                    assert command[-2:] == ["app.blocks.fixture", str(product)]
+                    assert kwargs["timeout"] == 15 and kwargs["check"] is True
+                    if scenario == "query-failure": raise subprocess.CalledProcessError(2, command)
+                    if scenario == "query-timeout": raise subprocess.TimeoutExpired(command, 15)
+                    output = '{"absent":false}' if scenario == "present" else '{"absent":true}'
+                    if scenario == "invalid-json": output = "not json"
+                    elif scenario == "invalid-schema": output = '{"absent":"true"}'
+                    return subprocess.CompletedProcess(command, 0, output, "")
+                helper.subprocess.run = run
+                try:
+                    with helper.isolated_build_registration(derived, "DebugTesting", ("Blocks.app",)):
+                        pass
+                except RuntimeError:
+                    assert scenario != "absent", scenario
+                else:
+                    assert scenario == "absent", scenario
+                expected_query = scenario not in {"unknown-error", "wrong-path", "wrong-exit", "invalid-utf8"}
+                assert len(calls) == (2 if expected_query else 1), (scenario, calls)
+                assert product.is_dir()
+            info.unlink()
+            helper.subprocess.run = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("missing Info must not query LS"))
+            assert not helper._registration_absence_confirmed(product)
+        finally:
+            helper.subprocess.run = original
+
+
 def run_long_single_line_build_diagnostic_variant() -> None:
     diagnostic = verification_build_helpers._build_diagnostic("fatal error: " + "x" * 10_000, "")
     assert len(diagnostic) <= 1800, len(diagnostic)
@@ -917,6 +1087,10 @@ def main() -> int:
         run_non_utf8_variant()
         run_stdout_build_diagnostic_variant()
         run_build_wrapper_termination_grace_variant()
+        run_xcode_build_recovery_variants()
+        run_residual_path_attestation_variants()
+        run_isolated_registration_variants()
+        run_idempotent_registration_variants()
         run_long_single_line_build_diagnostic_variant()
     finally:
         signal.alarm(0)

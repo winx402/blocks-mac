@@ -617,13 +617,21 @@ protocol BlocksNotificationPanelPresenting: AnyObject {
 
 @MainActor
 final class BlocksNotificationPanelPresenter: BlocksNotificationPanelPresenting {
-    private let state = BlocksNotificationPresentationState()
+    private let state: BlocksNotificationPresentationState
     private let level: NSWindow.Level
     private var panel: NSPanel?
     private var currentObservation: AnyCancellable?
 
-    init(level: NSWindow.Level = .floating) {
+    convenience init(level: NSWindow.Level = .floating) {
+        self.init(level: level, state: BlocksNotificationPresentationState())
+    }
+
+    init(
+        level: NSWindow.Level = .floating,
+        state: BlocksNotificationPresentationState
+    ) {
         self.level = level
+        self.state = state
         currentObservation = state.$current
             .sink { [weak self] current in
                 guard current == nil else { return }
@@ -638,6 +646,19 @@ final class BlocksNotificationPanelPresenter: BlocksNotificationPanelPresenting 
         on screen: NSScreen?,
         avoiding frames: [CGRect] = []
     ) {
+        state.setHostVisible(true)
+        state.present(descriptor)
+        synchronize(on: screen, avoiding: frames)
+    }
+
+    /// Renders an externally owned notification without presenting it a second
+    /// time (which would increment its deduplication count or reset its timer).
+    /// Placement is a snapshot, not a relationship with another window.
+    func synchronize(on screen: NSScreen?, avoiding frames: [CGRect] = []) {
+        guard let presented = state.current else {
+            hide()
+            return
+        }
         let targetScreen = screen ?? NSScreen.main
         guard let targetScreen else {
             return
@@ -647,9 +668,6 @@ final class BlocksNotificationPanelPresenter: BlocksNotificationPanelPresenting 
         )
         let panel = panel ?? makePanel(width: width)
         self.panel = panel
-        state.setHostVisible(true)
-        state.present(descriptor)
-        guard let presented = state.current else { return }
         // Standard cards always contain a close button, even without a retry
         // action. Only a control-free compact confirmation is click-through.
         panel.ignoresMouseEvents = presented.descriptor.presentationStyle == .compactConfirmation
@@ -671,6 +689,10 @@ final class BlocksNotificationPanelPresenter: BlocksNotificationPanelPresenting 
 
     func dismiss() {
         state.dismiss()
+        hide()
+    }
+
+    func hide() {
         panel?.orderOut(nil)
     }
 

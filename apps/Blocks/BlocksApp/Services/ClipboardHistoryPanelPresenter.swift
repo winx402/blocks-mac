@@ -498,6 +498,12 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
             self.notificationPresenter = notificationPresenter
             notificationPresenter.attach(to: panel)
             notificationPresenter.reposition()
+            if self.currentPosition == .bottom,
+               let screen = FloatingPanelScreenResolver.screen(for: panel) {
+                Self.pasteLogger.info(
+                    "stage=bottom-anchor actualMinY=\(panel.frame.minY) physicalMinY=\(screen.frame.minY) visibleMinY=\(screen.visibleFrame.minY)"
+                )
+            }
         }
         Self.pasteLogger.info(
             "stage=panel-presented invocation=\(invocationContext.id.uuidString, privacy: .public) targetPID=\(invocationContext.targetContext?.target.processIdentifier ?? 0) targetBundle=\(invocationContext.targetContext?.target.bundleIdentifier ?? "none", privacy: .public) frontmost=\(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "none", privacy: .public)"

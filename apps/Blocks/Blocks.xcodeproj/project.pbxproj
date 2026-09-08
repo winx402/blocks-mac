@@ -15,6 +15,12 @@
 		B908L0000000000000000003 /* AppTerminationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F908L0000000000000000003; };
 		B908U0000000000000000001 /* AppUpdateCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F908U0000000000000000001; };
 		B908U0000000000000000002 /* AppUpdateCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F908U0000000000000000002; };
+		B9090000000000000000001 /* CompactSourceHeaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9090000000000000000001; };
+		B9090000000000000000002 /* MainWindowPresentationCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9090000000000000000002; };
+		B9090000000000000000003 /* ScreenshotEditorIssueLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9090000000000000000003; };
+		B9090000000000000000004 /* SurfaceBoundaryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9090000000000000000004; };
+		B9090000000000000000005 /* ClipboardToolbarDensityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9090000000000000000005; };
+		B9090000000000000000006 /* MainWindowPresentationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9090000000000000000006; };
 		B908U0000000000000000003 /* ActionBrokerUpdateSafetyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F908U0000000000000000003; };
 		B908S0000000000000000001 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = S908S0000000000000000001 /* Sparkle */; };
 		B908D0000000000000000001 /* BlocksRuntimeIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = F908D0000000000000000001; };
@@ -516,6 +522,12 @@
 		F908L0000000000000000003 /* AppTerminationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/AppTerminationCoordinator.swift; sourceTree = "<group>"; };
 		F908U0000000000000000001 /* AppUpdateCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/AppUpdateCoordinator.swift; sourceTree = "<group>"; };
 		F908U0000000000000000002 /* AppUpdateCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdateCoordinatorTests.swift; sourceTree = "<group>"; };
+		F9090000000000000000001 /* CompactSourceHeaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompactSourceHeaderTests.swift; sourceTree = "<group>"; };
+		F9090000000000000000002 /* MainWindowPresentationCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindowPresentationCoordinatorTests.swift; sourceTree = "<group>"; };
+		F9090000000000000000003 /* ScreenshotEditorIssueLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotEditorIssueLayoutTests.swift; sourceTree = "<group>"; };
+		F9090000000000000000004 /* SurfaceBoundaryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfaceBoundaryTests.swift; sourceTree = "<group>"; };
+		F9090000000000000000005 /* ClipboardToolbarDensityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardToolbarDensityTests.swift; sourceTree = "<group>"; };
+		F9090000000000000000006 /* MainWindowPresentationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/MainWindowPresentationCoordinator.swift; sourceTree = "<group>"; };
 		F908U0000000000000000003 /* ActionBrokerUpdateSafetyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActionBrokerUpdateSafetyTests.swift; sourceTree = "<group>"; };
 		F908D0000000000000000001 /* BlocksRuntimeIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlocksRuntimeIdentity.swift; sourceTree = "<group>"; };
 		F908D0000000000000000002 /* BlocksLocalBuildTrust.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlocksLocalBuildTrust.swift; sourceTree = "<group>"; };
@@ -1027,6 +1039,11 @@
 			isa = PBXGroup;
 			children = (
 				F908U0000000000000000002 /* AppUpdateCoordinatorTests.swift */,
+				F9090000000000000000001 /* CompactSourceHeaderTests.swift */,
+				F9090000000000000000002 /* MainWindowPresentationCoordinatorTests.swift */,
+				F9090000000000000000003 /* ScreenshotEditorIssueLayoutTests.swift */,
+				F9090000000000000000004 /* SurfaceBoundaryTests.swift */,
+				F9090000000000000000005 /* ClipboardToolbarDensityTests.swift */,
 				F908U0000000000000000003 /* ActionBrokerUpdateSafetyTests.swift */,
 				F908D0000000000000000006 /* BlocksRuntimeIdentityTests.swift */,
 				F90700000000000000000003 /* FloatingPanelGeometryTests.swift */,
@@ -1172,6 +1189,7 @@
 				F908N0000000000000000001 /* Sparkle-LICENSE.txt */,
 				F908N0000000000000000002 /* LICENSE */,
 				F908L0000000000000000002 /* ApplicationLifecycleCoordinator.swift */,
+				F9090000000000000000006 /* MainWindowPresentationCoordinator.swift */,
 				F908L0000000000000000003 /* AppTerminationCoordinator.swift */,
 				F908U0000000000000000001 /* AppUpdateCoordinator.swift */,
 				F50000000000000000000001 /* Assets.xcassets */,
@@ -1782,6 +1800,7 @@
 			inputPaths = (
 				"$(TARGET_BUILD_DIR)/$(CONTENTS_FOLDER_PATH)/MacOS/BlocksClipboardBroker",
 				"$(SRCROOT)/BlocksClipboardBroker/BlocksClipboardBroker.entitlements",
+				"$(SRCROOT)/BlocksApp/Blocks-LocalDevelopment.entitlements",
 			);
 			name = "Normalize Clipboard Broker Entitlements";
 			outputFileListPaths = (
@@ -1790,7 +1809,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -eu\nhelper=\"${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/MacOS/BlocksClipboardBroker\"\nentitlements=\"${SRCROOT}/BlocksClipboardBroker/BlocksClipboardBroker.entitlements\"\nif [ \"${CODE_SIGNING_ALLOWED:-NO}\" != \"YES\" ] || [ ! -x \"$helper\" ]; then\n    exit 0\nfi\nidentity=\"${EXPANDED_CODE_SIGN_IDENTITY:--}\"\nif [ -z \"$identity\" ]; then\n    identity=\"-\"\nfi\n/usr/bin/codesign --force --sign \"$identity\" --identifier \"${BLOCKS_IDENTIFIER_PREFIX:-app.blocks}.clipboard-broker\" --entitlements \"$entitlements\" --timestamp=none --generate-entitlement-der \"$helper\"\n";
+			shellScript = "set -eu\nhelper=\"${TARGET_BUILD_DIR}/${CONTENTS_FOLDER_PATH}/MacOS/BlocksClipboardBroker\"\nentitlements=\"${SRCROOT}/BlocksClipboardBroker/BlocksClipboardBroker.entitlements\"\nif [ \"${CONFIGURATION}\" = \"LocalDevelopment\" ]; then\n    entitlements=\"${SRCROOT}/BlocksApp/Blocks-LocalDevelopment.entitlements\"\nfi\nif [ \"${CODE_SIGNING_ALLOWED:-NO}\" != \"YES\" ] || [ ! -x \"$helper\" ]; then\n    exit 0\nfi\nidentity=\"${EXPANDED_CODE_SIGN_IDENTITY:--}\"\nif [ -z \"$identity\" ]; then\n    identity=\"-\"\nfi\n/usr/bin/codesign --force --sign \"$identity\" --identifier \"${BLOCKS_IDENTIFIER_PREFIX:-app.blocks}.clipboard-broker\" --entitlements \"$entitlements\" --timestamp=none --generate-entitlement-der \"$helper\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -1851,6 +1870,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				B908L0000000000000000002 /* ApplicationLifecycleCoordinator.swift in Sources */,
+				B9090000000000000000006 /* MainWindowPresentationCoordinator.swift in Sources */,
 				B908L0000000000000000003 /* AppTerminationCoordinator.swift in Sources */,
 				B908U0000000000000000001 /* AppUpdateCoordinator.swift in Sources */,
 				B00300000000000000000001 /* BlocksApp.swift in Sources */,
@@ -2114,6 +2134,11 @@
 			buildActionMask = 2147483647;
 			files = (
 				B908U0000000000000000002 /* AppUpdateCoordinatorTests.swift in Sources */,
+				B9090000000000000000001 /* CompactSourceHeaderTests.swift in Sources */,
+				B9090000000000000000002 /* MainWindowPresentationCoordinatorTests.swift in Sources */,
+				B9090000000000000000003 /* ScreenshotEditorIssueLayoutTests.swift in Sources */,
+				B9090000000000000000004 /* SurfaceBoundaryTests.swift in Sources */,
+				B9090000000000000000005 /* ClipboardToolbarDensityTests.swift in Sources */,
 				B908U0000000000000000003 /* ActionBrokerUpdateSafetyTests.swift in Sources */,
 				B908D0000000000000000006 /* BlocksRuntimeIdentityTests.swift in Sources */,
 				B90700000000000000000003 /* FloatingPanelGeometryTests.swift in Sources */,
@@ -3156,7 +3181,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG BLOCKS_LOCAL_DEVELOPMENT";
-				CODE_SIGN_ENTITLEMENTS = BlocksClipboardBroker/BlocksClipboardBroker.entitlements;
+				CODE_SIGN_ENTITLEMENTS = "BlocksApp/Blocks-LocalDevelopment.entitlements";
 				CODE_SIGN_IDENTITY = "-";
 				CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO;
 				CODE_SIGN_STYLE = Manual;

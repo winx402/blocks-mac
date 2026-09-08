@@ -4,23 +4,35 @@ import XCTest
 
 @MainActor
 final class FloatingPanelGeometryTests: XCTestCase {
-    func testBottomFrameRefreshesAgainstTheCurrentVisibleFrame() {
+    func testBottomFrameAlwaysUsesPhysicalBottomRegardlessOfDockInset() {
+        let physicalScreen = CGRect(x: -1_440, y: 0, width: 1_440, height: 900)
         let beforeDockChange = CGRect(x: -1_440, y: 24, width: 1_440, height: 876)
         let afterDockChange = CGRect(x: -1_440, y: 96, width: 1_440, height: 804)
 
         let before = FloatingPanelFrameStore.clipboardBottomFrame(
-            visibleFrame: beforeDockChange,
+            visibleFrame: FloatingPanelFrameStore.clipboardBottomBounds(screenFrame: physicalScreen, visibleFrame: beforeDockChange),
             height: 320
         )
         let after = FloatingPanelFrameStore.clipboardBottomFrame(
-            visibleFrame: afterDockChange,
+            visibleFrame: FloatingPanelFrameStore.clipboardBottomBounds(screenFrame: physicalScreen, visibleFrame: afterDockChange),
             height: before.height
         )
 
-        XCTAssertEqual(before.minY, beforeDockChange.minY)
-        XCTAssertEqual(after.minY, afterDockChange.minY)
+        XCTAssertEqual(before.minY, physicalScreen.minY)
+        XCTAssertEqual(after.minY, physicalScreen.minY)
         XCTAssertEqual(after.width, afterDockChange.width)
         XCTAssertEqual(after.height, before.height)
+    }
+
+    func testPhysicalBottomAnchorPreservesNegativeScreenOriginAndMenuBarCeiling() {
+        let screen = CGRect(x: -1920, y: -1080, width: 1920, height: 1080)
+        let visible = CGRect(x: -1920, y: -1000, width: 1920, height: 976)
+        let bounds = FloatingPanelFrameStore.clipboardBottomBounds(screenFrame: screen, visibleFrame: visible)
+        let panel = FloatingPanelFrameStore.clipboardBottomFrame(visibleFrame: bounds, height: 286)
+        XCTAssertEqual(panel.minY, -1080)
+        XCTAssertEqual(panel.minX, -1920)
+        XCTAssertEqual(bounds.maxY, visible.maxY)
+        XCTAssertEqual(panel.height, 286)
     }
 
     func testScreenResolverPrefersTheDisplayContainingMostOfThePanel() {
@@ -87,7 +99,13 @@ final class FloatingPanelGeometryTests: XCTestCase {
         }
         XCTAssertEqual(surface.layer?.cornerRadius, 18)
         XCTAssertFalse(surface.layer?.masksToBounds ?? true)
-        XCTAssertEqual(backing.layer?.cornerRadius, 18)
-        XCTAssertTrue(backing.layer?.masksToBounds ?? false)
+        if surface.activeRenderingMode == .liquidGlass {
+            XCTAssertFalse(backing.layer?.masksToBounds ?? false)
+            XCTAssertEqual(surface.layer?.borderWidth, 0)
+        } else {
+            XCTAssertEqual(backing.layer?.cornerRadius, 18)
+            XCTAssertTrue(backing.layer?.masksToBounds ?? false)
+        }
+        XCTAssertTrue(surface.blocksContentView.superview === surface)
     }
 }

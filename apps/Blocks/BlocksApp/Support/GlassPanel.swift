@@ -860,8 +860,8 @@ struct BlocksAppKitSurfaceConfiguration: Equatable {
     var drawsShadow = true
 }
 
-/// Clips only the material/glass backing. The outer host deliberately remains
-/// unmasked so its border and shadow can extend naturally beyond the surface.
+/// Clips only opaque/material backing. Liquid Glass owns its native outline;
+/// neither the foreground controls nor the outer shadow host use this mask.
 @MainActor
 enum BlocksAppKitSurfaceClip {
     static func apply(to view: NSView, cornerRadius: CGFloat) {
@@ -998,22 +998,16 @@ class BlocksAppKitGlassSurfaceView: NSView {
             let view = NSView()
             view.wantsLayer = true
             view.layer?.backgroundColor = blocksSurfaceConfiguration.role.opaqueFallbackColor.cgColor
-            view.addSubview(blocksContentView)
             nextSurface = view
         case .material:
             let view = NSVisualEffectView()
             blocksSurfaceConfiguration.role.configure(view)
-            view.addSubview(blocksContentView)
             nextSurface = view
         case .liquidGlass:
             if #available(macOS 26.0, *) {
                 let glassView = NSGlassEffectView()
                 glassView.style = .regular
                 glassView.cornerRadius = blocksSurfaceConfiguration.cornerRadius
-                BlocksAppKitSurfaceClip.apply(
-                    to: glassView,
-                    cornerRadius: blocksSurfaceConfiguration.cornerRadius
-                )
                 glassView.tintColor = blocksSurfaceConfiguration.role.glassTintColor(
                     isActive: blocksSurfaceConfiguration.isActive,
                     isWindowActive: isWindowActive,
@@ -1021,7 +1015,9 @@ class BlocksAppKitGlassSurfaceView: NSView {
                         NSWorkspace.shared
                             .accessibilityDisplayShouldIncreaseContrast
                 )
-                glassView.contentView = blocksContentView
+                // Keep controls outside the backing's shape. NSGlassEffectView
+                // owns the glass rim and its corner radius, without a second
+                // CALayer mask cutting either the rim or foreground content.
                 glassEffectView = glassView
 
                 let container = NSGlassEffectContainerView()
@@ -1037,11 +1033,14 @@ class BlocksAppKitGlassSurfaceView: NSView {
 
         nextSurface.frame = bounds
         nextSurface.autoresizingMask = [.width, .height]
-        BlocksAppKitSurfaceClip.apply(
-            to: nextSurface,
-            cornerRadius: blocksSurfaceConfiguration.cornerRadius
-        )
+        if mode != .liquidGlass {
+            BlocksAppKitSurfaceClip.apply(
+                to: nextSurface,
+                cornerRadius: blocksSurfaceConfiguration.cornerRadius
+            )
+        }
         super.addSubview(nextSurface)
+        super.addSubview(blocksContentView)
         backingSurface = nextSurface
         updateSurfaceAppearance()
         needsLayout = true
@@ -1056,7 +1055,10 @@ class BlocksAppKitGlassSurfaceView: NSView {
             layer?.cornerRadius = blocksSurfaceConfiguration.cornerRadius
             layer?.cornerCurve = .continuous
             layer?.masksToBounds = false
-            layer?.borderWidth = BlocksVisualTokens.Stroke.width
+            // The system glass already draws a rim. A second continuous
+            // CALayer stroke is a different contour at the same edge.
+            layer?.borderWidth = activeRenderingMode == .liquidGlass
+                ? 0 : BlocksVisualTokens.Stroke.width
             layer?.borderColor = NSColor.labelColor.withAlphaComponent(
                 blocksSurfaceConfiguration.role.borderOpacity(
                     isActive: blocksSurfaceConfiguration.isActive,
@@ -1174,14 +1176,12 @@ private struct BlocksMaterialSurface<SurfaceShape: Shape, Content: View>: View {
     @ViewBuilder
     var body: some View {
         if role == .section {
-            fallbackSurface(
-                paddedContent
-                    .background(
-                        Color(nsColor: role.opaqueFallbackColor)
-                            .opacity(reduceTransparency ? 1 : 0.58),
-                        in: shape
-                    )
-            )
+            paddedContent
+                .background(
+                    Color(nsColor: role.opaqueFallbackColor)
+                        .opacity(reduceTransparency ? 1 : 0.58),
+                    in: shape
+                )
                 .overlay(surfaceBorder)
         } else {
             switch role.renderingMode(
@@ -1192,10 +1192,8 @@ private struct BlocksMaterialSurface<SurfaceShape: Shape, Content: View>: View {
                 }()
             ) {
             case .opaque:
-                fallbackSurface(
-                    paddedContent
-                        .background(Color(nsColor: role.opaqueFallbackColor), in: shape)
-                )
+                paddedContent
+                    .background(Color(nsColor: role.opaqueFallbackColor), in: shape)
                     .overlay(surfaceBorder)
             case .liquidGlass:
                 if #available(macOS 26.0, *) {
@@ -1217,13 +1215,6 @@ private struct BlocksMaterialSurface<SurfaceShape: Shape, Content: View>: View {
         content.padding(contentInsets)
     }
 
-    /// `glassEffect(_:in:)` owns its system clip. Material and opaque fallback
-    /// surfaces need an explicit clip so their rectangular backing cannot show
-    /// outside the requested shape in a transparent floating window.
-    private func fallbackSurface<Surface: View>(_ surface: Surface) -> some View {
-        surface.clipShape(shape)
-    }
-
     @available(macOS 26.0, *)
     private var liquidGlass: Glass {
         let glass = Glass.regular.tint(
@@ -1239,10 +1230,10 @@ private struct BlocksMaterialSurface<SurfaceShape: Shape, Content: View>: View {
     }
 
     private var materialFallback: some View {
-        fallbackSurface(
-            paddedContent
-                .background(role.fallbackMaterial, in: shape)
-        )
+        // The shape belongs to the background, not to the content. Clipping
+        // the complete surface also cuts focus rings and edge controls.
+        paddedContent
+            .background(role.fallbackMaterial, in: shape)
             .overlay(surfaceBorder)
             .shadow(
                 color: Color(nsColor: .shadowColor).opacity(

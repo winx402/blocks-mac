@@ -27,6 +27,18 @@ struct BlocksApp: App {
                 .frame(minWidth: 820, minHeight: 520)
                 .blocksDefaultFont()
                 .task { appUpdates.startIfPossible() }
+                .background {
+                    MainWindowAttachmentObserver(
+                        onAttach: { window in
+                            appDelegate.attachMainWindow(window)
+                        },
+                        onDetach: { window in
+                            appDelegate.detachMainWindow(window)
+                        }
+                    )
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+                }
         }
         .defaultSize(width: 980, height: 680)
         .commands {

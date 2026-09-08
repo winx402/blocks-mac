@@ -46,6 +46,225 @@ def text(path: Path) -> str:
     return path.read_text(encoding="utf-8") if path.exists() else ""
 
 
+def swift_scope(source: str, declaration: str) -> str:
+    """Read one balanced Swift scope; adjacent declarations cannot satisfy it."""
+    source = re.sub(r"//[^\n]*|/\*.*?\*/", "", source, flags=re.S)
+    start = source.find(declaration)
+    opening = source.find("{", start) if start >= 0 else -1
+    if opening < 0:
+        return ""
+    depth = 0
+    quoted = False
+    escaped = False
+    for index in range(opening, len(source)):
+        char = source[index]
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+            continue
+        if char == '"':
+            quoted = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return source[opening + 1:index]
+    return ""
+
+
+def editor_layout_contract_failures(view: str, chrome: str, presenter: str) -> list[dict[str, str]]:
+    """Static companions to hosted layout tests; never a substitute for UI evidence."""
+    failures: list[dict[str, str]] = []
+
+    def require(code: str, path: Path, source: str, tokens: list[str]) -> None:
+        for token in tokens:
+            if token not in source:
+                failures.append({"code": code, "path": rel(path), "detail": token})
+
+    def forbid(code: str, path: Path, source: str, tokens: list[str]) -> None:
+        for token in tokens:
+            if token in source:
+                failures.append({"code": code, "path": rel(path), "detail": token})
+
+    def ordered(code: str, path: Path, source: str, tokens: list[str]) -> None:
+        positions = [source.find(token) for token in tokens]
+        if any(position < 0 for position in positions) or positions != sorted(positions):
+            failures.append({"code": code, "path": rel(path), "detail": " -> ".join(tokens)})
+
+    content_layout = swift_scope(chrome, "struct ScreenshotChromeContentLayout")
+    panel_layout = swift_scope(chrome, "struct ScreenshotEditorToolbarPanelLayout")
+    overlay_layout = swift_scope(chrome, "struct ScreenshotEditorOverlayLayout")
+    require("editor_synchronous_intrinsic_measurement_missing", EDITOR_CHROME_LAYOUT, content_layout, [
+        "subviews.first?.sizeThatFits(.unspecified).width", "min(maximumWidth, proposal.width ?? maximumWidth, intrinsic)",
+        "proposal: ProposedViewSize(width: bounds.width, height: bounds.height)",
+    ])
+    require("editor_content_sized_property_surface_missing", EDITOR_CHROME_LAYOUT, panel_layout, [
+        "subviews.first?.sizeThatFits(.unspecified).width", "subviews[1].sizeThatFits(.unspecified).width",
+        "let propertyWidth = min(bounds.width", "proposal: ProposedViewSize(width: propertyWidth",
+        "subviews[0].place", "subviews[1].place",
+    ])
+    require("editor_chrome_measured_frames_not_applied", EDITOR_CHROME_LAYOUT, overlay_layout, [
+        "statusWidth: subviews[1].sizeThatFits(.unspecified).width",
+        "toolbarWidth: subviews[2].sizeThatFits(.unspecified).width",
+        "presentation: presentation, safeAreaInsets: safeAreaInsets",
+        "zip(subviews, [frames.canvas, frames.status, frames.toolbar])",
+        "subview.place", "proposal: ProposedViewSize(width: frame.width, height: frame.height)",
+    ])
+    maximum_width = swift_scope(chrome, "static func maximumWidth(")
+    require("editor_display_width_budget_missing", EDITOR_CHROME_LAYOUT, maximum_width, ["max(0, availableWidth - edgeMargin * 2)"])
+    forbid("editor_760_point_ceiling_restored", EDITOR_CHROME_LAYOUT, maximum_width, ["760", "editorPreferredToolbarWidth"])
+
+    mode = swift_scope(chrome, "enum ScreenshotEditorCanvasPresentation")
+    require("editor_full_display_mode_boundary_missing", EDITOR_CHROME_LAYOUT, mode, [
+        "!isLongImage", "!displayFrames.isEmpty", "sourceFrame.minX - captureFrame.minX",
+        "sourceFrame.minY - captureFrame.minY", "sourceFrame.maxX - captureFrame.maxX",
+        "sourceFrame.maxY - captureFrame.maxY", "sourceFrame == displayUnion", "coversSource",
+        "? .displayOverlay : .cropSurround",
+    ])
+    crop_layout = swift_scope(chrome, "enum ScreenshotEditorCropChromeLayout")
+    require("editor_full_display_canvas_or_safe_chrome_missing", EDITOR_CHROME_LAYOUT, crop_layout, [
+        "presentation: ScreenshotEditorCanvasPresentation = .cropSurround",
+        "presentation == .displayOverlay ? fullCanvas : displayCanvas(",
+        "safeAreaInsets.top", "safeAreaInsets.bottom", "safeAreaInsets.leading", "safeAreaInsets.trailing",
+        ": crop.minY", ": crop.maxY + ScreenshotEditorChromeMetrics.cropGap",
+    ])
+    require("editor_display_mode_not_wired", EDITOR_PRESENTER, presenter, [
+        "ScreenshotEditorCanvasPresentation.resolve(", "captureFrame: capture.sourceRect",
+        "displayFrames: capture.editingContext?.screens.map(\\.frame)",
+        "isLongImage: store.prefersLongImageViewport", "canvasPresentation: canvasPresentation",
+        "chromeSafeAreaInsets: chromeSafeAreaInsets",
+    ])
+    require("editor_chrome_measured_frames_not_applied", EDITOR_VIEW, view, [
+        "ScreenshotEditorOverlayLayout(", "presentation: canvasPresentation, safeAreaInsets: chromeSafeAreaInsets",
+        "ScreenshotEditorToolbarPanelLayout(maximumWidth: maximumWidth)",
+    ])
+
+    toolbar = swift_scope(view, "struct ScreenshotUnifiedEditorToolbar")
+    expanded = swift_scope(toolbar, "private var expandedContent:")
+    compact = swift_scope(toolbar, "private var compactContent:")
+    cluster = swift_scope(toolbar, "private var toolCluster:")
+    require("editor_real_plugin_slot_measurement_missing", EDITOR_VIEW, expanded, ["pluginToolContent", "pluginOutputContent", "toolCluster"])
+    require("editor_real_plugin_slot_measurement_missing", EDITOR_VIEW, toolbar, [
+        "expandedContent.fixedSize(horizontal: true, vertical: false)", "ViewThatFits(in: .horizontal)",
+    ])
+    require("editor_quick_tool_natural_geometry_missing", EDITOR_VIEW, cluster, [
+        "ForEach(presentation.visibleQuickTools", ".fixedSize(horizontal: true, vertical: false)",
+    ])
+    forbid("editor_quick_tool_stretch_or_nested_scroll_restored", EDITOR_VIEW, cluster, [
+        ".frame(maxWidth: .infinity)", ".layoutPriority(0)", "ScreenshotEditorToolStrip(",
+    ])
+    require("editor_narrow_primary_actions_or_overflow_missing", EDITOR_VIEW, compact, [
+        "dispatch(.close)", "item: .select", "ScreenshotChromeOverflowRow(", "Menu {",
+        "dispatch(.undo)", "dispatch(.redo)", "dispatch(.pin)", "dispatch(.save)", "dispatch(.retake)",
+        "dispatch(.complete)", "pluginToolContent", "pluginOutputContent", "screenshot.editor.moreActions",
+        ".fixedSize(horizontal: true, vertical: false)",
+    ])
+    if not (0 <= compact.find("dispatch(.close)") < compact.find("ScreenshotChromeOverflowRow(") < compact.find("dispatch(.complete)")):
+        failures.append({"code": "editor_narrow_primary_actions_or_overflow_missing", "path": rel(EDITOR_VIEW), "detail": "close/select precede scrolling tools; complete stays in the fixed trailing group"})
+
+    status = swift_scope(view, "struct ScreenshotEditorStatusBar:")
+    properties = swift_scope(view, "private struct ScreenshotExpandedPropertiesRow:")
+    overflow = swift_scope(view, "private struct ScreenshotChromeOverflowRow<")
+    require("editor_status_first_frame_geometry_missing", EDITOR_VIEW, status, [
+        "ScreenshotChromeContentLayout(", "ViewThatFits(in: .horizontal)", "chips.fixedSize(horizontal: true",
+        "ScreenshotChromeOverflowRow(", ".fixedSize(horizontal: true, vertical: true)",
+    ])
+    forbid("editor_status_async_width_or_fade_restored", EDITOR_VIEW, status, [
+        ".mask", "PreferenceKey", "onContentWidthChange", "measuredStatusContentWidth",
+    ])
+    require("editor_properties_content_sizing_or_overflow_missing", EDITOR_VIEW, properties, [
+        "ScreenshotChromeContentLayout(", "propertyContents.fixedSize", "ScreenshotChromeOverflowRow { propertyContents }",
+    ])
+    forbid("editor_properties_full_width_slab_restored", EDITOR_VIEW, properties, [".frame(width: maximumWidth", ".mask"])
+    require("editor_overflow_cues_or_accessibility_missing", EDITOR_VIEW, overflow, [
+        "scrollButton(forward: false)", "scrollButton(forward: true)", "ScrollView(.horizontal)",
+        "proxy.scrollTo(leadingID", "proxy.scrollTo(trailingID", "proxy.scrollTo(id, anchor: .center)",
+        "screenshot.editor.properties.scrollForward", "screenshot.editor.properties.scrollBackward",
+        "BlocksCompactIconButton(", ".accessibilityElement(children: .contain)",
+    ])
+    forbid("editor_overflow_cues_overlay_content", EDITOR_VIEW, overflow, [".overlay", ".mask"])
+
+    bottom = swift_scope(view, "private func bottomToolbarContainer")
+    surface = ".blocksSurface(.panel, cornerRadius: BlocksVisualTokens.CornerRadius.section)"
+    first_surface = bottom.find(surface)
+    property_start = bottom.find("ScreenshotExpandedPropertiesRow(")
+    second_surface = bottom.find(surface, first_surface + len(surface))
+    if not (0 <= bottom.find("ScreenshotUnifiedEditorToolbar(") < first_surface < property_start < second_surface) or bottom.count(surface) != 2:
+        failures.append({"code": "editor_main_property_order_or_independent_surfaces_missing", "path": rel(EDITOR_VIEW), "detail": "main controls then content-sized inspector, each using the shared panel surface"})
+
+    # HEAD already uses session-scoped async pinning. Preserve these stronger
+    # guards instead of requiring the obsolete optional-self, unscoped call.
+    pin = swift_scope(presenter, "private func pinSession(")
+    finish = swift_scope(presenter, "private func finishSession(")
+    require("editor_async_pin_identity_contract_missing", EDITOR_PRESENTER, pin, [
+        "guard activeSessionID == sessionID, self.store === store,", "sessionCompletion != nil",
+        "pinnedScreenshotManager.present(presentation", "store.setFinalizingOutput(true)",
+        "await finishSession(.pinned(presentation.image), sessionID: sessionID)",
+        "guard !Task.isCancelled || hasCommittedFinalOutputResult(sessionID: sessionID)",
+        "guard activeSessionID == sessionID, self.store === store else", "return executionResult",
+    ])
+    require("editor_async_finish_identity_contract_missing", EDITOR_PRESENTER, finish, [
+        "guard activeSessionID == sessionID else", "let completion = sessionCompletion",
+        "sessionCompletion = nil", "await completion?(outcome)",
+    ])
+    callback = swift_scope(presenter, "onPinned:")
+    require("editor_async_pin_dispatch_contract_missing", EDITOR_PRESENTER, callback, [
+        "[weak self] presentation in", "Task { @MainActor [weak self] in",
+        "guard let self, self.activeSessionID == sessionID,", "let store = self.store",
+        "await self.runHostFinalOutput(sessionID: sessionID)", "await presenter.pinSession(",
+        "sessionID: sessionID", "store: store",
+    ])
+    ordered("editor_async_pin_order_regressed", EDITOR_PRESENTER, pin, [
+        "guard activeSessionID == sessionID, self.store === store,",
+        "pinnedScreenshotManager.present(presentation", "store.setFinalizingOutput(true)",
+        "await finishSession(.pinned(presentation.image), sessionID: sessionID)",
+        "guard activeSessionID == sessionID, self.store === store else", "closeEditorWindow()",
+    ])
+    ordered("editor_async_finish_order_regressed", EDITOR_PRESENTER, finish, [
+        "guard activeSessionID == sessionID else", "let completion = sessionCompletion",
+        "sessionCompletion = nil", "await completion?(outcome)",
+    ])
+    return failures
+
+
+def verify_layout_contract_mutations(view: str, chrome: str, presenter: str) -> list[dict[str, str]]:
+    """In-memory negative fixtures: no checkout or production source is modified."""
+    sources = [view, chrome, presenter]
+    mutations = [
+        (1, "subviews.first?.sizeThatFits(.unspecified).width", "subviews.first?.sizeThatFits(proposal).width", "editor_synchronous_intrinsic_measurement_missing"),
+        (1, "max(0, availableWidth - edgeMargin * 2)", "min(760, max(0, availableWidth - edgeMargin * 2))", "editor_760_point_ceiling_restored"),
+        (0, "pluginOutputContent", "removedOutputSlot", "editor_real_plugin_slot_measurement_missing"),
+        (0, ".fixedSize(horizontal: true, vertical: false)", ".frame(maxWidth: .infinity)", "editor_quick_tool_stretch_or_nested_scroll_restored"),
+        (0, ".onDeleteCommand(perform: deleteFocusedElement)", ".mask { Color.clear }", "editor_status_async_width_or_fade_restored"),
+        (1, "presentation == .displayOverlay ? fullCanvas : displayCanvas(", "displayCanvas(", "editor_full_display_canvas_or_safe_chrome_missing"),
+        (1, "!isLongImage,", "", "editor_full_display_mode_boundary_missing"),
+        (1, "safeAreaInsets.top", "0", "editor_full_display_canvas_or_safe_chrome_missing"),
+        (1, "zip(subviews, [frames.canvas, frames.status, frames.toolbar])", "zip(subviews, [frames.canvas])", "editor_chrome_measured_frames_not_applied"),
+        (0, "Menu {", "Group {", "editor_narrow_primary_actions_or_overflow_missing"),
+        (0, "scrollButton(forward: true)", "scrollButton(forward: false)", "editor_overflow_cues_or_accessibility_missing"),
+        (0, "ScreenshotExpandedPropertiesRow(", "RemovedInspector(", "editor_main_property_order_or_independent_surfaces_missing"),
+        (2, "await finishSession(.pinned(presentation.image), sessionID: sessionID)", "finishSessionWithoutWaiting(.pinned(presentation.image))", "editor_async_pin_identity_contract_missing"),
+        (2, "await completion?(outcome)", "completion?(outcome)", "editor_async_finish_identity_contract_missing"),
+        (2, "guard let self, self.activeSessionID == sessionID,", "guard let self,", "editor_async_pin_dispatch_contract_missing"),
+    ]
+    failures = []
+    for index, before, after, expected in mutations:
+        mutated = list(sources)
+        if before not in mutated[index]:
+            failures.append({"code": "editor_layout_mutation_fixture_stale", "path": rel(Path(__file__)), "detail": before})
+            continue
+        mutated[index] = mutated[index].replace(before, after)
+        observed = {failure["code"] for failure in editor_layout_contract_failures(*mutated)}
+        if expected not in observed:
+            failures.append({"code": "editor_layout_mutation_not_rejected", "path": rel(Path(__file__)), "detail": expected})
+    return failures
+
+
 def main() -> int:
     failures: list[dict[str, str]] = []
     for path in [CORE_DOCUMENT, CORE_GEOMETRY, CORE_RENDERER, CORE_BADGE_LAYOUT, CORE_PREFERENCES, EDITOR_STORE, EDITOR_STATE, RENDER_PIPELINE, EDITOR_VIEW, EDITOR_CHROME_LAYOUT, EDITOR_OCR, EDITOR_CANVAS, EDITOR_INPUT, EDITOR_CONTROLS, EDITOR_PRESENTER, PINNED_SCREENSHOT, EDITOR_OUTPUT, PASTEBOARD_WRITER, PROJECT, APP_TEST]:
@@ -75,6 +294,8 @@ def main() -> int:
     pasteboard = text(PASTEBOARD_WRITER)
     project = text(PROJECT)
     app_tests = text(APP_TEST)
+    failures.extend(editor_layout_contract_failures(view, chrome_layout, presenter))
+    failures.extend(verify_layout_contract_mutations(view, chrome_layout, presenter))
 
     if "let imageBorder = NSBezierPath" in canvas:
         failures.append({
@@ -126,8 +347,8 @@ def main() -> int:
         "enum ScreenshotEditorCropChromeLayout",
         "static func resolve(",
         "crop.midX",
-        "statusPreferredY = crop.minY",
-        "toolbarPreferredY = crop.maxY",
+        "statusPreferredY = presentation == .displayOverlay",
+        "toolbarPreferredY = presentation == .displayOverlay",
         "centeredClampedX(",
         "let statusY = min(",
         "let toolbarY = min(",
@@ -301,8 +522,8 @@ def main() -> int:
         "onEditingChanged: styleColorEditingChanged",
         "ScrollView(.horizontal)",
         ".scrollIndicators(.hidden)",
-        "ScreenshotPropertyContentWidthReader",
-        "ScreenshotPropertyEdgeMask",
+        "ScreenshotChromeContentLayout",
+        "ScreenshotChromeOverflowRow",
         "screenshot.editor.properties.scrollBackward",
         "screenshot.editor.properties.scrollForward",
         "focusRequestID: moreToolsTriggerFocusRequestID",
@@ -317,7 +538,7 @@ def main() -> int:
         "ScreenshotEditorStatusBar",
         "ScreenshotEditorStatusBarModel.visibleElements",
         ".onDeleteCommand(perform: deleteFocusedElement)",
-        ".frame(width: frames.canvas.width, height: frames.canvas.height)",
+        "ScreenshotEditorOverlayLayout(",
         "bottomToolbarContainer(layout:",
         "textCommitRequestID",
         "requestCanvasAction",
@@ -429,7 +650,7 @@ def main() -> int:
         "task?.cancel()",
         "pipeline.generation == submittedGeneration",
     ]
-    unified_toolbar = view.partition("private struct ScreenshotUnifiedEditorToolbar")[2].partition(
+    unified_toolbar = view.partition("struct ScreenshotUnifiedEditorToolbar")[2].partition(
         "private struct ScreenshotMoreToolsPanel"
     )[0]
     if "private struct ScreenshotToolbarDragHandle" in view:
@@ -563,23 +784,13 @@ def main() -> int:
                 "path": rel(path),
                 "detail": obsolete,
             })
+    # Scoped content measurement, dedicated overflow cue columns and independent
+    # surfaces are checked (and mutation-tested) by editor_layout_contract_failures.
     for token in [
-        "ScreenshotPropertyContentWidthReader",
-        "ScreenshotPropertyEdgeMask",
-        "canScrollBackward",
-        "canScrollForward",
-    ]:
-        if token not in expanded_properties and token not in view:
-            failures.append({
-                "code": "editor_properties_directional_overflow_feedback_missing",
-                "path": rel(EDITOR_VIEW),
-                "detail": token,
-            })
-    for token in [
-        "VStack(alignment: .leading, spacing: 0)",
-        ".layoutPriority(1)",
+        "ScreenshotEditorToolbarPanelLayout(maximumWidth: maximumWidth)",
+        "expandedContent.fixedSize(horizontal: true, vertical: false)",
         "let layout = toolbarLayout(availableWidth:",
-        "width: layout.width,",
+        "bottomToolbarContainer(layout: layout, maximumWidth: maximumChromeWidth)",
     ]:
         if token not in view:
             failures.append({
@@ -588,7 +799,6 @@ def main() -> int:
                 "detail": token,
             })
     for token in [
-        "ViewThatFits(in: .horizontal)",
         ".frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)",
         "isAspectRatioPresented",
     ]:
@@ -899,8 +1109,8 @@ def main() -> int:
         "override func sendEvent(_ event: NSEvent)",
         "panel.onEscape = store.handleEscape",
         "PinnedScreenshotManager",
-        "await self?.pinSession(presentation)",
-        "finishSession(.pinned(presentation.image))",
+        "await presenter.pinSession(",
+        "await finishSession(.pinned(presentation.image), sessionID: sessionID)",
     ]
     required_pinned_screenshot = [
         "struct PinnedScreenshotPresentation",
@@ -1016,12 +1226,9 @@ def main() -> int:
             "detail": "ScreenshotEditorChromeLayout.swift must be a file reference, a build file, and a Blocks Sources member",
         })
 
-    bottom_toolbar = view.partition("private func bottomToolbarContainer")[2].partition(
-        "private func manualOCRPanelFrame"
-    )[0]
+    bottom_toolbar = swift_scope(view, "private func bottomToolbarContainer")
     ordered_bottom_tokens = [
         "ScreenshotUnifiedEditorToolbar(",
-        "Divider().opacity(0.5)",
         "ScreenshotExpandedPropertiesRow(",
     ]
     bottom_positions = [bottom_toolbar.find(token) for token in ordered_bottom_tokens]
@@ -1029,26 +1236,15 @@ def main() -> int:
         failures.append({
             "code": "editor_main_toolbar_property_row_order_regressed",
             "path": rel(EDITOR_VIEW),
-            "detail": "main toolbar must precede divider and property row",
+            "detail": "main toolbar must precede its separate content-sized property row",
         })
     if ".blocksSurface(.panel" not in bottom_toolbar:
         failures.append({
             "code": "editor_main_toolbar_panel_surface_missing",
             "path": rel(EDITOR_VIEW),
         })
-    for token in [
-        "let frames = ScreenshotEditorCropChromeLayout.resolve(",
-        ".frame(width: frames.canvas.width, height: frames.canvas.height)",
-        ".position(x: frames.canvas.midX, y: frames.canvas.midY)",
-        ".position(x: frames.status.midX, y: frames.status.midY)",
-        ".position(x: frames.toolbar.midX, y: frames.toolbar.midY)",
-    ]:
-        if token not in view:
-            failures.append({
-                "code": "editor_chrome_frames_not_applied",
-                "path": rel(EDITOR_VIEW),
-                "detail": token,
-            })
+    # Layout.placeSubviews now applies canvas/status/toolbar frames together;
+    # the scoped assertion above rejects missing measurement or missing placement.
 
     forbidden_tokens = [
         "ScreenshotEditCommand",

@@ -97,10 +97,10 @@ struct TranslationFloatingPanelView: View {
             minHeight: TranslationPanelMetrics.minimumHeight
         )
         .background(BlocksWindowGlassConfigurator())
-        .blocksSurface(
-            .panel,
-            cornerRadius: BlocksVisualTokens.CornerRadius.large
-        )
+        // This is a titled, resizable AppKit window: its system frame owns
+        // the outer corners. Do not overlap it with a second glass rim whose
+        // custom radius differs from the system window contour.
+        .blocksBackground(.window)
         .background {
             ZStack {
                 AppleTranslationPreparationHost(controller: preparationController)
@@ -274,7 +274,10 @@ struct TranslationFloatingPanelView: View {
     }
 
     private func sourceSection(editorHeight: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(
+            alignment: .leading,
+            spacing: TranslationPanelSourceLayout.sourceEditorSpacing
+        ) {
             HStack(
                 spacing: TranslationPanelMetrics.sourceHeaderSpacing
             ) {
@@ -329,7 +332,7 @@ struct TranslationFloatingPanelView: View {
             .frame(
                 height:
                     TranslationPanelSourceLayout
-                        .sourceHeaderHeight
+                        .sourceHeaderHeight(for: model.inputSource)
             )
 
             ZStack(alignment: .topLeading) {

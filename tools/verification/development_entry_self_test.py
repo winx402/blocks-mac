@@ -1,13 +1,48 @@
 #!/usr/bin/env python3
 """Real temporary-filesystem transaction fixtures; no signing/build/launch."""
-import importlib.util, os, plistlib, shutil, tempfile
+import importlib.util, os, plistlib, shutil, tempfile, sys, io, contextlib
 from pathlib import Path
+from unittest.mock import patch
 R=Path(__file__).resolve().parents[2]; s=importlib.util.spec_from_file_location("dev",R/"script/development.py"); d=importlib.util.module_from_spec(s); s.loader.exec_module(d)
+
+def test_pipeline_fixtures():
+ sys.path.insert(0,str(R/"tools/verification"))
+ import verification_build_helpers as h
+ with tempfile.TemporaryDirectory() as directory:
+  root=Path(directory).resolve();derived=root/"Derived.noindex";product=derived/"Tests/Build/Products/DebugTesting/Blocks.app";product.mkdir(parents=True)
+  (derived/"Tests/Build/Products/fixture.xctestrun").write_text("fixture")
+  installed=root/"Applications/Blocks Dev.app";installed.mkdir(parents=True)
+  good={"ok":True,"returncode":0,"stdout":"fixture passed","stderr":"","timed_out":False}
+  for scenario in ("success","build-cleanup-failure","test-failure","interrupt","registration-failure"):
+   calls=[]
+   def build(command,**kwargs):
+    assert kwargs["retry_cleaned_ibtoold"] is True
+    calls.append("build")
+    if scenario=="interrupt":raise KeyboardInterrupt()
+    if scenario=="build-cleanup-failure":return {**good,"ok":False,"child_returncode":0,"process_cleanup":{"status":"target_group_residual_cleaned"}}
+    return good
+   def test(command,**kwargs):
+    calls.append("test");return {**good,"ok":scenario!="test-failure"}
+   def unregister(command,**kwargs):
+    assert command==[h._LSREGISTER,"-u",str(product)];calls.append("unregister")
+    if scenario=="registration-failure":raise OSError("fixture unregister failed")
+   output=io.StringIO()
+   with patch.object(d,"doctor",lambda:None),patch.object(d,"DERIVED",derived),patch.object(h,"run_controlled_xcode_build",build),patch.object(h,"run_controlled_xcode_test",test),patch.object(h.subprocess,"run",unregister),contextlib.redirect_stdout(output),contextlib.redirect_stderr(io.StringIO()):
+    try:d.test()
+    except KeyboardInterrupt:assert scenario=="interrupt"
+    except RuntimeError as error:
+     assert scenario in ("build-cleanup-failure","test-failure","registration-failure")
+     if scenario=="build-cleanup-failure":assert "xcodebuild succeeded (exit 0)" in str(error)
+    else:assert scenario=="success"
+   assert calls[-1]=="unregister" and ("test" in calls)==(scenario in ("success","test-failure","registration-failure")),calls
+   assert ("PASS: isolated XCTest completed" in output.getvalue())==(scenario=="success")
+   assert product.is_dir() and installed.is_dir()
 def app(p,m):
  for x in ("Contents/MacOS/Blocks Dev","Contents/MacOS/BlocksActionBroker","Contents/Resources/CLI/blocks","Contents/Helpers/Blocks Selection Helper.app/Contents/MacOS/Blocks Selection Helper"):
   q=p/x;q.parent.mkdir(parents=True,exist_ok=True);q.write_text(m);q.chmod(0o755)
  (p/"Contents/Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier":"app.blocks.dev"})); h=p/"Contents/Helpers/Blocks Selection Helper.app/Contents/Info.plist";h.write_bytes(plistlib.dumps({"CFBundleURLTypes":[]})); a=p/"Contents/Library/LaunchAgents/app.blocks.action-broker.plist";a.parent.mkdir(parents=True,exist_ok=True);a.write_bytes(plistlib.dumps({}))
 def main():
+ test_pipeline_fixtures()
  with tempfile.TemporaryDirectory() as t:
   root=Path(t); prod=root/"p";app(prod/"Blocks Dev.app","new");shutil.rmtree(prod/"Blocks Dev.app/Contents/Helpers");app(prod/"Blocks Selection Helper.app","h");(prod/"blocks").write_text("c")
   old={k:getattr(d,k) for k in ("HOME","DESTINATION","MANIFEST","run","sign","signature","rename_display","update_plist","running_local_processes")};d.HOME=root;d.DESTINATION=root/"Apps/Blocks Dev.app";d.MANIFEST=root/"Support/peers.json";d.ensure_real_directory=lambda p:p.mkdir(parents=True,exist_ok=True);d.running_local_processes=lambda:[];d.sign=lambda *_:None;d.rename_display=lambda *_:None;d.update_plist=lambda p,f:(lambda x:(f(x),p.write_bytes(plistlib.dumps(x))))(plistlib.loads(p.read_bytes()))
