@@ -696,10 +696,9 @@ final class ScreenshotEditorPresenter: NSObject, NSWindowDelegate {
             )
             // The image still occupies the full display. Only chrome avoids a
             // physical notch; do not subtract menu-bar/Dock bands from pixels.
-            let screenInsets = NSScreen.screens.first(where: { $0.frame == initialFrame })?.safeAreaInsets
-            let chromeSafeAreaInsets = EdgeInsets(
-                top: screenInsets?.top ?? 0, leading: screenInsets?.left ?? 0,
-                bottom: screenInsets?.bottom ?? 0, trailing: screenInsets?.right ?? 0
+            let chromeSafeAreaInsets = ScreenshotEditorChromeSafeArea.resolve(
+                sourceFrame: initialFrame,
+                displays: NSScreen.screens.map { (frame: $0.frame, insets: $0.safeAreaInsets) }
             )
             let panel = Self.makeHostPanel(frame: initialFrame)
             panel.onEscape = store.handleEscape

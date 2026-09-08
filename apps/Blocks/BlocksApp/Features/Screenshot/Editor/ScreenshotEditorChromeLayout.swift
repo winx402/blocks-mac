@@ -60,6 +60,40 @@ enum ScreenshotEditorCanvasPresentation: Equatable {
     }
 }
 
+enum ScreenshotEditorChromeSafeArea {
+    /// Keep chrome on one actual display, even when the captured union spans
+    /// several screens or empty space between them. Image pixels are unchanged.
+    static func resolve(
+        sourceFrame: CGRect,
+        displays: [(frame: CGRect, insets: NSEdgeInsets)]
+    ) -> EdgeInsets {
+        guard !sourceFrame.isEmpty else { return EdgeInsets() }
+        var selected: CGRect?
+        var largestArea: CGFloat = 0
+        for display in displays {
+            let safe = CGRect(
+                x: display.frame.minX + display.insets.left,
+                y: display.frame.minY + display.insets.bottom,
+                width: max(0, display.frame.width - display.insets.left - display.insets.right),
+                height: max(0, display.frame.height - display.insets.top - display.insets.bottom)
+            ).intersection(sourceFrame)
+            guard !safe.isNull, !safe.isEmpty else { continue }
+            let area = safe.width * safe.height
+            if area > largestArea {
+                selected = safe
+                largestArea = area
+            }
+        }
+        guard let safe = selected else { return EdgeInsets() }
+        return EdgeInsets(
+            top: sourceFrame.maxY - safe.maxY,
+            leading: safe.minX - sourceFrame.minX,
+            bottom: safe.minY - sourceFrame.minY,
+            trailing: sourceFrame.maxX - safe.maxX
+        )
+    }
+}
+
 /// Synchronous intrinsic measurement includes localized labels and plugin views.
 /// No first-frame estimate or deferred PreferenceKey width correction is needed.
 struct ScreenshotChromeContentLayout: Layout {
@@ -77,24 +111,61 @@ struct ScreenshotChromeContentLayout: Layout {
     }
 }
 
-/// Each row retains its own content-sized surface; an empty inspector hint does
-/// not paint a toolbar-wide blank slab. The controls row determines the cap.
+/// Each chrome strip retains its own content-sized surface; an empty inspector
+/// hint does not paint a toolbar-wide blank slab. A present plugin inspector
+/// may add a separately capped, vertically scrollable properties surface.
 struct ScreenshotEditorToolbarPanelLayout: Layout {
     let maximumWidth: CGFloat
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let width = min(maximumWidth, proposal.width ?? maximumWidth,
-                        subviews.first?.sizeThatFits(.unspecified).width ?? 0)
-        return CGSize(width: width, height: ScreenshotEditorChromeMetrics.bottomToolbarHeight)
+        let proposedWidth = min(maximumWidth, proposal.width ?? maximumWidth)
+        let toolbar = subviews.first?.sizeThatFits(
+            ProposedViewSize(width: proposedWidth, height: nil)
+        ) ?? .zero
+        let properties = subviews.dropFirst().first?.sizeThatFits(
+            ProposedViewSize(width: proposedWidth, height: nil)
+        ) ?? .zero
+        let width = min(
+            proposedWidth,
+            max(toolbar.width, properties.width)
+        )
+        let propertiesHeight = max(
+            ScreenshotDesignTokens.toolbarPropertyHeight,
+            properties.height
+        )
+        return CGSize(
+            width: width,
+            height: ScreenshotDesignTokens.toolbarMainHeight
+                + ScreenshotEditorChromeMetrics.toolbarDividerHeight
+                + propertiesHeight
+        )
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         guard subviews.count == 2 else { return }
         subviews[0].place(at: bounds.origin, anchor: .topLeading,
                           proposal: ProposedViewSize(width: bounds.width, height: ScreenshotDesignTokens.toolbarMainHeight))
-        let propertyWidth = min(bounds.width, subviews[1].sizeThatFits(.unspecified).width)
-        subviews[1].place(at: CGPoint(x: bounds.midX, y: bounds.maxY), anchor: .bottom,
-                          proposal: ProposedViewSize(width: propertyWidth, height: ScreenshotDesignTokens.toolbarPropertyHeight))
+        let propertySize = subviews[1].sizeThatFits(
+            ProposedViewSize(width: bounds.width, height: nil)
+        )
+        let propertyWidth = min(bounds.width, propertySize.width)
+        let propertyHeight = max(
+            ScreenshotDesignTokens.toolbarPropertyHeight,
+            propertySize.height
+        )
+        subviews[1].place(
+            at: CGPoint(
+                x: bounds.midX,
+                y: bounds.minY
+                    + ScreenshotDesignTokens.toolbarMainHeight
+                    + ScreenshotEditorChromeMetrics.toolbarDividerHeight
+            ),
+            anchor: .top,
+            proposal: ProposedViewSize(
+                width: propertyWidth,
+                height: propertyHeight
+            )
+        )
     }
 }
 
@@ -113,11 +184,25 @@ struct ScreenshotEditorOverlayLayout: Layout {
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         guard subviews.count == 3 else { return }
+        let maximumChromeWidth = max(
+            0,
+            bounds.width
+                - (presentation == .displayOverlay
+                    ? safeAreaInsets.leading + safeAreaInsets.trailing
+                    : 0)
+        )
+        let statusSize = subviews[1].sizeThatFits(
+            ProposedViewSize(width: maximumChromeWidth, height: nil)
+        )
+        let toolbarSize = subviews[2].sizeThatFits(
+            ProposedViewSize(width: maximumChromeWidth, height: nil)
+        )
         let frames = ScreenshotEditorCropChromeLayout.resolve(
             availableSize: bounds.size, sourceRect: sourceRect, cropRect: cropRect,
             zoomScale: zoomScale, panOffset: panOffset,
-            statusWidth: subviews[1].sizeThatFits(.unspecified).width,
-            toolbarWidth: subviews[2].sizeThatFits(.unspecified).width,
+            statusWidth: statusSize.width,
+            toolbarWidth: toolbarSize.width,
+            toolbarHeight: toolbarSize.height,
             presentation: presentation, safeAreaInsets: safeAreaInsets
         )
         for (subview, frame) in zip(subviews, [frames.canvas, frames.status, frames.toolbar]) {
@@ -136,9 +221,14 @@ enum ScreenshotEditorCropChromeLayout {
         panOffset: CGSize,
         statusWidth: CGFloat,
         toolbarWidth: CGFloat,
+        toolbarHeight: CGFloat = ScreenshotEditorChromeMetrics.bottomToolbarHeight,
         presentation: ScreenshotEditorCanvasPresentation = .cropSurround,
         safeAreaInsets: EdgeInsets = EdgeInsets()
     ) -> ScreenshotEditorCropChromeFrames {
+        let resolvedToolbarHeight = max(
+            ScreenshotEditorChromeMetrics.bottomToolbarHeight,
+            toolbarHeight
+        )
         let fullCanvas = CGRect(origin: .zero, size: availableSize)
         guard sourceRect.width > 0, sourceRect.height > 0 else {
             let toolbar = CGRect(
@@ -150,10 +240,10 @@ enum ScreenshotEditorCropChromeLayout {
                 y: max(
                     0,
                     availableSize.height - ScreenshotEditorChromeMetrics.edgeInset
-                        - ScreenshotEditorChromeMetrics.bottomToolbarHeight
+                        - resolvedToolbarHeight
                 ),
                 width: toolbarWidth,
-                height: ScreenshotEditorChromeMetrics.bottomToolbarHeight
+                height: resolvedToolbarHeight
             )
             let status = CGRect(
                 x: centeredClampedX(
@@ -177,7 +267,8 @@ enum ScreenshotEditorCropChromeLayout {
         )
         let canvas = presentation == .displayOverlay ? fullCanvas : displayCanvas(
             availableSize: availableSize,
-            projectedCrop: fullCanvasCrop
+            projectedCrop: fullCanvasCrop,
+            toolbarHeight: resolvedToolbarHeight
         )
         let crop = canvas == fullCanvas
             ? fullCanvasCrop
@@ -218,14 +309,14 @@ enum ScreenshotEditorCropChromeLayout {
         )
         let toolbarPreferredY = presentation == .displayOverlay
             ? availableSize.height - ScreenshotEditorChromeMetrics.edgeInset
-                - safeAreaInsets.bottom - ScreenshotEditorChromeMetrics.bottomToolbarHeight
+                - safeAreaInsets.bottom - resolvedToolbarHeight
             : crop.maxY + ScreenshotEditorChromeMetrics.cropGap
         let toolbarY = min(
             max(ScreenshotEditorChromeMetrics.edgeInset, toolbarPreferredY),
             max(
                 ScreenshotEditorChromeMetrics.edgeInset,
                 availableSize.height - ScreenshotEditorChromeMetrics.edgeInset
-                    - ScreenshotEditorChromeMetrics.bottomToolbarHeight
+                    - resolvedToolbarHeight
             )
         )
         return .init(
@@ -241,7 +332,7 @@ enum ScreenshotEditorCropChromeLayout {
                 x: toolbarX,
                 y: toolbarY,
                 width: toolbarWidth,
-                height: ScreenshotEditorChromeMetrics.bottomToolbarHeight
+                height: resolvedToolbarHeight
             )
         )
     }
@@ -264,12 +355,15 @@ enum ScreenshotEditorCropChromeLayout {
 
     private static func displayCanvas(
         availableSize: CGSize,
-        projectedCrop: CGRect
+        projectedCrop: CGRect,
+        toolbarHeight: CGFloat
     ) -> CGRect {
         let availableAbove = projectedCrop.minY
         let availableBelow = availableSize.height - projectedCrop.maxY
         let requiredAbove = ScreenshotEditorChromeMetrics.canvasTopInset
-        let requiredBelow = ScreenshotEditorChromeMetrics.canvasBottomInset
+        let requiredBelow = ScreenshotEditorChromeMetrics.cropGap
+            + toolbarHeight
+            + ScreenshotEditorChromeMetrics.edgeInset
         guard availableAbove + 0.5 < requiredAbove
                 || availableBelow + 0.5 < requiredBelow else {
             return CGRect(origin: .zero, size: availableSize)

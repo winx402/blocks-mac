@@ -22,6 +22,7 @@ EDITOR_STATE = APP / "Features/Screenshot/Editor/ScreenshotEditorState.swift"
 RENDER_PIPELINE = APP / "Features/Screenshot/Editor/ScreenshotRenderPipeline.swift"
 EDITOR_VIEW = APP / "Features/Screenshot/Editor/ScreenshotEditorView.swift"
 EDITOR_CHROME_LAYOUT = APP / "Features/Screenshot/Editor/ScreenshotEditorChromeLayout.swift"
+PLUGIN_UI_RENDERER = APP / "Features/Plugins/BlocksPluginUIRenderer.swift"
 EDITOR_OCR = APP / "Features/Screenshot/Editor/ScreenshotEditorOCRViews.swift"
 EDITOR_CANVAS = APP / "Features/Screenshot/Editor/ScreenshotEditorCanvas.swift"
 EDITOR_INPUT = APP / "Features/Screenshot/Editor/ScreenshotEditorInputControls.swift"
@@ -77,7 +78,12 @@ def swift_scope(source: str, declaration: str) -> str:
     return ""
 
 
-def editor_layout_contract_failures(view: str, chrome: str, presenter: str) -> list[dict[str, str]]:
+def editor_layout_contract_failures(
+    view: str,
+    chrome: str,
+    presenter: str,
+    plugin_renderer: str,
+) -> list[dict[str, str]]:
     """Static companions to hosted layout tests; never a substitute for UI evidence."""
     failures: list[dict[str, str]] = []
 
@@ -103,14 +109,25 @@ def editor_layout_contract_failures(view: str, chrome: str, presenter: str) -> l
         "subviews.first?.sizeThatFits(.unspecified).width", "min(maximumWidth, proposal.width ?? maximumWidth, intrinsic)",
         "proposal: ProposedViewSize(width: bounds.width, height: bounds.height)",
     ])
-    require("editor_content_sized_property_surface_missing", EDITOR_CHROME_LAYOUT, panel_layout, [
-        "subviews.first?.sizeThatFits(.unspecified).width", "subviews[1].sizeThatFits(.unspecified).width",
-        "let propertyWidth = min(bounds.width", "proposal: ProposedViewSize(width: propertyWidth",
+    require("editor_plugin_inspector_dynamic_toolbar_measurement_missing", EDITOR_CHROME_LAYOUT, panel_layout, [
+        "let proposedWidth = min(maximumWidth, proposal.width ?? maximumWidth)",
+        "ProposedViewSize(width: proposedWidth, height: nil)",
+        "propertiesHeight = max(",
+        "ScreenshotDesignTokens.toolbarPropertyHeight",
+        "ScreenshotEditorChromeMetrics.toolbarDividerHeight",
         "subviews[0].place", "subviews[1].place",
+        "propertyHeight = max(",
+        "proposal: ProposedViewSize(\n                width: propertyWidth,\n                height: propertyHeight",
     ])
     require("editor_chrome_measured_frames_not_applied", EDITOR_CHROME_LAYOUT, overlay_layout, [
-        "statusWidth: subviews[1].sizeThatFits(.unspecified).width",
-        "toolbarWidth: subviews[2].sizeThatFits(.unspecified).width",
+        "let maximumChromeWidth = max(",
+        "safeAreaInsets.leading + safeAreaInsets.trailing",
+        "let statusSize = subviews[1].sizeThatFits(",
+        "let toolbarSize = subviews[2].sizeThatFits(",
+        "ProposedViewSize(width: maximumChromeWidth, height: nil)",
+        "statusWidth: statusSize.width",
+        "toolbarWidth: toolbarSize.width",
+        "toolbarHeight: toolbarSize.height",
         "presentation: presentation, safeAreaInsets: safeAreaInsets",
         "zip(subviews, [frames.canvas, frames.status, frames.toolbar])",
         "subview.place", "proposal: ProposedViewSize(width: frame.width, height: frame.height)",
@@ -168,7 +185,11 @@ def editor_layout_contract_failures(view: str, chrome: str, presenter: str) -> l
         failures.append({"code": "editor_narrow_primary_actions_or_overflow_missing", "path": rel(EDITOR_VIEW), "detail": "close/select precede scrolling tools; complete stays in the fixed trailing group"})
 
     status = swift_scope(view, "struct ScreenshotEditorStatusBar:")
+    properties_layout = swift_scope(view, "struct ScreenshotEditorPropertiesContentLayout")
+    plugin_inspector = swift_scope(view, "struct ScreenshotPluginInspectorSection")
+    plugin_viewport = swift_scope(view, "private struct ScreenshotPluginInspectorViewportLayout")
     properties = swift_scope(view, "private struct ScreenshotExpandedPropertiesRow:")
+    property_strip = swift_scope(view, "private struct ScreenshotChromePropertyStrip")
     overflow = swift_scope(view, "private struct ScreenshotChromeOverflowRow<")
     require("editor_status_first_frame_geometry_missing", EDITOR_VIEW, status, [
         "ScreenshotChromeContentLayout(", "ViewThatFits(in: .horizontal)", "chips.fixedSize(horizontal: true",
@@ -177,10 +198,28 @@ def editor_layout_contract_failures(view: str, chrome: str, presenter: str) -> l
     forbid("editor_status_async_width_or_fade_restored", EDITOR_VIEW, status, [
         ".mask", "PreferenceKey", "onContentWidthChange", "measuredStatusContentWidth",
     ])
-    require("editor_properties_content_sizing_or_overflow_missing", EDITOR_VIEW, properties, [
-        "ScreenshotChromeContentLayout(", "propertyContents.fixedSize", "ScreenshotChromeOverflowRow { propertyContents }",
+    require("editor_properties_content_sizing_or_overflow_missing", EDITOR_VIEW, properties_layout, [
+        "ScreenshotChromeContentLayout(",
+        "ScreenshotPluginInspectorSection(",
+        "maximumPluginInspectorHeight",
+        ".blocksSurface(",
     ])
-    forbid("editor_properties_full_width_slab_restored", EDITOR_VIEW, properties, [".frame(width: maximumWidth", ".mask"])
+    require("editor_properties_content_sizing_or_overflow_missing", EDITOR_VIEW, property_strip, [
+        "propertyContents.fixedSize", "ScreenshotChromeOverflowRow { propertyContents }",
+    ])
+    require("editor_plugin_inspector_scroll_boundary_missing", EDITOR_VIEW, plugin_inspector, [
+        "ScreenshotPluginInspectorViewportLayout(", "ViewThatFits(in: .vertical)",
+        "paddedContent.fixedSize(horizontal: false, vertical: true)",
+        "ScrollView(.vertical)", ".frame(height: maximumHeight)", ".blocksSurface(",
+    ])
+    require("editor_plugin_inspector_finite_proposal_missing", EDITOR_VIEW, plugin_viewport, [
+        "let width = min(maximumWidth, proposal.width ?? maximumWidth)",
+        "let height = min(maximumHeight, proposal.height ?? maximumHeight)",
+        "ProposedViewSize(width: width, height: height)",
+        "height: min(height, measured.height)",
+        "proposal: ProposedViewSize(width: bounds.width, height: bounds.height)",
+    ])
+    forbid("editor_properties_full_width_slab_restored", EDITOR_VIEW, properties, [".mask"])
     require("editor_overflow_cues_or_accessibility_missing", EDITOR_VIEW, overflow, [
         "scrollButton(forward: false)", "scrollButton(forward: true)", "ScrollView(.horizontal)",
         "proxy.scrollTo(leadingID", "proxy.scrollTo(trailingID", "proxy.scrollTo(id, anchor: .center)",
@@ -193,9 +232,24 @@ def editor_layout_contract_failures(view: str, chrome: str, presenter: str) -> l
     surface = ".blocksSurface(.panel, cornerRadius: BlocksVisualTokens.CornerRadius.section)"
     first_surface = bottom.find(surface)
     property_start = bottom.find("ScreenshotExpandedPropertiesRow(")
-    second_surface = bottom.find(surface, first_surface + len(surface))
-    if not (0 <= bottom.find("ScreenshotUnifiedEditorToolbar(") < first_surface < property_start < second_surface) or bottom.count(surface) != 2:
+    if not (0 <= bottom.find("ScreenshotUnifiedEditorToolbar(") < first_surface < property_start) or bottom.count(surface) != 1:
         failures.append({"code": "editor_main_property_order_or_independent_surfaces_missing", "path": rel(EDITOR_VIEW), "detail": "main controls then content-sized inspector, each using the shared panel surface"})
+    require("editor_plugin_action_error_externalization_missing", PLUGIN_UI_RENDERER, plugin_renderer, [
+        "enum BlocksPluginUIActionErrorRouting", "onActionError: ((String) -> Void)? = nil",
+        "BlocksPluginUIActionErrorRouting.report(", "setInlineActionError:",
+    ])
+    screenshot_slot = swift_scope(view, "private func screenshotPluginSlot(")
+    inspector_slot = swift_scope(view, "private var screenshotInspectorPluginContent")
+    require("editor_plugin_action_error_externalization_missing", EDITOR_VIEW, screenshot_slot, [
+        "BlocksPluginUISlotHost(", "onActionError: presentPluginActionError",
+    ])
+    require("editor_plugin_action_error_externalization_missing", EDITOR_VIEW, inspector_slot, [
+        "BlocksPluginUISlotHost(", "onActionError: presentPluginActionError",
+    ])
+    require("editor_plugin_action_error_externalization_missing", EDITOR_VIEW, view, [
+        "BlocksNotificationDescriptor(",
+        "deduplicationKey: \"screenshot.plugin.action.failed\"",
+    ])
 
     # HEAD already uses session-scoped async pinning. Preserve these stronger
     # guards instead of requiring the obsolete optional-self, unscoped call.
@@ -232,11 +286,18 @@ def editor_layout_contract_failures(view: str, chrome: str, presenter: str) -> l
     return failures
 
 
-def verify_layout_contract_mutations(view: str, chrome: str, presenter: str) -> list[dict[str, str]]:
+def verify_layout_contract_mutations(
+    view: str,
+    chrome: str,
+    presenter: str,
+    plugin_renderer: str,
+) -> list[dict[str, str]]:
     """In-memory negative fixtures: no checkout or production source is modified."""
-    sources = [view, chrome, presenter]
+    sources = [view, chrome, presenter, plugin_renderer]
     mutations = [
         (1, "subviews.first?.sizeThatFits(.unspecified).width", "subviews.first?.sizeThatFits(proposal).width", "editor_synchronous_intrinsic_measurement_missing"),
+        (1, "let proposedWidth = min(maximumWidth, proposal.width ?? maximumWidth)", "let proposedWidth = maximumWidth", "editor_plugin_inspector_dynamic_toolbar_measurement_missing"),
+        (1, "toolbarHeight: toolbarSize.height", "toolbarHeight: ScreenshotEditorChromeMetrics.bottomToolbarHeight", "editor_chrome_measured_frames_not_applied"),
         (1, "max(0, availableWidth - edgeMargin * 2)", "min(760, max(0, availableWidth - edgeMargin * 2))", "editor_760_point_ceiling_restored"),
         (0, "pluginOutputContent", "removedOutputSlot", "editor_real_plugin_slot_measurement_missing"),
         (0, ".fixedSize(horizontal: true, vertical: false)", ".frame(maxWidth: .infinity)", "editor_quick_tool_stretch_or_nested_scroll_restored"),
@@ -248,6 +309,11 @@ def verify_layout_contract_mutations(view: str, chrome: str, presenter: str) -> 
         (0, "Menu {", "Group {", "editor_narrow_primary_actions_or_overflow_missing"),
         (0, "scrollButton(forward: true)", "scrollButton(forward: false)", "editor_overflow_cues_or_accessibility_missing"),
         (0, "ScreenshotExpandedPropertiesRow(", "RemovedInspector(", "editor_main_property_order_or_independent_surfaces_missing"),
+        (0, "ScreenshotPluginInspectorSection(", "RemovedPluginInspector(", "editor_properties_content_sizing_or_overflow_missing"),
+        (0, ".frame(height: maximumHeight)", ".frame(maxHeight: maximumHeight)", "editor_plugin_inspector_scroll_boundary_missing"),
+        (0, "ProposedViewSize(width: width, height: height)", ".unspecified", "editor_plugin_inspector_finite_proposal_missing"),
+        (3, "onActionError: ((String) -> Void)? = nil", "onActionErrorRemoved", "editor_plugin_action_error_externalization_missing"),
+        (0, "onActionError: presentPluginActionError", "onActionError: nil", "editor_plugin_action_error_externalization_missing"),
         (2, "await finishSession(.pinned(presentation.image), sessionID: sessionID)", "finishSessionWithoutWaiting(.pinned(presentation.image))", "editor_async_pin_identity_contract_missing"),
         (2, "await completion?(outcome)", "completion?(outcome)", "editor_async_finish_identity_contract_missing"),
         (2, "guard let self, self.activeSessionID == sessionID,", "guard let self,", "editor_async_pin_dispatch_contract_missing"),
@@ -267,7 +333,7 @@ def verify_layout_contract_mutations(view: str, chrome: str, presenter: str) -> 
 
 def main() -> int:
     failures: list[dict[str, str]] = []
-    for path in [CORE_DOCUMENT, CORE_GEOMETRY, CORE_RENDERER, CORE_BADGE_LAYOUT, CORE_PREFERENCES, EDITOR_STORE, EDITOR_STATE, RENDER_PIPELINE, EDITOR_VIEW, EDITOR_CHROME_LAYOUT, EDITOR_OCR, EDITOR_CANVAS, EDITOR_INPUT, EDITOR_CONTROLS, EDITOR_PRESENTER, PINNED_SCREENSHOT, EDITOR_OUTPUT, PASTEBOARD_WRITER, PROJECT, APP_TEST]:
+    for path in [CORE_DOCUMENT, CORE_GEOMETRY, CORE_RENDERER, CORE_BADGE_LAYOUT, CORE_PREFERENCES, EDITOR_STORE, EDITOR_STATE, RENDER_PIPELINE, EDITOR_VIEW, EDITOR_CHROME_LAYOUT, PLUGIN_UI_RENDERER, EDITOR_OCR, EDITOR_CANVAS, EDITOR_INPUT, EDITOR_CONTROLS, EDITOR_PRESENTER, PINNED_SCREENSHOT, EDITOR_OUTPUT, PASTEBOARD_WRITER, PROJECT, APP_TEST]:
         if not path.exists():
             failures.append({"code": "missing_file", "path": rel(path)})
     for path in OLD_FILES:
@@ -284,6 +350,7 @@ def main() -> int:
     render_pipeline = text(RENDER_PIPELINE)
     view = text(EDITOR_VIEW)
     chrome_layout = text(EDITOR_CHROME_LAYOUT)
+    plugin_renderer = text(PLUGIN_UI_RENDERER)
     ocr = text(EDITOR_OCR)
     canvas = text(EDITOR_CANVAS)
     canvas_input = canvas + "\n" + text(EDITOR_INPUT)
@@ -294,8 +361,12 @@ def main() -> int:
     pasteboard = text(PASTEBOARD_WRITER)
     project = text(PROJECT)
     app_tests = text(APP_TEST)
-    failures.extend(editor_layout_contract_failures(view, chrome_layout, presenter))
-    failures.extend(verify_layout_contract_mutations(view, chrome_layout, presenter))
+    failures.extend(editor_layout_contract_failures(
+        view, chrome_layout, presenter, plugin_renderer
+    ))
+    failures.extend(verify_layout_contract_mutations(
+        view, chrome_layout, presenter, plugin_renderer
+    ))
 
     if "let imageBorder = NSBezierPath" in canvas:
         failures.append({
@@ -539,7 +610,7 @@ def main() -> int:
         "ScreenshotEditorStatusBarModel.visibleElements",
         ".onDeleteCommand(perform: deleteFocusedElement)",
         "ScreenshotEditorOverlayLayout(",
-        "bottomToolbarContainer(layout:",
+        "bottomToolbarContainer(",
         "textCommitRequestID",
         "requestCanvasAction",
         "performPendingCanvasAction",
@@ -790,7 +861,7 @@ def main() -> int:
         "ScreenshotEditorToolbarPanelLayout(maximumWidth: maximumWidth)",
         "expandedContent.fixedSize(horizontal: true, vertical: false)",
         "let layout = toolbarLayout(availableWidth:",
-        "bottomToolbarContainer(layout: layout, maximumWidth: maximumChromeWidth)",
+        "bottomToolbarContainer(\n                    layout: layout,\n                    maximumWidth: maximumChromeWidth",
     ]:
         if token not in view:
             failures.append({

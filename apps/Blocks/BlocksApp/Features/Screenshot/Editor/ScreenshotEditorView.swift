@@ -299,6 +299,9 @@ struct ScreenshotUnifiedEditorView: View {
             let horizontalSafeInset = canvasPresentation == .displayOverlay
                 ? chromeSafeAreaInsets.leading + chromeSafeAreaInsets.trailing : 0
             let maximumChromeWidth = ScreenshotEditorChromeMetrics.maximumWidth(in: proxy.size.width - horizontalSafeInset)
+            let maximumPluginInspectorHeight = maximumPluginInspectorHeight(
+                availableHeight: proxy.size.height
+            )
             let frames = ScreenshotEditorCropChromeLayout.resolve(
                 availableSize: proxy.size,
                 sourceRect: store.sourceBounds,
@@ -307,6 +310,9 @@ struct ScreenshotUnifiedEditorView: View {
                 panOffset: store.viewport.panOffset,
                 statusWidth: maximumChromeWidth,
                 toolbarWidth: maximumChromeWidth,
+                toolbarHeight: reservedToolbarHeight(
+                    maximumPluginInspectorHeight: maximumPluginInspectorHeight
+                ),
                 presentation: canvasPresentation,
                 safeAreaInsets: chromeSafeAreaInsets
             )
@@ -346,7 +352,11 @@ struct ScreenshotUnifiedEditorView: View {
                         context: screenshotPluginContext
                     ))
                 )
-                bottomToolbarContainer(layout: layout, maximumWidth: maximumChromeWidth)
+                bottomToolbarContainer(
+                    layout: layout,
+                    maximumWidth: maximumChromeWidth,
+                    maximumPluginInspectorHeight: maximumPluginInspectorHeight
+                )
                 }
 
                 if let panelFrame = manualOCRPanelFrame(in: proxy.size, toolbarFrame: frames.toolbar) {
@@ -477,7 +487,11 @@ struct ScreenshotUnifiedEditorView: View {
         )
     }
 
-    private func bottomToolbarContainer(layout: ScreenshotToolbarLayoutResolution, maximumWidth: CGFloat) -> some View {
+    private func bottomToolbarContainer(
+        layout: ScreenshotToolbarLayoutResolution,
+        maximumWidth: CGFloat,
+        maximumPluginInspectorHeight: CGFloat
+    ) -> some View {
         ScreenshotEditorToolbarPanelLayout(maximumWidth: maximumWidth) {
             ScreenshotUnifiedEditorToolbar(
                 state: store.toolbarState,
@@ -504,14 +518,9 @@ struct ScreenshotUnifiedEditorView: View {
                 store: store,
                 aspectControlModel: aspectControlModel,
                 maximumWidth: maximumWidth,
-                pluginContent: AnyView(screenshotPluginSlot(
-                    .screenshotInspectorSection,
-                    context: screenshotPluginContext,
-                    protectedContext: screenshotProtectedContext,
-                    requiredDataPermission: .screenshotDocument
-                ))
+                maximumPluginInspectorHeight: maximumPluginInspectorHeight,
+                pluginContent: screenshotInspectorPluginContent
             )
-            .blocksSurface(.panel, cornerRadius: BlocksVisualTokens.CornerRadius.section)
         }
         .onHover { hovering in
             if hovering { NSCursor.arrow.set() }
@@ -535,6 +544,57 @@ struct ScreenshotUnifiedEditorView: View {
         ]
     }
 
+    private func maximumPluginInspectorHeight(availableHeight: CGFloat) -> CGFloat {
+        min(
+            BlocksVisualTokens.Layout.settingsSheetCompactMinimumHeight,
+            max(
+                0,
+                availableHeight
+                    - chromeSafeAreaInsets.top
+                    - chromeSafeAreaInsets.bottom
+                    - ScreenshotEditorChromeMetrics.canvasTopInset
+                    - ScreenshotEditorChromeMetrics.bottomToolbarHeight
+                    - ScreenshotEditorChromeMetrics.edgeInset
+            )
+        )
+    }
+
+    private func reservedToolbarHeight(
+        maximumPluginInspectorHeight: CGFloat
+    ) -> CGFloat {
+        guard hasPluginInspectorContribution else {
+            return ScreenshotEditorChromeMetrics.bottomToolbarHeight
+        }
+        return ScreenshotEditorChromeMetrics.bottomToolbarHeight
+            + BlocksVisualTokens.Spacing.xs
+            + maximumPluginInspectorHeight
+    }
+
+    private var hasPluginInspectorContribution: Bool {
+        guard let pluginManager, pluginRuntime != nil else { return false }
+        return BlocksPluginUISlotHost.hasRenderableContribution(
+            manager: pluginManager,
+            slot: .screenshotInspectorSection
+        )
+    }
+
+    private var screenshotInspectorPluginContent: AnyView? {
+        guard let pluginManager,
+              let pluginRuntime,
+              hasPluginInspectorContribution else {
+            return nil
+        }
+        return AnyView(BlocksPluginUISlotHost(
+            manager: pluginManager,
+            runtime: pluginRuntime,
+            slot: .screenshotInspectorSection,
+            context: screenshotPluginContext,
+            protectedContext: screenshotProtectedContext,
+            requiredDataPermission: .screenshotDocument,
+            onActionError: presentPluginActionError
+        ))
+    }
+
     @ViewBuilder
     private func screenshotPluginSlot(
         _ slot: BlocksPluginUISlot,
@@ -549,9 +609,19 @@ struct ScreenshotUnifiedEditorView: View {
                 slot: slot,
                 context: context,
                 protectedContext: protectedContext,
-                requiredDataPermission: requiredDataPermission
+                requiredDataPermission: requiredDataPermission,
+                onActionError: presentPluginActionError
             )
         }
+    }
+
+    private func presentPluginActionError(_ detail: String) {
+        store.notificationState.present(BlocksNotificationDescriptor(
+            level: .error,
+            title: L10n.string("plugin.center.error.title"),
+            detail: detail,
+            deduplicationKey: "screenshot.plugin.action.failed"
+        ))
     }
 
     private func manualOCRPanelFrame(in visibleSize: CGSize, toolbarFrame: CGRect) -> CGRect? {
@@ -1163,11 +1233,102 @@ private struct ScreenshotMoreToolsPanel: View {
     }
 }
 
+struct ScreenshotEditorPropertiesContentLayout: View {
+    let maximumWidth: CGFloat
+    let maximumPluginInspectorHeight: CGFloat
+    let propertyContent: AnyView
+    var pluginContent: AnyView? = nil
+
+    var body: some View {
+        VStack(spacing: BlocksVisualTokens.Spacing.xs) {
+            ScreenshotChromeContentLayout(
+                maximumWidth: maximumWidth,
+                height: ScreenshotDesignTokens.toolbarPropertyHeight
+            ) {
+                propertyContent
+            }
+            .blocksSurface(
+                .panel,
+                cornerRadius: BlocksVisualTokens.CornerRadius.section
+            )
+
+            if let pluginContent {
+                ScreenshotPluginInspectorSection(
+                    maximumWidth: maximumWidth,
+                    maximumHeight: maximumPluginInspectorHeight,
+                    content: pluginContent
+                )
+            }
+        }
+    }
+}
+
+/// Plugin inspector roots are allowed to be multi-row sections, cards, lists,
+/// tables, and key-value content. Keep them out of the fixed-height editor
+/// property strip while capping their independent scroll area.
+struct ScreenshotPluginInspectorSection: View {
+    let maximumWidth: CGFloat
+    let maximumHeight: CGFloat
+    let content: AnyView
+
+    var body: some View {
+        ScreenshotPluginInspectorViewportLayout(
+            maximumWidth: maximumWidth,
+            maximumHeight: maximumHeight
+        ) {
+            ViewThatFits(in: .vertical) {
+                paddedContent.fixedSize(horizontal: false, vertical: true)
+                ScrollView(.vertical) {
+                    paddedContent
+                }
+                .scrollIndicators(.automatic)
+                .frame(height: maximumHeight)
+            }
+        }
+        .blocksSurface(
+            .panel,
+            cornerRadius: BlocksVisualTokens.CornerRadius.section
+        )
+        .accessibilityElement(children: .contain)
+    }
+
+    private var paddedContent: some View {
+        content
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(BlocksVisualTokens.Spacing.sm)
+    }
+}
+
+/// Always supplies a finite height proposal, including during fittingSize.
+/// Constraining only an outer frame can leave a ScrollView's actual viewport
+/// as tall as its document, making the clipped lower rows unreachable.
+private struct ScreenshotPluginInspectorViewportLayout: Layout {
+    let maximumWidth: CGFloat
+    let maximumHeight: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = min(maximumWidth, proposal.width ?? maximumWidth)
+        let height = min(maximumHeight, proposal.height ?? maximumHeight)
+        let measured = subviews.first?.sizeThatFits(
+            ProposedViewSize(width: width, height: height)
+        ) ?? .zero
+        return CGSize(width: width, height: min(height, measured.height))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        subviews.first?.place(
+            at: bounds.origin, anchor: .topLeading,
+            proposal: ProposedViewSize(width: bounds.width, height: bounds.height)
+        )
+    }
+}
+
 private struct ScreenshotExpandedPropertiesRow: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let store: ScreenshotEditorStore
     @ObservedObject var aspectControlModel: ScreenshotAspectControlModel
     let maximumWidth: CGFloat
+    let maximumPluginInspectorHeight: CGFloat
     var pluginContent: AnyView? = nil
 
     @State private var isNamingWatermarkPreset = false
@@ -1175,25 +1336,43 @@ private struct ScreenshotExpandedPropertiesRow: View {
     @FocusState private var isWatermarkTextFocused: Bool
 
     var body: some View {
-        ScreenshotChromeContentLayout(maximumWidth: maximumWidth, height: ScreenshotDesignTokens.toolbarPropertyHeight) {
-            ViewThatFits(in: .horizontal) {
-                propertyContents.fixedSize(horizontal: true, vertical: false)
-                ScreenshotChromeOverflowRow { propertyContents }
-                    .id(inspectorPresentationID)
-            }
+        ScreenshotEditorPropertiesContentLayout(
+            maximumWidth: maximumWidth,
+            maximumPluginInspectorHeight: maximumPluginInspectorHeight,
+            propertyContent: AnyView(
+                ScreenshotChromePropertyStrip(
+                    propertyContents: AnyView(propertyContents),
+                    inspectorPresentationID: inspectorPresentationID
+                )
+            ),
+            pluginContent: pluginContent
+        )
+    }
+}
+
+private struct ScreenshotChromePropertyStrip: View {
+    let propertyContents: AnyView
+    let inspectorPresentationID: String
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            propertyContents.fixedSize(horizontal: true, vertical: false)
+            ScreenshotChromeOverflowRow { propertyContents }
+                .id(inspectorPresentationID)
         }
     }
+}
 
-    private var propertyContents: some View {
+private extension ScreenshotExpandedPropertiesRow {
+    var propertyContents: some View {
         HStack(spacing: BlocksVisualTokens.Spacing.sm) {
             styleControls
-            pluginContent
         }
         .padding(.horizontal, BlocksVisualTokens.Spacing.sm)
         .fixedSize(horizontal: true, vertical: false)
     }
 
-    private var inspectorPresentationID: String {
+    var inspectorPresentationID: String {
         [
             store.activeToolbarItemID.rawValue,
             store.selectedElement == nil ? "empty" : "selected",
@@ -1203,8 +1382,10 @@ private struct ScreenshotExpandedPropertiesRow: View {
             isNamingWatermarkPreset ? "watermark-naming" : "watermark-idle"
         ].joined(separator: "|")
     }
+}
 
-    private func overflowButton(
+private extension ScreenshotExpandedPropertiesRow {
+    func overflowButton(
         systemImage: String,
         label: String,
         action: @escaping () -> Void
@@ -1217,7 +1398,9 @@ private struct ScreenshotExpandedPropertiesRow: View {
         )
         .frame(width: 30, height: ScreenshotDesignTokens.toolbarPropertyHeight)
     }
+}
 
+private extension ScreenshotExpandedPropertiesRow {
     @ViewBuilder
     private var styleControls: some View {
         HStack(spacing: BlocksVisualTokens.Spacing.sm) {

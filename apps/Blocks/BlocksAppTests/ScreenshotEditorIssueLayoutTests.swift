@@ -1,4 +1,5 @@
 import AppKit
+import BlocksCore
 import SwiftUI
 import XCTest
 @testable import Blocks
@@ -75,6 +76,114 @@ final class ScreenshotEditorIssueLayoutTests: XCTestCase {
         XCTAssertEqual(first.height, ScreenshotEditorChromeMetrics.bottomToolbarHeight, accuracy: 0.5)
     }
 
+    func testMultilineInspectorPluginUsesIndependentCappedScrollArea() throws {
+        let baseline = NSHostingView(rootView: toolbar(pluginWidth: 0))
+        let singleRow = NSHostingView(rootView: toolbar(
+            pluginWidth: 0,
+            inspectorPluginContent: inspectorPluginFixture(rowCount: 1)
+        ))
+        let plugin = NSHostingView(rootView: toolbar(
+            pluginWidth: 0,
+            inspectorPluginContent: inspectorPluginFixture(rowCount: 16)
+        ))
+        let baselineSize = baseline.fittingSize
+        let singleRowSize = singleRow.fittingSize
+        let pluginSize = plugin.fittingSize
+        plugin.frame = CGRect(origin: .zero, size: pluginSize)
+        let window = NSWindow(
+            contentRect: CGRect(origin: CGPoint(x: -20000, y: -20000), size: pluginSize),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        window.contentView = plugin
+        window.orderFront(nil)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        plugin.layoutSubtreeIfNeeded()
+
+        XCTAssertEqual(
+            baselineSize.height,
+            ScreenshotEditorChromeMetrics.bottomToolbarHeight,
+            accuracy: 0.5
+        )
+        XCTAssertGreaterThan(
+            singleRowSize.height,
+            ScreenshotEditorChromeMetrics.bottomToolbarHeight
+        )
+        XCTAssertGreaterThan(pluginSize.height, singleRowSize.height)
+        XCTAssertGreaterThan(
+            pluginSize.height,
+            ScreenshotEditorChromeMetrics.bottomToolbarHeight
+                + ScreenshotDesignTokens.toolbarPropertyHeight
+        )
+        XCTAssertLessThanOrEqual(
+            pluginSize.height,
+            ScreenshotEditorChromeMetrics.bottomToolbarHeight
+                + 180
+                + BlocksVisualTokens.Spacing.xs
+                + 1
+        )
+        XCTAssertEqual(pluginSize.width, plugin.fittingSize.width, accuracy: 0.5)
+        XCTAssertEqual(pluginSize.height, plugin.fittingSize.height, accuracy: 0.5)
+        func scrollViews(in view: NSView) -> [NSScrollView] {
+            (view as? NSScrollView).map { [$0] } ??
+                view.subviews.flatMap { scrollViews(in: $0) }
+        }
+        let actualScrollViews = scrollViews(in: plugin)
+        let scrollGeometry = actualScrollViews.map {
+            ["viewport": $0.contentView.bounds.height, "document": $0.documentView?.bounds.height ?? 0]
+        }
+        let scroll = try XCTUnwrap(actualScrollViews.first { view in
+            (view.documentView?.bounds.height ?? 0) > view.contentView.bounds.height + 1
+        }, "Multiline inspector must have a real scrollable viewport: \(scrollGeometry)")
+        XCTAssertLessThanOrEqual(scroll.contentView.bounds.height, 181)
+        let before = scroll.contentView.bounds.origin
+        scroll.contentView.scroll(to: CGPoint(x: before.x, y: before.y + 20))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        XCTAssertNotEqual(scroll.contentView.bounds.origin, before,
+                          "The lower plugin rows must be reachable by scrolling")
+    }
+
+    func testEmptyInspectorSlotHostDoesNotCreateAPropertiesSurface() {
+        let manager = BlocksNativePluginManager(storageUnavailableBecause: NSError(
+            domain: "ScreenshotEditorIssueLayoutTests",
+            code: 1
+        ))
+        let runtime = BlocksPluginRuntimeCoordinator(manager: manager)
+        let slotHost = NSHostingView(rootView: BlocksPluginUISlotHost(
+            manager: manager,
+            runtime: runtime,
+            slot: .screenshotInspectorSection
+        ))
+
+        XCTAssertFalse(BlocksPluginUISlotHost.hasRenderableContribution(
+            manager: manager,
+            slot: .screenshotInspectorSection
+        ))
+        XCTAssertEqual(slotHost.fittingSize, .zero)
+    }
+
+    func testExternalPluginActionErrorIsRoutedAwayFromFixedToolbarFlow() {
+        var inlineError: String?
+        var notificationDetail: String?
+
+        BlocksPluginUIActionErrorRouting.report(
+            "plugin fixture failure",
+            onActionError: { notificationDetail = $0 },
+            setInlineActionError: { inlineError = $0 }
+        )
+
+        XCTAssertEqual(notificationDetail, "plugin fixture failure")
+        XCTAssertNil(inlineError)
+
+        BlocksPluginUIActionErrorRouting.report(
+            "default fixture failure",
+            onActionError: nil,
+            setInlineActionError: { inlineError = $0 }
+        )
+        XCTAssertEqual(inlineError, "default fixture failure")
+    }
+
     func testStatusFirstFrameHugsRealLocalizedContentAndPluginWithoutWidthCallback() {
         for title in ["插件状态", "Plugin status and dimensions", "プラグインのステータスと寸法"] {
             let host = NSHostingView(rootView: ScreenshotEditorStatusBar(
@@ -93,7 +202,10 @@ final class ScreenshotEditorIssueLayoutTests: XCTestCase {
         }
     }
 
-    private func toolbar(pluginWidth: CGFloat) -> some View {
+    private func toolbar(
+        pluginWidth: CGFloat,
+        inspectorPluginContent: AnyView? = nil
+    ) -> some View {
         ScreenshotEditorToolbarPanelLayout(maximumWidth: 1200) {
             ScreenshotUnifiedEditorToolbar(
                 state: .init(activeToolbarItemID: .arrow, canUndo: true, canRedo: false, isOutputPending: false, currentOutputCommand: nil),
@@ -103,9 +215,47 @@ final class ScreenshotEditorIssueLayoutTests: XCTestCase {
                 moreToolsPresentation: .constant(.init()), moreToolsTriggerFocusRequestID: nil,
                 onMoreToolsExit: {}, onCanvasAction: { _ in }
             )
-            Text("Select an object")
-                .fixedSize()
-                .frame(height: ScreenshotDesignTokens.toolbarPropertyHeight)
+            ScreenshotEditorPropertiesContentLayout(
+                maximumWidth: 1200,
+                maximumPluginInspectorHeight: 180,
+                propertyContent: AnyView(
+                    Text("Select an object")
+                        .fixedSize()
+                ),
+                pluginContent: inspectorPluginContent
+            )
         }
+    }
+
+    private func inspectorPluginFixture(rowCount: Int) -> AnyView {
+        let rows: [JSONValue] = (0..<rowCount).map { index in
+            .object([
+                "title": .string("Plugin row \(index)"),
+                "detail": .string(
+                    "Multi-line inspector fixture content \(index)"
+                ),
+                "value": .string("value \(index)"),
+            ])
+        }
+        return AnyView(BlocksPluginUIRenderer(
+            contribution: .init(
+                id: "multiline-inspector",
+                slot: .screenshotInspectorSection,
+                root: .init(
+                    id: "root",
+                    kind: .section,
+                    title: "Plugin inspector",
+                    children: [
+                        .init(
+                            id: "rows",
+                            kind: .table,
+                            properties: ["items": .array(rows)]
+                        ),
+                    ]
+                )
+            ),
+            runtimeState: [:],
+            performAction: { _, _ in }
+        ))
     }
 }

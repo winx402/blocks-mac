@@ -8152,7 +8152,10 @@ final class TranslationEntryBridgeTests: XCTestCase {
             preferredSize: CGSize(width: 500, height: 420),
             visibleFrame: visible
         )
-        XCTAssertEqual(panel.frame, expected)
+        XCTAssertEqual(
+            panel.frame, expected,
+            "capturedVisible=\(visible) resolvedFrame=\(String(describing: panel.screen?.frame)) resolvedVisible=\(String(describing: panel.screen?.visibleFrame)) actual=\(panel.frame) contentLayout=\(panel.contentLayoutRect) scale=\(panel.backingScaleFactor)"
+        )
         presenter.close()
     }
 

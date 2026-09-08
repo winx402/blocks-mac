@@ -3,6 +3,20 @@ import BlocksCore
 import SwiftUI
 import UniformTypeIdentifiers
 
+enum BlocksPluginUIActionErrorRouting {
+    static func report(
+        _ detail: String,
+        onActionError: ((String) -> Void)?,
+        setInlineActionError: (String) -> Void
+    ) {
+        if let onActionError {
+            onActionError(detail)
+        } else {
+            setInlineActionError(detail)
+        }
+    }
+}
+
 @MainActor
 final class BlocksPluginDestructiveActionConfirmationPresenter {
     typealias WindowProvider = @MainActor () -> NSWindow?
@@ -181,11 +195,31 @@ struct BlocksPluginUISlotHost: View {
     var context: [String: JSONValue] = [:]
     var protectedContext: [String: JSONValue] = [:]
     var requiredDataPermission: BlocksNativePluginDataPermission?
+    /// Hosts with constrained inline chrome can route failures to their own
+    /// notification surface without changing the default inline-feedback
+    /// behavior used by existing slots.
+    var onActionError: ((String) -> Void)? = nil
 
     @State private var actionError: String?
 
+    static func hasRenderableContribution(
+        manager: BlocksNativePluginManager,
+        slot: BlocksPluginUISlot
+    ) -> Bool {
+        !renderableContributions(manager: manager, slot: slot).isEmpty
+    }
+
     private var contributions: [HostedContribution] {
-        manager.plugins.flatMap { plugin -> [HostedContribution] in
+        Self.renderableContributions(manager: manager, slot: slot).map {
+            HostedContribution(pluginID: $0.pluginID, contribution: $0.contribution)
+        }
+    }
+
+    private static func renderableContributions(
+        manager: BlocksNativePluginManager,
+        slot: BlocksPluginUISlot
+    ) -> [(pluginID: String, contribution: BlocksPluginUIContribution)] {
+        manager.plugins.flatMap { plugin -> [(String, BlocksPluginUIContribution)] in
             guard plugin.isEnabled,
                   plugin.approvalStatus == .approved,
                   !plugin.safetyDisabled,
@@ -198,10 +232,7 @@ struct BlocksPluginUISlotHost: View {
             return (manifest.platform?.ui ?? [])
                 .filter { $0.slot == slot }
                 .map {
-                    HostedContribution(
-                        pluginID: plugin.id,
-                        contribution: $0
-                    )
+                    (pluginID: plugin.id, contribution: $0)
                 }
         }
     }
@@ -243,7 +274,7 @@ struct BlocksPluginUISlotHost: View {
         actionID: String,
         input: [String: JSONValue]
     ) {
-        actionError = nil
+        clearActionError()
         var actionInput = input
         var authorizedContext = context
         if let requiredDataPermission,
@@ -268,7 +299,7 @@ struct BlocksPluginUISlotHost: View {
             } catch is CancellationError {
                 // A declined host confirmation is an intentional no-op.
             } catch {
-                actionError = error.localizedDescription
+                reportActionError(error.localizedDescription)
             }
         }
     }
@@ -278,16 +309,16 @@ struct BlocksPluginUISlotHost: View {
         actionID: String,
         input: [String: JSONValue]
     ) {
-        actionError = nil
+        clearActionError()
         Task { @MainActor in
             guard manager.plugins.first(where: { $0.id == pluginID })?
                 .approvedPermissions.contains(
                     BlocksPluginPermissionToken.userGrantedFiles
                 )
                 == true else {
-                actionError = L10n.string(
+                reportActionError(L10n.string(
                     "plugin.center.userFiles.notApproved"
-                )
+                ))
                 return
             }
             let panel = NSOpenPanel()
@@ -341,9 +372,21 @@ struct BlocksPluginUISlotHost: View {
             } catch is CancellationError {
                 // A declined host confirmation is an intentional no-op.
             } catch {
-                actionError = error.localizedDescription
+                reportActionError(error.localizedDescription)
             }
         }
+    }
+
+    private func clearActionError() {
+        actionError = nil
+    }
+
+    private func reportActionError(_ detail: String) {
+        BlocksPluginUIActionErrorRouting.report(
+            detail,
+            onActionError: onActionError,
+            setInlineActionError: { actionError = $0 }
+        )
     }
 }
 

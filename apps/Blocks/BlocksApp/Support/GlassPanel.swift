@@ -1335,6 +1335,10 @@ extension View {
     func blocksBackground(_ role: BlocksSurfaceRole) -> some View {
         background {
             BlocksStructuralBackground(role: role)
+                // A titled full-size window still reports a titlebar safe
+                // area. Only its backing fills that area; foreground controls
+                // keep their system insets and the window owns outer corners.
+                .ignoresSafeArea(.container, edges: role == .window ? .all : [])
         }
     }
 
