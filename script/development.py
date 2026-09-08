@@ -338,12 +338,14 @@ def test() -> None:
 
 def run_isolated_tests(derived: Path) -> dict:
     from verification_build_helpers import controlled_build_failure, run_controlled_xcode_build, run_controlled_xcode_test
+    print("Building the isolated XCTest host (no signing credentials required)...", flush=True)
     build_result = run_controlled_xcode_build(["xcodebuild", "-project", str(ROOT / "apps/Blocks/Blocks.xcodeproj"), "-scheme", "BlocksAppTests", "-configuration", "DebugTesting", "-destination", "platform=macOS,arch=arm64", "-derivedDataPath", str(derived), "CODE_SIGNING_ALLOWED=NO", "CODE_SIGNING_REQUIRED=NO", "-parallel-testing-enabled", "NO", "build-for-testing"], cwd=ROOT, timeout=1800, retry_cleaned_ibtoold=True)
     if not build_result["ok"]:
         print(build_result.get("stdout", ""), file=sys.stderr); print(build_result.get("stderr", ""), file=sys.stderr); print(build_result.get("process_cleanup", {}), file=sys.stderr)
         raise RuntimeError(controlled_build_failure(build_result))
     runs = list(derived.glob("Build/Products/**/*.xctestrun"))
     if len(runs) != 1: raise RuntimeError("controlled build-for-testing did not produce exactly one xctestrun")
+    print("XCTest host built; executing isolated tests...", flush=True)
     result = run_controlled_xcode_test(["xcodebuild", "test-without-building", "-xctestrun", str(runs[0]), "-destination", "platform=macOS,arch=arm64", "-parallel-testing-enabled", "NO", "-quiet"], cwd=ROOT, timeout=1800)
     if not result["ok"]:
         print(result.get("stdout", ""), file=sys.stderr); print(result.get("stderr", ""), file=sys.stderr); print(result.get("process_cleanup", {}), file=sys.stderr)

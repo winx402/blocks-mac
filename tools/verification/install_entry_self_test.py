@@ -488,12 +488,12 @@ def main() -> None:
             calls: list[Path] = []
             def permission_then_user(directory, *arguments):
                 calls.append(directory)
-                if directory == Path("/Applications"):
+                if directory == system_root:
                     raise helper.NotWritable("fixture denied")
-                return original_install_to(user_root, *arguments)
-            with patched(helper, "install_to", permission_then_user):
+                return original_install_to(directory, *arguments)
+            with patched(helper, "install_to", permission_then_user), patched(helper, "_installation_roots", lambda: (system_root, user_root)):
                 destination = helper.install(mount / "Blocks.app", metadata and helper.resolve_release(trusted, None), trusted, root)
-            assert destination.parent == user_root and calls[0] == Path("/Applications")
+            assert destination.parent == user_root and calls == [system_root, user_root]
             reports.append({"case": "permission_falls_back_to_user_applications", "ok": True})
 
             prerelease = release(tag="v1.2.3-beta.1", prerelease=True)

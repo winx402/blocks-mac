@@ -609,9 +609,12 @@ def install_to(directory: Path, candidate: Path, release: Release, policy: Polic
     return destination
 
 
+def _installation_roots() -> tuple[Path, Path]:
+    return Path("/Applications"), Path.home() / "Applications"
+
+
 def install(candidate: Path, release: Release, policy: Policy, work: Path) -> Path:
-    system = Path("/Applications")
-    user = Path.home() / "Applications"
+    system, user = _installation_roots()
     system_existing = system / "Blocks.app"
     user_existing = user / "Blocks.app"
     system_has_existing = system_existing.exists() or system_existing.is_symlink()
