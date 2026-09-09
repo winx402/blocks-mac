@@ -6,6 +6,7 @@ import Foundation
 public enum ShutdownPrivateProcesses {
     private struct Identity: Equatable {
         let pid: pid_t
+        let parentPID: UInt32
         let startSeconds: UInt64
         let startMicroseconds: UInt64
         let path: String
@@ -22,25 +23,30 @@ public enum ShutdownPrivateProcesses {
     private static var readerCount: Int32 = 0
     private static var retired: [UnsafeRawPointer] = []
 
-    public static func registerClipboardChild(pid: pid_t, executableURL: URL) {
-        var info = proc_bsdinfo()
-        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, Int32(MemoryLayout.size(ofValue: info))) > 0,
-              info.pbi_ppid == UInt32(getpid()) else { return }
-        register(pid: pid, executableURL: executableURL, relativePath: "Contents/MacOS/BlocksClipboardBroker")
+    @discardableResult
+    public static func registerClipboardChild(pid: pid_t, executableURL: URL) -> Bool {
+        register(pid: pid, executableURL: executableURL,
+                 relativePath: "Contents/MacOS/BlocksClipboardBroker", expectedParent: UInt32(getpid()))
     }
 
     /// Called only after the private NSXPCConnection's peer signature check.
     public static func registerValidatedRunner(pid: pid_t, executableURL: URL) {
-        register(pid: pid, executableURL: executableURL,
+        _ = register(pid: pid, executableURL: executableURL,
                  relativePath: "Contents/XPCServices/BlocksPluginRunner.xpc/Contents/MacOS/BlocksPluginRunner")
     }
 
-    private static func register(pid: pid_t, executableURL: URL, relativePath: String) {
-        let expected = Bundle.main.bundleURL.appendingPathComponent(relativePath).standardizedFileURL.path
-        guard executableURL.standardizedFileURL.path == expected,
-              let identity = identity(pid: pid), identity.path == expected else { return }
-        lock.withLock {
-            guard identities[pid] != identity else { return }
+    private static func register(pid: pid_t, executableURL: URL, relativePath: String,
+                                 expectedParent: UInt32? = nil) -> Bool {
+        guard let root = canonicalPath(Bundle.main.bundleURL.path) else { return false }
+        // Resolve system aliases in the app root, then append the fixed in-bundle
+        // path. Resolving the expected leaf itself would trust a symlink escaping
+        // the bundle. /var and /private/var must not create different identities.
+        let expected = root + "/" + relativePath
+        guard canonicalPath(executableURL.path) == expected,
+              let identity = identity(pid: pid), canonicalPath(identity.path) == expected,
+              expectedParent == nil || identity.parentPID == expectedParent else { return false }
+        return lock.withLock {
+            guard identities[pid] != identity else { return true }
             identities = identities.filter { self.identity(pid: $0.key) == $0.value }
             identities[pid] = identity
             let pointer = Unmanaged.passRetained(Snapshot(Array(identities.values))).toOpaque()
@@ -52,6 +58,7 @@ public enum ShutdownPrivateProcesses {
                 retired.forEach { Unmanaged<Snapshot>.fromOpaque($0).release() }
                 retired.removeAll()
             }
+            return true
         }
     }
 
@@ -75,7 +82,16 @@ public enum ShutdownPrivateProcesses {
               info.pbi_uid == getuid() else { return nil }
         var path = [CChar](repeating: 0, count: 4096)
         guard proc_pidpath(pid, &path, UInt32(path.count)) > 0 else { return nil }
-        return Identity(pid: pid, startSeconds: info.pbi_start_tvsec,
+        // Cache/compare the kernel's own path across the process lifetime.
+        // Canonical filesystem resolution is registration-only: the deadline
+        // path must not wait for filesystem I/O or a disconnected volume.
+        return Identity(pid: pid, parentPID: info.pbi_ppid, startSeconds: info.pbi_start_tvsec,
                         startMicroseconds: info.pbi_start_tvusec, path: String(cString: path))
+    }
+
+    private static func canonicalPath(_ path: String) -> String? {
+        guard let resolved = realpath(path, nil) else { return nil }
+        defer { free(resolved) }
+        return String(cString: resolved)
     }
 }

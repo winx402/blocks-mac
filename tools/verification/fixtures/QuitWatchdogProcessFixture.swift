@@ -6,6 +6,9 @@ private struct FixtureReport: Codable {
     let parentPID: Int32
     let registeredPID: Int32
     let registeredExecutablePath: String
+    let registrationSucceeded: Bool
+    let observedExecutablePath: String
+    let outsideExecutableRejected: Bool
     let unregisteredPID: Int32
     let unregisteredExecutablePath: String
 }
@@ -77,19 +80,30 @@ struct QuitWatchdogProcessFixture {
             .appendingPathComponent("Contents/MacOS/BlocksClipboardBroker")
             .standardizedFileURL
         let sleepURL = URL(fileURLWithPath: "/bin/sleep")
+        // Use the exact expected leaf for the negative boundary, not a different
+        // filename. Canonicalizing that expected leaf would wrongly accept this
+        // external executable. It must remain alive after the real watchdog.
+        try FileManager.default.createSymbolicLink(at: brokerURL, withDestinationURL: sleepURL)
+        let unregistered = try launch(executableURL: brokerURL)
+        let outsideExecutableRejected = !ShutdownPrivateProcesses.registerClipboardChild(
+            pid: unregistered.processIdentifier, executableURL: brokerURL
+        )
+        try FileManager.default.removeItem(at: brokerURL)
         try FileManager.default.copyItem(at: sleepURL, to: brokerURL)
 
         let registered = try launch(executableURL: brokerURL)
-        ShutdownPrivateProcesses.registerClipboardChild(
+        let registrationSucceeded = ShutdownPrivateProcesses.registerClipboardChild(
             pid: registered.processIdentifier,
             executableURL: brokerURL
         )
-        let unregistered = try launch(executableURL: sleepURL)
 
         let report = FixtureReport(
             parentPID: getpid(),
             registeredPID: registered.processIdentifier,
             registeredExecutablePath: brokerURL.path,
+            registrationSucceeded: registrationSucceeded,
+            observedExecutablePath: executablePath(of: registered.processIdentifier),
+            outsideExecutableRejected: outsideExecutableRejected,
             unregisteredPID: unregistered.processIdentifier,
             unregisteredExecutablePath: sleepURL.path
         )
@@ -119,6 +133,12 @@ struct QuitWatchdogProcessFixture {
         await Task.yield()
         try await Task.sleep(nanoseconds: 30_000_000_000)
         _exit(66)
+    }
+
+    private static func executablePath(of pid: pid_t) -> String {
+        var path = [CChar](repeating: 0, count: 4096)
+        guard proc_pidpath(pid, &path, UInt32(path.count)) > 0 else { return "unavailable" }
+        return String(cString: path)
     }
 
     private static func launch(executableURL: URL) throws -> Process {

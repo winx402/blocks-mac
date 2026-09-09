@@ -58,7 +58,12 @@ def assert_eventually_absent(pid: int, label: str) -> None:
     deadline = time.monotonic() + 3
     while process_exists(pid) and time.monotonic() < deadline:
         time.sleep(0.02)
-    assert not process_exists(pid), f"{label} survived the fixture force-exit"
+    if process_exists(pid):
+        details = subprocess.run(
+            ["/bin/ps", "-p", str(pid), "-o", "pid=,ppid=,stat=,comm="],
+            check=False, capture_output=True, text=True,
+        ).stdout.strip()
+        raise AssertionError(f"{label} survived the fixture force-exit: {details}; path={process_executable_path(pid)!r}")
 
 
 def wait_for_report(report_path: Path, fixture: subprocess.Popen[bytes]) -> dict[str, object]:
@@ -141,6 +146,11 @@ def main() -> None:
             unregistered_path = Path(str(report["unregisteredExecutablePath"]))
 
             assert parent_pid == fixture.pid, (parent_pid, fixture.pid)
+            assert report["registrationSucceeded"] is True, (
+                "private child was not registered", report["registeredExecutablePath"],
+                report["observedExecutablePath"],
+            )
+            assert report["outsideExecutableRejected"] is True, "an external executable alias was accepted"
             assert registered_path == executable.parent / "BlocksClipboardBroker", registered_path
             assert unregistered_path == Path("/bin/sleep"), unregistered_path
             assert same_executable_path(process_executable_path(registered_pid), registered_path), registered_pid
