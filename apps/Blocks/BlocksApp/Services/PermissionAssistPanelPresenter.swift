@@ -96,6 +96,7 @@ final class PermissionAssistPanelPresenter: NSObject, NSWindowDelegate {
     }
     private var panelSessionModel: PermissionAssistPanelSessionModel?
     private var currentAppURL: URL = Bundle.main.bundleURL
+    private var targetPermissionGranted: (() -> Bool)?
     private var onFlowEnded: (() -> Void)?
     private var didNotifyFlowEnded = false
     private var hasObservedSystemSettingsWindow = false
@@ -144,7 +145,15 @@ final class PermissionAssistPanelPresenter: NSObject, NSWindowDelegate {
             ?? BlocksFloatingPanelPresentationCoordinator()
     }
 
-    func present(kind: PermissionAssistKind, appURL: URL = Bundle.main.bundleURL, onFlowEnded: (() -> Void)? = nil) {
+    private func isTargetPermissionGranted(_ kind: PermissionAssistKind) -> Bool {
+        if let targetPermissionGranted { return targetPermissionGranted() }
+        // A different bundle's TCC state can never be inferred from this App.
+        guard currentAppURL.standardizedFileURL == Bundle.main.bundleURL.standardizedFileURL else { return false }
+        return permissionGranted(kind)
+    }
+
+    func present(kind: PermissionAssistKind, appURL: URL = Bundle.main.bundleURL,
+                 targetPermissionGranted: (() -> Bool)? = nil, onFlowEnded: (() -> Void)? = nil) {
         presentationRequestGeneration &+= 1
         let requestGeneration = presentationRequestGeneration
         finishCurrentLifecycleImmediatelyForReplacement()
@@ -156,6 +165,7 @@ final class PermissionAssistPanelPresenter: NSObject, NSWindowDelegate {
             return
         }
         currentAppURL = appURL
+        self.targetPermissionGranted = targetPermissionGranted
         self.onFlowEnded = onFlowEnded
         hasObservedSystemSettingsWindow = false
         session = PermissionAssistSession(
@@ -342,7 +352,7 @@ final class PermissionAssistPanelPresenter: NSObject, NSWindowDelegate {
         guard var session else {
             return
         }
-        if permissionGranted(session.kind) {
+        if isTargetPermissionGranted(session.kind) {
             session.state = .granted
             self.session = session
             close()
@@ -463,7 +473,7 @@ final class PermissionAssistPanelPresenter: NSObject, NSWindowDelegate {
         guard isCurrent(generation) else {
             return
         }
-        if permissionGranted(session.kind) {
+        if isTargetPermissionGranted(session.kind) {
             session.state = .granted
             self.session = session
             close()

@@ -1125,6 +1125,41 @@ struct BlocksWindowGlassConfigurator: NSViewRepresentable {
     }
 }
 
+/// Only the backing ignores safe areas; native window clipping, titlebar
+/// controls, and the foreground's safe-area layout remain system-owned.
+struct BlocksSettingsWindowBacking: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .toolbarBackground(.hidden, for: .windowToolbar)
+            .background {
+                ZStack {
+                    Color.clear
+                        .blocksBackground(.content)
+                        .ignoresSafeArea(.container, edges: .all)
+                    BlocksWindowGlassConfigurator()
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+            }
+    }
+}
+
+/// Settings has one structural surface under both the titlebar and detail.
+/// macOS 26 adds an independent scroll-edge compositing layer in the titlebar
+/// safe area, even when NSWindow's titlebar background is transparent. Disable
+/// that extra treatment only for settings detail; do not change foreground
+/// safe areas, native sidebar material, or other floating-window chrome.
+struct BlocksSettingsDetailBacking: ViewModifier {
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.scrollEdgeEffectHidden(true, for: .top)
+        } else {
+            content
+        }
+    }
+}
+
 private struct BlocksStructuralBackground: View {
     let role: BlocksSurfaceRole
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency

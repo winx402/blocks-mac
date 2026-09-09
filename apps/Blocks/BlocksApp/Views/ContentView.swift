@@ -59,20 +59,16 @@ struct SettingsNavigationShell: View {
                     .environmentObject(routeStateStore)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .blocksBackground(.content)
+            .modifier(BlocksSettingsDetailBacking())
         }
         .navigationSplitViewStyle(.balanced)
-        .blocksBackground(.window)
+        .modifier(BlocksSettingsWindowBacking())
         .background {
-            ZStack {
-                BlocksWindowGlassConfigurator()
-                    .allowsHitTesting(false)
-                AppleTranslationPreparationHost(
-                    controller:
-                        AppleTranslationLanguagePackController.shared
-                            .preparationController
-                )
-            }
+            AppleTranslationPreparationHost(
+                controller:
+                    AppleTranslationLanguagePackController.shared
+                        .preparationController
+            )
         }
         .onAppear {
             guard let initialSection else { return }
@@ -99,14 +95,11 @@ private struct SettingsNativeSidebar: View {
     let onUserSelection: (AppSection) -> Void
 
     var body: some View {
-        VStack(spacing: 0) {
-            SettingsSidebarBrandHeader()
-            SettingsSourceListBridge(
-                selection: $selection,
-                navigationGeneration: navigationGeneration,
-                onUserSelection: onUserSelection
-            )
-        }
+        SettingsSourceListBridge(
+            selection: $selection,
+            navigationGeneration: navigationGeneration,
+            onUserSelection: onUserSelection
+        )
         .blocksBackground(.sidebar)
     }
 }
@@ -123,9 +116,10 @@ struct SettingsSidebarGroupDescriptor: Equatable {
     let id: SettingsSidebarGroupID
     let localizationKey: String
     let sections: [AppSection]
+    var displayTitle: String? = nil
 
     var title: String {
-        L10n.string(localizationKey)
+        displayTitle ?? L10n.string(localizationKey)
     }
 }
 
@@ -252,8 +246,9 @@ struct SettingsSourceListBridge: NSViewRepresentable {
 @MainActor
 final class SettingsSourceListNativeView: NSView {
     private let scrollView = SettingsSourceListScrollView()
-    private let outlineView = NSOutlineView()
-    private let dataController = SettingsSourceListDataController()
+    private let outlineView = SettingsViewportWidthOutlineView()
+    private let groupDescriptors: [SettingsSidebarGroupDescriptor]
+    private let dataController: SettingsSourceListDataController
     private var localizationSignature = ""
     private var requestedSelection: AppSection?
     private var appliedNavigationGeneration: UInt64 = 0
@@ -282,6 +277,14 @@ final class SettingsSourceListNativeView: NSView {
         outlineView.frame.width
     }
 
+    var documentColumnWidth: CGFloat {
+        outlineView.outlineTableColumn?.width ?? 0
+    }
+
+    var viewportWidth: CGFloat {
+        scrollView.contentView.bounds.width
+    }
+
     var groupRowsFloat: Bool {
         outlineView.floatsGroupRows
     }
@@ -307,11 +310,27 @@ final class SettingsSourceListNativeView: NSView {
     }
 
     override init(frame frameRect: NSRect) {
+        let groups = SettingsSidebarSourceListModel.groups
+        groupDescriptors = groups
+        dataController = SettingsSourceListDataController(groups: groups)
+        super.init(frame: frameRect)
+        configure()
+    }
+
+    init(
+        frame frameRect: NSRect,
+        groups: [SettingsSidebarGroupDescriptor]
+    ) {
+        groupDescriptors = groups
+        dataController = SettingsSourceListDataController(groups: groups)
         super.init(frame: frameRect)
         configure()
     }
 
     required init?(coder: NSCoder) {
+        let groups = SettingsSidebarSourceListModel.groups
+        groupDescriptors = groups
+        dataController = SettingsSourceListDataController(groups: groups)
         super.init(coder: coder)
         configure()
     }
@@ -326,7 +345,10 @@ final class SettingsSourceListNativeView: NSView {
         selection: AppSection?,
         navigationGeneration: UInt64 = 0
     ) {
-        let currentSignature = SettingsSidebarSourceListModel.localizationSignature
+        let currentSignature = groupDescriptors.map { group in
+            ([group.title] + group.sections.map(\.title)).joined(separator: "\u{1F}")
+        }
+        .joined(separator: "\u{1E}")
         if currentSignature != localizationSignature {
             localizationSignature = currentSignature
             reloadSourceList()
@@ -378,7 +400,7 @@ final class SettingsSourceListNativeView: NSView {
         wantsLayer = true
 
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("settings.sourceList"))
-        column.resizingMask = .autoresizingMask
+        column.resizingMask = []
         outlineView.addTableColumn(column)
         outlineView.outlineTableColumn = column
         outlineView.headerView = nil
@@ -389,8 +411,8 @@ final class SettingsSourceListNativeView: NSView {
         outlineView.rowHeight = 30
         outlineView.intercellSpacing = NSSize(width: 0, height: 1)
         outlineView.indentationPerLevel = 8
-        outlineView.autoresizesOutlineColumn = true
-        outlineView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        outlineView.autoresizesOutlineColumn = false
+        outlineView.columnAutoresizingStyle = .noColumnAutoresizing
         outlineView.allowsEmptySelection = false
         outlineView.allowsMultipleSelection = false
         outlineView.focusRingType = .default
@@ -423,7 +445,7 @@ final class SettingsSourceListNativeView: NSView {
         reloadSourceList()
     }
 
-    private func reloadSourceList() {
+    func reloadSourceList() {
         isApplyingSelection = true
         defer { isApplyingSelection = false }
         outlineView.setAccessibilityLabel(L10n.string("settings.navigation.accessibilityLabel"))
@@ -456,7 +478,7 @@ final class SettingsSourceListNativeView: NSView {
     }
 
     private func sizeDocumentToViewport() {
-        let viewport = scrollView.contentSize
+        let viewport = scrollView.contentView.bounds
         guard viewport.width > 0, viewport.height > 0 else { return }
         let contentHeight: CGFloat
         if outlineView.numberOfRows > 0 {
@@ -499,6 +521,17 @@ final class SettingsSourceListNativeView: NSView {
 }
 
 @MainActor
+private final class SettingsViewportWidthOutlineView: NSOutlineView {
+    override func setFrameSize(_ newSize: NSSize) {
+        var constrained = newSize
+        if let clipView = enclosingScrollView?.contentView, clipView.bounds.width > 0 {
+            constrained.width = clipView.bounds.width
+        }
+        super.setFrameSize(constrained)
+    }
+}
+
+@MainActor
 private final class SettingsSourceListScrollView: NSScrollView {
     var viewportDidChange: (() -> Void)?
 
@@ -519,6 +552,14 @@ private final class SettingsSourceListScrollView: NSScrollView {
 /// transient horizontal clip-view origin.
 @MainActor
 final class SettingsVerticalOnlyClipView: NSClipView {
+    override func scroll(to newOrigin: NSPoint) {
+        super.scroll(to: NSPoint(x: 0, y: newOrigin.y))
+    }
+
+    override func setBoundsOrigin(_ newOrigin: NSPoint) {
+        super.setBoundsOrigin(NSPoint(x: 0, y: newOrigin.y))
+    }
+
     override func constrainBoundsRect(_ proposedBounds: NSRect) -> NSRect {
         var constrained = super.constrainBoundsRect(proposedBounds)
         constrained.origin.x = 0
@@ -551,7 +592,7 @@ private final class SettingsSourceListDataController: NSObject,
     NSOutlineViewDataSource,
     NSOutlineViewDelegate
 {
-    let groupNodes = SettingsSidebarSourceListModel.groups.map(SettingsSidebarGroupNode.init)
+    let groupNodes: [SettingsSidebarGroupNode]
     lazy var routeNodes: [AppSection: SettingsSidebarRouteNode] = {
         Dictionary(
             uniqueKeysWithValues: groupNodes.flatMap(\.children).map { ($0.section, $0) }
@@ -559,6 +600,11 @@ private final class SettingsSourceListDataController: NSObject,
     }()
 
     var onSelectionChange: ((AppSection) -> Void)?
+
+    init(groups: [SettingsSidebarGroupDescriptor]) {
+        groupNodes = groups.map(SettingsSidebarGroupNode.init)
+        super.init()
+    }
 
     func routeNode(at row: Int) -> SettingsSidebarRouteNode? {
         guard row >= 0,
@@ -749,31 +795,6 @@ private final class SettingsSidebarRouteCell: NSTableCellView {
             titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
-    }
-}
-
-private struct SettingsSidebarBrandHeader: View {
-    var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "sparkles.rectangle.stack")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.tint)
-                .frame(width: 24, height: 24)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(L10n.string("app.name"))
-                    .font(.subheadline.weight(.semibold))
-                Text(L10n.string("sidebar.subtitle"))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 0)
-        }
-        .accessibilityElement(children: .combine)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .overlay(alignment: .bottom) {
-            Divider()
-        }
     }
 }
 

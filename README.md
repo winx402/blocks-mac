@@ -28,6 +28,8 @@ cd blocks-mac
 
 统一入口、身份隔离和迁移边界见 [源码安装与独立发布](docs/技术知识库/源码安装与独立发布.md)。
 
+[退出诊断与反馈 CLI](docs/技术知识库/退出与异常反馈.md) 支持本地预览、明确确认后提交公开 Issue；无需主 App 或 Helper 运行。
+
 贡献前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 和 [SECURITY.md](SECURITY.md)。
 请勿在公开 Issue 上传 API key、配对密钥、剪贴板内容或个人截图。
 

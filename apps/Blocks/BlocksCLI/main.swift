@@ -1020,6 +1020,7 @@ ocr: blocks run blocks.screenshot.ocr.status --record-id ID [--record-id ID ...]
 export: blocks run blocks.screenshot.history.export --record-id ID --output PATH [--format png|jpeg] [--overwrite] [--dry-run]
 scrolling: blocks run blocks.screenshot.scrolling.status [--dry-run] | blocks run blocks.screenshot.scrolling.finish --session-id ID [--dry-run] | blocks run blocks.screenshot.scrolling.cancel --session-id ID --confirm [--dry-run]
 translation sources: blocks translation-source --help
+feedback: blocks feedback --help
 """
 
 let args = Array(CommandLine.arguments.dropFirst())
@@ -1038,6 +1039,14 @@ if args.isEmpty || args == ["--help"] || args == ["help"] {
 }
 
 switch args.first {
+case "feedback":
+    let feedbackArguments = Array(args.dropFirst())
+    if feedbackArguments.isEmpty || feedbackArguments == ["--help"] || feedbackArguments == ["help"] {
+        emit(HelpOutput(usage: feedbackUsage, actions: ["feedback.doctor", "feedback.list", "feedback.preview", "feedback.submit", "feedback.create"]))
+    }
+    let (feedbackOutput, feedbackExitCode) = FeedbackCLI.run(args: feedbackArguments)
+    emit(feedbackOutput, exitCode: feedbackExitCode)
+
 case "list":
     emit(ActionListOutput(actions: ActionRegistry.actions))
 

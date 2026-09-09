@@ -42,6 +42,149 @@ private struct TranslationPanelResultStateReader<Content: View>:
     }
 }
 
+/// Translation feedback stays inside the already-reserved source header. The
+/// message lane scrolls horizontally rather than wrapping: localized failures
+/// remain fully inspectable without changing the source editor's y-position or
+/// compressing the fixed language controls below it.
+struct TranslationPanelInlineFeedbackView: View {
+    @ObservedObject var state: BlocksNotificationPresentationState
+
+    @FocusState private var focusedControl: FocusedControl?
+    @State private var isHovered = false
+
+    private enum FocusedControl: Hashable {
+        case action
+        case dismiss
+    }
+
+    var body: some View {
+        Group {
+            if let presentation = state.current {
+                feedback(presentation)
+            } else {
+                Color.clear
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+        }
+        .frame(
+            minWidth: 0,
+            maxWidth: .infinity,
+            minHeight: TranslationPanelMetrics.compactIconHitTarget,
+            maxHeight: TranslationPanelMetrics.compactIconHitTarget
+        )
+        .onHover { hovered in
+            isHovered = hovered
+            updateAutoDismissPause()
+        }
+        .onChange(of: focusedControl) { _, _ in
+            updateAutoDismissPause()
+        }
+        .onDisappear {
+            state.setAutoDismissPaused(false)
+        }
+    }
+
+    private func feedback(
+        _ presentation: BlocksPresentedNotification
+    ) -> some View {
+        HStack(spacing: 5) {
+            ScrollView(.horizontal) {
+                HStack(spacing: 5) {
+                    Group {
+                        if presentation.descriptor.showsIndeterminateProgress {
+                            ProgressView()
+                                .controlSize(.mini)
+                        } else {
+                            Image(
+                                systemName:
+                                    presentation.descriptor.systemImage
+                                    ?? presentation.descriptor.level.systemImage
+                            )
+                            .foregroundStyle(
+                                presentation.descriptor.level.color
+                            )
+                        }
+                    }
+                    .frame(width: 13, height: 13)
+                    .accessibilityHidden(true)
+
+                    Text(presentation.descriptor.title)
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+
+                    if let detail = presentation.descriptor.detail,
+                       !detail.isEmpty {
+                        Text(detail)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+
+                    if presentation.occurrenceCount > 1 {
+                        Text("×\(presentation.occurrenceCount)")
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .fixedSize(horizontal: true, vertical: false)
+                .padding(.vertical, 2)
+            }
+            .scrollIndicators(.hidden)
+            .help(accessibilitySummary(for: presentation))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(accessibilitySummary(for: presentation))
+
+            if let action = presentation.descriptor.action {
+                Button(action.title) {
+                    action.handler()
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.mini)
+                .lineLimit(1)
+                .focused($focusedControl, equals: .action)
+                .accessibilityHint(action.accessibilityHint ?? "")
+            }
+
+            Button {
+                state.dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .semibold))
+                    .frame(
+                        width: TranslationPanelMetrics.compactIconHitTarget,
+                        height: TranslationPanelMetrics.compactIconHitTarget
+                    )
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.secondary)
+            .focused($focusedControl, equals: .dismiss)
+            .help(L10n.string("common.close"))
+            .accessibilityLabel(L10n.string("common.close"))
+        }
+        .padding(.leading, 5)
+        .blocksSurface(
+            .interactive,
+            cornerRadius: BlocksVisualTokens.CornerRadius.control
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(accessibilitySummary(for: presentation))
+    }
+
+    private func accessibilitySummary(
+        for presentation: BlocksPresentedNotification
+    ) -> String {
+        [presentation.descriptor.title, presentation.descriptor.detail]
+            .compactMap { $0 }
+            .joined(separator: "。")
+    }
+
+    private func updateAutoDismissPause() {
+        state.setAutoDismissPaused(isHovered || focusedControl != nil)
+    }
+}
+
 struct TranslationFloatingPanelView: View {
     private static let automaticTargetTag = "__blocks_auto_target__"
     private static let selectionReadingNotificationKey =
@@ -83,7 +226,6 @@ struct TranslationFloatingPanelView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-                .padding(.horizontal, 16)
                 .frame(
                     height: TranslationPanelMetrics.headerTotalHeight
                 )
@@ -167,16 +309,28 @@ struct TranslationFloatingPanelView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 0) {
             HStack(spacing: 8) {
                 Label(sourceTitle, systemImage: sourceSystemImage)
                     .font(.headline)
+                    .fixedSize()
+
                 Spacer(minLength: 8)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(
+                maxWidth: .infinity,
+                minHeight: TranslationPanelMetrics.headerTotalHeight,
+                maxHeight: TranslationPanelMetrics.headerTotalHeight,
+                alignment: .leading
+            )
+            .padding(.leading, TranslationPanelMetrics.contentInset)
+            .padding(.trailing, 8)
             .overlay {
-                BlocksPanelWindowDragArea(
-                    height: TranslationPanelMetrics.headerContentHeight
+                // The title lane includes its full vertical and leading
+                // padding. Controls remain a disjoint sibling, so making the
+                // blank lane generous does not capture button or text events.
+                TranslationPanelWindowDragArea(
+                    height: TranslationPanelMetrics.headerTotalHeight
                 )
             }
 
@@ -249,8 +403,13 @@ struct TranslationFloatingPanelView: View {
                 )
                 .accessibilityIdentifier("translation.panel.close")
             }
+
+            TranslationPanelWindowDragArea(
+                height: TranslationPanelMetrics.headerTotalHeight
+            )
+            .frame(width: TranslationPanelMetrics.contentInset)
         }
-        .frame(height: TranslationPanelMetrics.headerContentHeight)
+        .frame(height: TranslationPanelMetrics.headerTotalHeight)
     }
 
     private var isFavorite: Bool {
@@ -284,6 +443,10 @@ struct TranslationFloatingPanelView: View {
                 Text(L10n.string("translation.panel.source"))
                     .font(.subheadline.weight(.semibold))
                     .fixedSize()
+
+                TranslationPanelInlineFeedbackView(
+                    state: notificationState
+                )
 
                 if model.inputSource == .screenshotOCR {
                     ocrInlineStatus
@@ -570,6 +733,10 @@ struct TranslationFloatingPanelView: View {
                 maxWidth: .infinity,
                 minHeight: TranslationPanelMetrics.passiveContentHeight
             )
+            // Empty-input guidance has no action or selectable result text.
+            // It is the actual initial empty state (before the later clear
+            // fallback), and its full passive area also supports dragging.
+            .overlay(TranslationPanelWindowDragArea())
         } else if model.runPhase == .debouncing {
             translationActivity(
                 L10n.string("translation.status.debouncing")
@@ -600,6 +767,9 @@ struct TranslationFloatingPanelView: View {
                     maxWidth: .infinity,
                     minHeight: TranslationPanelMetrics.passiveContentHeight
                 )
+                // Result cards own their text selection and interactions.
+                // Only this deliberately empty result state is draggable.
+                .overlay(TranslationPanelWindowDragArea())
         }
     }
 

@@ -14,6 +14,11 @@ final class ApplicationLifecycleCoordinator {
     }
 
     enum State: Equatable { case active, preparing, prepared, resuming }
+    enum Intent { case update, quit }
+    private(set) var intent: Intent?
+    private var quitCommitted = false
+    var onParticipant: ((String, Bool) -> Void)?
+    var beforeQuitDrain: (() async -> Void)?
     enum SafetyError: Error, LocalizedError {
         case missingParticipants([String])
         case preparationInProgress
@@ -55,14 +60,39 @@ final class ApplicationLifecycleCoordinator {
         }
     }
 
-    func prepare() async throws {
-        if state == .prepared { return }
+    func prepare(for requestedIntent: Intent = .update) async throws {
+        if requestedIntent == .quit {
+            quitCommitted = true
+            ApplicationOperationAdmissionGate.closeAdmissionForQuit()
+        } else if quitCommitted {
+            throw SafetyError.preparationInProgress
+        }
+        if state == .prepared {
+            guard intent == .update || requestedIntent == .quit else { throw SafetyError.preparationInProgress }
+            return
+        }
         guard state == .active else { throw SafetyError.preparationInProgress }
         let missing = requiredParticipantIDs.subtracting(participants.map(\.id))
         guard missing.isEmpty else { throw SafetyError.missingParticipants(missing.sorted()) }
-        try ApplicationOperationAdmissionGate.pauseAllIfIdle()
+        if requestedIntent == .update {
+            try ApplicationOperationAdmissionGate.pauseAllIfIdle()
+        } else {
+            ApplicationOperationAdmissionGate.closeAdmissionForQuit()
+        }
+        intent = requestedIntent
         state = .preparing
         do {
+            if requestedIntent == .quit {
+                while ApplicationOperationAdmissionGate.totalActiveOperationCount > 0 {
+                    try await Task.sleep(for: .milliseconds(20))
+                }
+                await ApplicationOperationAdmissionGate.withQuitCleanup {
+                    await beforeQuitDrain?()
+                }
+                while ApplicationOperationAdmissionGate.totalActiveOperationCount > 0 {
+                    try await Task.sleep(for: .milliseconds(20))
+                }
+            }
             let ordered = participants.filter { $0.id != "database" }
                 + participants.filter { $0.id == "database" }
             for participant in ordered {
@@ -70,12 +100,15 @@ final class ApplicationLifecycleCoordinator {
                 // Include the currently preparing participant: it may have
                 // closed admission before discovering that it cannot drain.
                 pausedParticipants.append(participant)
+                onParticipant?(participant.id, false)
                 try await participant.pauseAndDrain()
+                if requestedIntent == .update, quitCommitted { throw CancellationError() }
+                onParticipant?(participant.id, true)
             }
             try Task.checkCancellation()
             state = .prepared
         } catch {
-            await resumePausedParticipants()
+            if requestedIntent == .update, !quitCommitted { await resumePausedParticipants() }
             throw error
         }
     }
@@ -83,11 +116,12 @@ final class ApplicationLifecycleCoordinator {
     /// Used after Sparkle aborts installation. This never cancels admitted
     /// operations. A participant must make its own resume idempotent.
     func resumeAfterCancelledUpdate() async {
-        guard state == .prepared else { return }
+        guard state == .prepared, intent == .update, !quitCommitted else { return }
         await resumePausedParticipants()
     }
 
     private func resumePausedParticipants() async {
+        guard !quitCommitted else { return }
         state = .resuming
         let toResume = pausedParticipants.reversed()
         pausedParticipants.removeAll()
@@ -96,8 +130,14 @@ final class ApplicationLifecycleCoordinator {
         if let database = toResume.first(where: { $0.id == "database" }) {
             await database.resume()
         }
+        guard !quitCommitted else { return }
         ApplicationOperationAdmissionGate.resumeAll()
-        for participant in toResume where participant.id != "database" { await participant.resume() }
+        for participant in toResume where participant.id != "database" {
+            guard !quitCommitted else { return }
+            await participant.resume()
+        }
+        guard !quitCommitted else { return }
         state = .active
+        intent = nil
     }
 }

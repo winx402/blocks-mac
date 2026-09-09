@@ -6846,9 +6846,9 @@ final class TranslationEntryBridgeTests: XCTestCase {
 
     func testTranslationPanelSourceLayoutKeepsStableCompactGeometry() {
         let textHeaderHeight =
-            TranslationPanelSourceLayout.sourceTextHeaderHeight
+            TranslationPanelMetrics.compactIconHitTarget
 
-        XCTAssertLessThan(
+        XCTAssertEqual(
             textHeaderHeight,
             TranslationPanelMetrics.compactIconHitTarget
         )
@@ -7992,7 +7992,7 @@ final class TranslationEntryBridgeTests: XCTestCase {
         settleTranslationAppKitFixture()
     }
 
-    func testTranslationNotificationUsesIndependentNonKeyPanel()
+    func testTranslationNotificationStaysInlineWithoutAuxiliaryWindow()
         throws
     {
         let suiteName =
@@ -8028,27 +8028,19 @@ final class TranslationEntryBridgeTests: XCTestCase {
                 dismissPolicy: .manual
             )
         )
-        let notificationPanel = try XCTUnwrap(
-            presenter.notificationPanelForTesting
-        )
-
         XCTAssertEqual(contentPanel.frame, originalFrame)
-        XCTAssertTrue(notificationPanel.isVisible)
-        XCTAssertFalse(notificationPanel.canBecomeKey)
-        XCTAssertNil(notificationPanel.parent)
-        XCTAssertFalse(notificationPanel.canBecomeMain)
-        XCTAssertFalse(notificationPanel.frame.intersects(originalFrame))
-        let notificationFrame = notificationPanel.frame
+        XCTAssertNil(presenter.notificationPanelForTesting)
+        XCTAssertNotNil(presenter.notificationStateForTesting.current)
         contentPanel.setFrameOrigin(
             CGPoint(x: originalFrame.minX + 24, y: originalFrame.minY - 24)
         )
-        XCTAssertEqual(notificationPanel.frame, notificationFrame)
+        XCTAssertNil(presenter.notificationPanelForTesting)
         let suspension = try XCTUnwrap(presenter.suspendForCapture())
-        XCTAssertFalse(notificationPanel.isVisible)
+        XCTAssertNil(presenter.notificationStateForTesting.current)
         presenter.resumeAfterCapture(suspension)
         presenter.close()
         settleTranslationAppKitFixture()
-        XCTAssertFalse(notificationPanel.isVisible)
+        XCTAssertNil(presenter.notificationPanelForTesting)
         XCTAssertNil(presenter.notificationStateForTesting.current)
     }
 

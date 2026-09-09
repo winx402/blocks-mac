@@ -1392,10 +1392,17 @@ protocol SelectionHelperKeyStoring: AnyObject {
     ) -> Data?
     @discardableResult
     func clearDisconnectTombstone() -> Bool
+    func permitsLocalAssociation() -> Bool
+    func saveLocalAssociationIfAbsent(_ data: Data) -> Bool
 }
 
 protocol SelectionHelperBootstrapKeyLoading: AnyObject {
     func load() -> Data?
+}
+
+extension SelectionHelperKeyStoring {
+    func permitsLocalAssociation() -> Bool { false }
+    func saveLocalAssociationIfAbsent(_ data: Data) -> Bool { false }
 }
 
 /// The Helper deliberately has no creation API for this secret. A missing
@@ -1437,6 +1444,7 @@ struct SelectionHelperDisconnectTombstone: Codable {
 }
 
 final class SelectionHelperKeyStore: SelectionHelperKeyStoring {
+    private static let localAssociationLogger = Logger(subsystem: "app.blocks.selection-helper", category: "LocalAssociation")
     private let accessGroupProvider: () -> String?
     private let copyMatching: (
         CFDictionary,
@@ -1525,6 +1533,38 @@ final class SelectionHelperKeyStore: SelectionHelperKeyStoring {
         guard status == errSecSuccess else { return false }
         deleteLegacyActiveKey()
         return true
+    }
+
+    func permitsLocalAssociation() -> Bool {
+        #if BLOCKS_LOCAL_DEVELOPMENT
+        let identities = [(BlocksSelectionHelperProtocol.keychainService, BlocksSelectionHelperProtocol.keychainAccount),
+                          (BlocksSelectionHelperProtocol.legacyKeychainService, BlocksSelectionHelperProtocol.legacyKeychainAccount),
+                          (Self.disconnectTombstoneService, Self.disconnectTombstoneAccount)]
+        return identities.enumerated().allSatisfy { index, identity in
+            let (service, account) = identity
+            guard var query = keychainQuery(service: service, account: account) else { return false }
+            query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUIFail
+            let status = copyMatching(query as CFDictionary, nil)
+            if status != errSecItemNotFound {
+                Self.localAssociationLogger.notice("stage=helper-keychain-absence slot=\(index, privacy: .public) status=\(status, privacy: .public)")
+            }
+            return status == errSecItemNotFound
+        }
+        #else
+        return false
+        #endif
+    }
+
+    func saveLocalAssociationIfAbsent(_ data: Data) -> Bool {
+        #if BLOCKS_LOCAL_DEVELOPMENT
+        guard data.count == 32,
+              var query = keychainQuery(service: BlocksSelectionHelperProtocol.keychainService,
+                                        account: BlocksSelectionHelperProtocol.keychainAccount) else { return false }
+        query[kSecValueData as String] = data
+        return addItem(query as CFDictionary, nil) == errSecSuccess
+        #else
+        return false
+        #endif
     }
 
     func delete() -> Bool {
@@ -1805,6 +1845,10 @@ final class SelectionHelperServer:
     private var failedPairAttempts: [Date] = []
     private var pairingCode: String
     private var pairingGeneration: UInt64 = 0
+    #if BLOCKS_LOCAL_DEVELOPMENT
+    private let localAssociationServer = SelectionHelperLocalAssociationTransport.Server()
+    private var localAssociationAuthority = SelectionHelperLocalAssociation.Authority()
+    #endif
     // One entry is intentional: this is acknowledgement recovery, not a
     // general request cache. It is process-local and expires quickly.
     private var recentSuccessfulPairReply:
@@ -1949,9 +1993,50 @@ final class SelectionHelperServer:
 
     func start() {
         queue.async { [weak self] in
-            self?.startListeners()
+            guard let self else { return }
+            self.startListeners()
+            #if BLOCKS_LOCAL_DEVELOPMENT
+            self.localAssociationServer.start { [weak self] data in
+                guard let self else { return nil }
+                return self.queue.sync { self.handleLocalAssociation(data) }
+            }
+            #endif
         }
     }
+
+    #if BLOCKS_LOCAL_DEVELOPMENT
+    private func handleLocalAssociation(_ data: Data) -> Data? {
+        guard let lease = applicationUpdateGate.begin() else { return nil }
+        defer { lease.release() }
+        guard let request = try? JSONDecoder().decode(SelectionHelperLocalAssociation.Request.self, from: data),
+              request.version == SelectionHelperLocalAssociation.version,
+              UUID(uuidString: request.requestID) != nil else { return nil }
+        let paired = keyStore.load() != nil
+        let response: SelectionHelperLocalAssociation.Response
+        switch request.kind {
+        case .status:
+            response = .init(isPaired: paired)
+        case .authorize:
+            guard !paired, keyStore.permitsLocalAssociation(), let publicKey = request.clientPublicKey,
+                  let authorization = localAssociationAuthority.issue(
+                    requestID: request.requestID, clientPublicKey: publicKey,
+                    generation: pairingGeneration, isPaired: paired, now: now()
+                  ) else { return nil }
+            response = .init(isPaired: false, authorization: authorization)
+        case .pair:
+            guard let pairRequest = request.pairRequest,
+                  pairRequest.requestID == request.requestID,
+                  let authorization = localAssociationAuthority.consume(
+                    request: pairRequest, generation: pairingGeneration,
+                    isPaired: paired, now: now()
+                  ),
+                  let payload = try? JSONEncoder().encode(pairRequest),
+                  let reply = handlePair(.init(kind: .pair, payload: payload), localAuthorization: authorization) else { return nil }
+            response = .init(isPaired: keyStore.load() != nil, pairPacket: reply)
+        }
+        return try? JSONEncoder().encode(response)
+    }
+    #endif
 
     func retryIfFailed() {
         queue.async { [weak self] in
@@ -2121,7 +2206,8 @@ final class SelectionHelperServer:
     }
 
     private func handlePair(
-        _ packet: SelectionHelperWirePacket
+        _ packet: SelectionHelperWirePacket,
+        localAuthorization: SelectionHelperLocalAssociation.Authorization? = nil
     ) -> Data? {
         guard let lease = applicationUpdateGate.begin() else { return nil }
         defer { lease.release() }
@@ -2136,7 +2222,7 @@ final class SelectionHelperServer:
                 BlocksSelectionCaptureProtocol.maximumRequestIdentifierBytes else {
             return nil
         }
-        if let response = cachedSuccessfulPairReply(for: request) {
+        if localAuthorization == nil, let response = cachedSuccessfulPairReply(for: request) {
             return response
         }
         guard request.protocolVersion ==
@@ -2150,7 +2236,7 @@ final class SelectionHelperServer:
                 )
             )
         }
-        guard let bootstrapKey = bootstrapKeyStore.load() else {
+        guard let bootstrapKey = localAuthorization?.bootstrapKey ?? bootstrapKeyStore.load() else {
             return pairResponse(
                 SelectionHelperPairResponse(
                     requestID: request.requestID,
@@ -2204,10 +2290,22 @@ final class SelectionHelperServer:
         guard let responseData = pairResponse(response) else {
             return nil
         }
-        let pairingResult = commitPairing(
-            code: request.pairingCode,
-            key: key
-        )
+        let pairingResult: SelectionHelperPairingCommitResult
+        if let localAuthorization {
+            #if BLOCKS_LOCAL_DEVELOPMENT
+            guard keyStore.permitsLocalAssociation(), pairingGeneration == localAuthorization.generation,
+                  now() < localAuthorization.expiresAt else { return nil }
+            if keyStore.saveLocalAssociationIfAbsent(key) {
+                pairingGeneration &+= 1
+                pairingCode = ""
+                pairingResult = .committed(generation: pairingGeneration)
+            } else { pairingResult = .keyStorageFailed }
+            #else
+            return nil
+            #endif
+        } else {
+            pairingResult = commitPairing(code: request.pairingCode, key: key)
+        }
         guard case let .committed(pairingGeneration) = pairingResult else {
             if case .rejected = pairingResult {
                 return pairResponse(

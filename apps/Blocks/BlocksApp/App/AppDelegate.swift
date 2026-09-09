@@ -39,10 +39,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
+        guard !AppTerminationCoordinator.shared.isQuitting else {
+            NSApp.hide(nil)
+            return
+        }
         mainWindowPresentationCoordinator.applicationDidBecomeActive()
     }
 
     func attachMainWindow(_ window: NSWindow) {
+        guard !AppTerminationCoordinator.shared.isQuitting else {
+            window.orderOut(nil)
+            return
+        }
         mainWindowPresentationCoordinator.attachMainWindow(window)
     }
 

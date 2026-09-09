@@ -22,6 +22,8 @@ struct GeneralSettingsPane: View {
 
     @ViewBuilder
     private var content: some View {
+        FeedbackSettingsSection()
+
         SettingsSection(
             title: L10n.string("settings.general.application")
         ) {

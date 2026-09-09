@@ -228,6 +228,8 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
     }
 
     @MainActor private func lifecycleCommand(connection: NSXPCConnection, token: String, preparing: Bool) async throws {
+        try Task.checkCancellation()
+        guard !AppTerminationCoordinator.shared.isQuitting else { throw CancellationError() }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             let reply = ActionBrokerLifecycleReply(continuation)
             let proxy = connection.remoteObjectProxyWithErrorHandler { _ in

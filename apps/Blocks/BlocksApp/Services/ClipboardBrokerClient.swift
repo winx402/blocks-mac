@@ -1798,6 +1798,7 @@ actor ClipboardBrokerClient: ClipboardBrokerServing {
         }
         do {
             try launchedProcess.run()
+            ShutdownPrivateProcesses.registerClipboardChild(pid: launchedProcess.processIdentifier, executableURL: executableURL)
         } catch {
             inputPipe.fileHandleForReading.closeFile()
             inputPipe.fileHandleForWriting.closeFile()

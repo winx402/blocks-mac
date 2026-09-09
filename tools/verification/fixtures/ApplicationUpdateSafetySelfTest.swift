@@ -303,7 +303,7 @@ struct ApplicationUpdateSafetySelfTest {
         var continuation: CheckedContinuation<Void, Never>?
         let coordinator = AppTerminationCoordinator(dispatcher: {
             await withCheckedContinuation { continuation = $0 }
-        }, finalizer: { finalized = true }, timeoutNanoseconds: 1, timeoutSleeper: { _ in }, replyHandler: { reply = $0 })
+        }, finalizer: { finalized = true }, replyHandler: { reply = $0 })
         try require(coordinator.requestTermination() == .terminateLater, "termination did not defer")
         for _ in 0..<30 { await Task.yield() }
         try require(reply == nil && !finalized, "elapsed timeout forced termination")
@@ -314,9 +314,9 @@ struct ApplicationUpdateSafetySelfTest {
         let rejecting = AppTerminationCoordinator(dispatcher: { throw FixtureError.rejected }, replyHandler: { reply = $0 })
         _ = rejecting.requestTermination()
         for _ in 0..<30 { await Task.yield() }
-        try require(reply == false, "failed drain authorized termination")
+        try require(reply == nil && rejecting.isQuitting, "failed quit preparation reopened admission")
         let unconfigured = AppTerminationCoordinator(replyHandler: { _ in })
-        try require(unconfigured.requestTermination() == .terminateCancel, "unconfigured termination failed open")
-        print("PASS: termination waits for actual drain and rejects failures; no timeout force-quit")
+        try require(unconfigured.requestTermination() == .terminateLater, "unconfigured quit was vetoed")
+        print("PASS: graceful finalization waits for drain; committed quit never reports update safety")
     }
 }

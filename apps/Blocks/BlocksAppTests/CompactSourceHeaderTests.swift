@@ -4,7 +4,7 @@ import XCTest
 @testable import BlocksCore
 
 final class CompactSourceHeaderTests: XCTestCase {
-    func testPureTextSourceHeadersUseTheSystemTextLineHeight() {
+    func testSourceHeadersReserveStableInlineFeedbackHeight() {
         let expected = NSLayoutManager().defaultLineHeight(
             for: NSFont.preferredFont(forTextStyle: .subheadline)
         )
@@ -18,7 +18,7 @@ final class CompactSourceHeaderTests: XCTestCase {
                 TranslationPanelSourceLayout.sourceHeaderHeight(
                     for: source
                 ),
-                expected
+                TranslationPanelMetrics.compactIconHitTarget
             )
         }
         XCTAssertLessThan(
@@ -27,9 +27,9 @@ final class CompactSourceHeaderTests: XCTestCase {
         )
     }
 
-    func testSourceSectionGeometryKeepsTheOCRActionHitTargetOnlyForOCR() {
+    func testSourceSectionGeometryKeepsCompactActionHeightAcrossSources() {
         let textHeaderHeight =
-            TranslationPanelSourceLayout.sourceTextHeaderHeight
+            TranslationPanelMetrics.compactIconHitTarget
         let sourceEditorHeight =
             TranslationPanelSourceLayout.expandedEditorHeight(for: .manual)
 

@@ -195,9 +195,13 @@ for spec in "${required_ui_standards[@]}"; do
     || fail "missing long-term UI standard: $spec"
 done
 
-rg -q --fixed-strings 'docs/产品知识库/UI与交互规范/index.md' \
-  "$root/AGENTS.md" \
-  || fail "AGENTS.md must point every UI task to the long-term UI standard"
+# Workspace guidance may link the canonical document hub instead of duplicating
+# each specialist entry. Require the complete, existing navigation chain.
+if ! rg -q --fixed-strings 'docs/产品知识库/UI与交互规范/index.md' "$root/AGENTS.md"; then
+  rg -q --fixed-strings '(docs/index.md)' "$root/AGENTS.md" \
+    && rg -q --fixed-strings '(产品知识库/UI与交互规范/index.md)' "$root/docs/index.md" \
+    || fail "workspace guidance must reach the long-term UI standard directly or through docs/index.md"
+fi
 
 legacy_alias_pattern='BlocksSurfaceRole\.(settingsSection|floatingPanel)|role:\s*\.(settingsSection|floatingPanel)|\.blocksSurface\(\.(settingsSection|floatingPanel)|BlocksMotionRole\.(microFeedback|stateChange|navigation)|\.blocksAnimation\(\.(microFeedback|stateChange|navigation)|BlocksVisualTokens\.Spacing\.(compact|standard|section|panel)|BlocksVisualTokens\.CornerRadius\.(surface|panel)|settingsContentMaxWidth'
 assert_no_matches \

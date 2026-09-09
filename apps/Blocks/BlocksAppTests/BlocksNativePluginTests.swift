@@ -5043,7 +5043,6 @@ final class BlocksPluginPlatformContractTests: XCTestCase {
             finalizer: {
                 broker.forceShutdown()
             },
-            timeoutSleeper: { _ in },
             replyHandler: { accepted in
                 XCTAssertTrue(accepted)
                 replyCount += 1

@@ -46,9 +46,6 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
     private let pluginManager: BlocksNativePluginManager?
     private let pluginRuntime: BlocksPluginRuntimeCoordinator?
     private let notificationState = BlocksNotificationPresentationState()
-    private lazy var notificationPresenter =
-        BlocksNotificationPanelPresenter(state: notificationState)
-    private var notificationObservation: AnyCancellable?
     private let presentationCoordinator =
         BlocksFloatingPanelPresentationCoordinator()
     private let onClose: @MainActor (UUID) -> Void
@@ -141,7 +138,6 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
                 inputSource: model.inputSource
             )
         )
-        startNotificationObservation()
         updateDismissalHandling()
     }
 
@@ -172,7 +168,6 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
         )
         isSuspended = true
         notificationState.setHostVisible(false)
-        notificationPresenter.hide()
         updateDismissalHandling()
         presentationCoordinator.suspend(window: panel)
         return suspension
@@ -206,7 +201,6 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
             makeKey: suspension.wasKey
         )
         notificationState.setHostVisible(true)
-        synchronizeNotification()
         updateDismissalHandling()
     }
 
@@ -356,28 +350,6 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
             }
     }
 
-    private func startNotificationObservation() {
-        guard notificationObservation == nil else { return }
-        notificationObservation = notificationState.$presentationRevision
-            .sink { [weak self] _ in
-                self?.synchronizeNotification()
-            }
-    }
-
-    private func synchronizeNotification() {
-        guard let panel, panel.isVisible, !isSuspended,
-              !didFinishClose, !isClosePending else {
-            notificationPresenter.hide()
-            return
-        }
-        notificationPresenter.synchronize(
-            on: panel.screen ?? TranslationPanelScreenResolver.screen(
-                for: model.inputContext
-            ),
-            avoiding: [panel.frame]
-        )
-    }
-
     private func startSystemInteractionObservation() {
         guard systemInteractionObservation == nil else { return }
         systemInteractionObservation =
@@ -411,9 +383,7 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
         systemInteractionObservation = nil
         directInteractionObservation?.cancel()
         directInteractionObservation = nil
-        notificationObservation?.cancel()
-        notificationObservation = nil
-        notificationPresenter.shutdown()
+        notificationState.shutdown()
         if let closingPanel {
             savePanelFrame(closingPanel.frame)
         }
@@ -464,10 +434,114 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
         notificationState
     }
 
-    var notificationPanelForTesting: NSPanel? {
-        notificationPresenter.panelForTesting
-    }
+    /// Translation feedback is rendered by the session panel's hosting view.
+    /// Keep this temporary accessor during the test migration so callers can
+    /// assert the old independent notification panel is absent.
+    var notificationPanelForTesting: NSPanel? { nil }
 #endif
+}
+
+/// A feature-owned drag bridge for the translation session panel. It is only
+/// placed in title-bar whitespace or explicit empty result space; editable
+/// source text, buttons, and rendered result cards never receive this view as
+/// an overlay. Mouse tracking belongs to this narrow view, not the text system.
+struct TranslationPanelWindowDragArea: NSViewRepresentable {
+    let height: CGFloat
+
+    init(height: CGFloat = BlocksVisualTokens.Control.compactHeight) {
+        self.height = height
+    }
+
+    func makeNSView(context _: Context) -> DragView {
+        let view = DragView()
+        view.dragHeight = height
+        view.setAccessibilityElement(false)
+        return view
+    }
+
+    func updateNSView(_ nsView: DragView, context _: Context) {
+        nsView.dragHeight = height
+        nsView.invalidateIntrinsicContentSize()
+    }
+
+    func sizeThatFits(
+        _ proposal: ProposedViewSize,
+        nsView: DragView,
+        context: Context
+    ) -> CGSize? {
+        // An overlay must fill its actual empty region, not shrink a tall
+        // passive result area back to the compact-header intrinsic height.
+        CGSize(width: proposal.width ?? 0, height: proposal.height ?? height)
+    }
+
+    final class DragView: NSView {
+        var dragHeight = BlocksVisualTokens.Control.compactHeight
+        private weak var dragWindow: NSWindow?
+        private var dragStart: (windowOrigin: NSPoint, screenPoint: NSPoint)?
+
+
+        override var intrinsicContentSize: NSSize {
+            NSSize(width: NSView.noIntrinsicMetric, height: dragHeight)
+        }
+
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+            true
+        }
+
+        override var mouseDownCanMoveWindow: Bool { false }
+
+        override func viewWillMove(toWindow newWindow: NSWindow?) {
+            clearDragSession()
+            super.viewWillMove(toWindow: newWindow)
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            clearDragSession()
+            guard event.type == .leftMouseDown,
+                  let window,
+                  window.isMovable,
+                  event.windowNumber == window.windowNumber else { return }
+            dragWindow = window
+            dragStart = (
+                window.frame.origin,
+                window.convertPoint(toScreen: event.locationInWindow)
+            )
+        }
+
+        override func mouseDragged(with event: NSEvent) {
+            guard event.type == .leftMouseDragged,
+                  let window,
+                  dragWindow === window,
+                  window.isMovable,
+                  event.windowNumber == window.windowNumber,
+                  let dragStart else {
+                clearDragSession()
+                return
+            }
+            // Use the event's screen point, not global mouse/button state.
+            // performDrag can return before subsequent remote/synthetic drag
+            // events arrive. Regular responder tracking works for both those
+            // sequences and physical mouse input, including across displays.
+            let screenPoint = window.convertPoint(toScreen: event.locationInWindow)
+            window.setFrameOrigin(NSPoint(
+                x: dragStart.windowOrigin.x + screenPoint.x - dragStart.screenPoint.x,
+                y: dragStart.windowOrigin.y + screenPoint.y - dragStart.screenPoint.y
+            ))
+        }
+
+        override func mouseUp(with event: NSEvent) {
+            clearDragSession()
+        }
+
+        override func cancelOperation(_ sender: Any?) {
+            clearDragSession()
+        }
+
+        private func clearDragSession() {
+            dragWindow = nil
+            dragStart = nil
+        }
+    }
 }
 
 enum TranslationPanelActivationPolicy {

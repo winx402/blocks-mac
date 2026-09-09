@@ -11,6 +11,14 @@ public final class ApplicationOperationAdmissionGate: @unchecked Sendable {
     private static let admissionLock = NSRecursiveLock()
     private static var gates: [WeakGate] = []
     private static var globallyPaused = false
+    /// Only the already-committed termination hook may perform cleanup after
+    /// the global cutoff. UI/external tasks never receive this task-local scope.
+    @TaskLocal private static var permitsQuitCleanup = false
+
+    @MainActor
+    public static func withQuitCleanup(_ operation: @MainActor () async -> Void) async {
+        await $permitsQuitCleanup.withValue(true) { await operation() }
+    }
     public enum AdmissionError: Error, LocalizedError {
         case busy(String)
         case paused(String)
@@ -50,13 +58,13 @@ public final class ApplicationOperationAdmissionGate: @unchecked Sendable {
     }
 
     public var isAcceptingOperations: Bool {
-        Self.admissionLock.withLock { !Self.globallyPaused && lock.withLock { accepting } }
+        Self.admissionLock.withLock { (!Self.globallyPaused || Self.permitsQuitCleanup) && lock.withLock { accepting } }
     }
     public var activeOperationCount: Int { lock.withLock { activeCount } }
 
     public func begin() -> Lease? {
         Self.admissionLock.withLock {
-            guard !Self.globallyPaused else { return nil }
+            guard !Self.globallyPaused || Self.permitsQuitCleanup else { return nil }
             return lock.withLock {
                 guard accepting else { return nil }
                 activeCount += 1
@@ -85,6 +93,16 @@ public final class ApplicationOperationAdmissionGate: @unchecked Sendable {
     }
 
     public static func resumeAll() { admissionLock.withLock { globallyPaused = false } }
+
+    /// Quit closes admission even when existing leases are still draining.
+    /// This is deliberately separate from the updater's all-idle transaction.
+    public static func closeAdmissionForQuit() {
+        admissionLock.withLock { globallyPaused = true }
+    }
+
+    public static var totalActiveOperationCount: Int {
+        admissionLock.withLock { gates.compactMap(\.value).reduce(0) { $0 + $1.activeOperationCount } }
+    }
 
     public func requireLease() throws -> Lease {
         guard let lease = begin() else { throw AdmissionError.paused(name) }

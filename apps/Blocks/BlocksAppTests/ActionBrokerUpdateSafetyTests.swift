@@ -138,6 +138,26 @@ final class ActionBrokerUpdateSafetyTests: XCTestCase {
         XCTAssertEqual(manager.state, .enabled)
     }
 
+    func testQuitDuringStartupRecoveryPreservesJournalAndFencesLateCompletion() async throws {
+        let fixture = BrokerServiceUpdateFixture()
+        let ticket = ActionBrokerUpdateRecoveryTicket(processID: 77)
+        try fixture.journal.save(ticket)
+        let entered = expectation(description: "remote recovery suspended")
+        var release: CheckedContinuation<Void, Never>?
+        fixture.host.onResume = {
+            await withCheckedContinuation { release = $0; entered.fulfill() }
+        }
+        let manager = fixture.makeManager()
+        await fulfillment(of: [entered], timeout: 1)
+        manager.beginApplicationQuit()
+        try await manager.prepareForApplicationUpdate(stopService: false)
+        release?.resume()
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertNotNil(try fixture.journal.load())
+        XCTAssertEqual(fixture.unregisterCount, 0)
+        XCTAssertEqual(fixture.host.localResumeCount, 0)
+    }
+
     func testDisabledPreferenceAndOrdinaryOfficialQuitDoNotToggleRegistration() async throws {
         let disabled = BrokerServiceUpdateFixture()
         disabled.status = .notRegistered
@@ -208,6 +228,8 @@ private final class BrokerServiceUpdateFixture {
 
 @MainActor
 private final class BrokerServiceUpdateHost: ActionBrokerHosting {
+    var onResume: (() async -> Void)?
+    var localResumeCount = 0
     var prepareError: Error?
     var resumeError: Error?
     var prepareTokens: [String] = []
@@ -218,7 +240,7 @@ private final class BrokerServiceUpdateHost: ActionBrokerHosting {
     }
     func stop() {}
     func pauseAndDrainForApplicationUpdate() async throws {}
-    func resumeAfterCancelledApplicationUpdate() {}
+    func resumeAfterCancelledApplicationUpdate() { localResumeCount += 1 }
     func prepareBrokerForApplicationUpdate(token: String) async throws -> Int32 {
         prepareTokens.append(token)
         if let prepareError { throw prepareError }
@@ -226,6 +248,7 @@ private final class BrokerServiceUpdateHost: ActionBrokerHosting {
     }
     func resumeBrokerAfterCancelledApplicationUpdate(token: String) async throws {
         resumeTokens.append(token)
+        await onResume?()
         if let resumeError { throw resumeError }
     }
 }

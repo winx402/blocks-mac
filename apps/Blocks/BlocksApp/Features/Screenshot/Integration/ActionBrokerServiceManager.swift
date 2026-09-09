@@ -126,8 +126,24 @@ final class ActionBrokerServiceManager: ObservableObject {
     private var updateRecoveryTicket: ActionBrokerUpdateRecoveryTicket?
     private var updateRecoveryTask: Task<Void, Never>?
     private var updateRecoveryFailureMessage: String?
+    private var isQuitting = false
+    private var recoveryGeneration = 0
+
+    /// No service unregister, journal mutation or remote recovery on ordinary
+    /// quit. Fence suspended callbacks before closing local admission.
+    func beginApplicationQuit() {
+        isQuitting = true
+        recoveryGeneration += 1
+        updateRecoveryTask?.cancel()
+        updateRecoveryTask = nil
+        applicationUpdatePaused = true
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        hostAttempt &+= 1
+    }
 
     func prepareForApplicationUpdate(stopService: Bool = true) async throws {
+        if stopService, updateRecoveryTask != nil { throw ActionBrokerUpdateError.invalidRecoveryState }
         try applicationManagementGate.pauseIfIdle()
         applicationUpdatePaused = true
         try await host.pauseAndDrainForApplicationUpdate()
@@ -233,8 +249,11 @@ final class ActionBrokerServiceManager: ObservableObject {
             guard let ticket = try updateRecoveryJournal.load() else { return false }
             updateRecoveryTicket = ticket
             state = .recovering
-            updateRecoveryTask = applicationManagementGate.task { [weak self] in
+            // Main-actor synchronous journal/register mutations cannot interleave
+            // with quit. The remote wait must not hold a business admission lease.
+            updateRecoveryTask = Task { @MainActor [weak self] in
                 await self?.restoreServiceAfterUpdate()
+                self?.updateRecoveryTask = nil
             }
             return true
         } catch {
@@ -244,6 +263,8 @@ final class ActionBrokerServiceManager: ObservableObject {
     }
 
     private func restoreServiceAfterUpdate() async {
+        guard !isQuitting else { return }
+        let generation = recoveryGeneration
         do {
             let recoveredTicket: ActionBrokerUpdateRecoveryTicket?
             if let updateRecoveryTicket { recoveredTicket = updateRecoveryTicket }
@@ -253,6 +274,8 @@ final class ActionBrokerServiceManager: ObservableObject {
                 if service.status() != .enabled { try service.register() }
                 guard service.status() == .enabled else { throw ActionBrokerUpdateError.requiresApproval }
                 try await host.resumeBrokerAfterCancelledApplicationUpdate(token: ticket.token)
+                guard !isQuitting, recoveryGeneration == generation else { return }
+                try Task.checkCancellation()
                 try updateRecoveryJournal.clear()
                 updateRecoveryTicket = nil
             }
@@ -263,6 +286,7 @@ final class ActionBrokerServiceManager: ObservableObject {
             host.resumeAfterCancelledApplicationUpdate()
             refresh()
         } catch {
+            guard !isQuitting, recoveryGeneration == generation else { return }
             updateRecoveryFailureMessage = error.localizedDescription
             applicationUpdatePaused = false
             applicationManagementGate.resume()

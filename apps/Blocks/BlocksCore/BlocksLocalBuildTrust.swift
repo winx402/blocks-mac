@@ -47,6 +47,33 @@ public enum BlocksLocalBuildTrust {
         #endif
     }
 
+    /// The token comes from the already connected AF_UNIX socket, never a PID
+    /// supplied in a request. Security.framework binds it to that process
+    /// incarnation, including the audit token's PID version.
+    public static func accepts(connectedSocket: Int32, role: String) -> Bool {
+        #if BLOCKS_LOCAL_DEVELOPMENT
+        var token = audit_token_t()
+        var length = socklen_t(MemoryLayout<audit_token_t>.size)
+        guard getsockopt(connectedSocket, SOL_LOCAL, LOCAL_PEERTOKEN, &token, &length) == 0,
+              length == MemoryLayout<audit_token_t>.size,
+              token.val.1 == getuid(), token.val.3 == getuid(),
+              let manifest = loadManifest(),
+              let expected = manifest.peers.first(where: { $0.role == role }) else { return false }
+        let tokenData = withUnsafeBytes(of: &token) { Data($0) }
+        let attributes = [kSecGuestAttributeAudit: tokenData] as CFDictionary
+        var code: SecCode?
+        guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &code) == errSecSuccess,
+              let code,
+              SecCodeCheckValidity(code, SecCSFlags(rawValue: kSecCSStrictValidate), nil) == errSecSuccess else { return false }
+        var staticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess,
+              let staticCode else { return false }
+        return matches(staticCode: staticCode, expected: expected, root: manifest.appBundlePath)
+        #else
+        return false
+        #endif
+    }
+
     /// Applied to an XPC connection before resume, binding every message to
     /// the registered build rather than relying only on a reusable PID.
     public static func connectionRequirement(role: String) -> String? {

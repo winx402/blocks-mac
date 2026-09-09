@@ -225,6 +225,7 @@ final class AppUpdateCoordinator: NSObject, ObservableObject {
     }
 
     func retryInstallationPreparation() {
+        guard !AppTerminationCoordinator.shared.isQuitting else { return }
         guard pendingInstallHandler != nil, installationPreparationTask == nil, recoveryTask == nil else { return }
         canRetryInstallationPreparation = false
         isPreparingInstallation = true
@@ -242,6 +243,7 @@ final class AppUpdateCoordinator: NSObject, ObservableObject {
                 preparationNeedsRecovery = true
                 try await prepareForUpdate()
                 try Task.checkCancellation()
+                guard !AppTerminationCoordinator.shared.isQuitting else { throw CancellationError() }
                 guard pendingInstallHandler != nil else { throw CancellationError() }
                 statusKey = "updates.status.installing"
                 let handler = pendingInstallHandler
@@ -280,6 +282,7 @@ final class AppUpdateCoordinator: NSObject, ObservableObject {
     }
 
     private func recoverPausedWorkIfNeeded() async {
+        guard !AppTerminationCoordinator.shared.isQuitting else { return }
         guard preparationNeedsRecovery, let resumeAfterCancelledUpdate else { return }
         preparationNeedsRecovery = false
         // An unstructured recovery task does not inherit the cancelled status of

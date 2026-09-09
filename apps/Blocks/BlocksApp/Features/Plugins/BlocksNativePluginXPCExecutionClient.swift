@@ -1266,6 +1266,7 @@ private enum BlocksNativePluginRunnerPeerValidator {
               peerIdentity == expectedIdentity else {
             return false
         }
+        ShutdownPrivateProcesses.registerValidatedRunner(pid: connection.processIdentifier, executableURL: expectedExecutable)
         return true
     }
 

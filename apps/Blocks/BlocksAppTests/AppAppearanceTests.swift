@@ -258,7 +258,6 @@ final class AppAppearanceTests: XCTestCase {
             dispatcher: {
                 dispatchCount += 1
             },
-            timeoutSleeper: { _ in },
             replyHandler: { accepted in
                 XCTAssertTrue(accepted)
                 replyCount += 1
@@ -274,7 +273,7 @@ final class AppAppearanceTests: XCTestCase {
         XCTAssertEqual(coordinator.requestTermination(), .terminateNow)
     }
 
-    func testTerminationCoordinatorNeverUsesElapsedTimeoutToKillBusyWork() async {
+    func testTerminationCoordinatorGracefulDrainFinalizesOnlyOnce() async {
         var dispatchCount = 0
         var replyCount = 0
         var finalizerCount = 0
@@ -290,7 +289,6 @@ final class AppAppearanceTests: XCTestCase {
                 }
             },
             finalizer: { finalizerCount += 1 },
-            timeoutSleeper: { _ in },
             replyHandler: { accepted in
                 XCTAssertTrue(accepted)
                 replyCount += 1
@@ -328,7 +326,6 @@ final class AppAppearanceTests: XCTestCase {
                     started.fulfill()
                 }
             },
-            timeoutSleeper: { _ in },
             replyHandler: { _ in
                 replyCount += 1
                 replied.fulfill()
@@ -346,44 +343,85 @@ final class AppAppearanceTests: XCTestCase {
         XCTAssertEqual(replyCount, 1)
     }
 
-    func testTerminationCoordinatorWithoutRuntimeCancelsUntilConfigured() async {
+    func testTerminationCoordinatorWithoutRuntimeStillCommitsQuit() async {
         var replyCount = 0
-        let replied = expectation(description: "configured coordinator can retry")
         let coordinator = AppTerminationCoordinator(replyHandler: { _ in
             replyCount += 1
-            replied.fulfill()
         })
-
-        XCTAssertEqual(coordinator.requestTermination(), .terminateCancel)
+        XCTAssertEqual(coordinator.requestTermination(), .terminateLater)
         XCTAssertEqual(replyCount, 0)
-        XCTAssertEqual(coordinator.requestTermination(), .terminateCancel)
+        XCTAssertTrue(coordinator.isQuitting)
         coordinator.installDispatcher { }
         XCTAssertEqual(coordinator.requestTermination(), .terminateLater)
-        await fulfillment(of: [replied], timeout: 1)
-        XCTAssertEqual(coordinator.requestTermination(), .terminateNow)
+        XCTAssertEqual(replyCount, 0)
     }
 
-    func testTerminationCoordinatorRejectedPreparationCanRetryWithoutFinalizing() async {
-        var reject = true
+    func testTerminationCoordinatorRejectedPreparationDoesNotReopenOrFinalize() async {
         var replies: [Bool] = []
         var finalized = 0
-        let rejected = expectation(description: "busy preparation cancels quit")
-        let accepted = expectation(description: "retry completes after work finishes")
+        let rejected = expectation(description: "preparation failed")
         let coordinator = AppTerminationCoordinator(dispatcher: {
-            if reject { throw ApplicationOperationAdmissionGate.AdmissionError.busy("fixture") }
+            rejected.fulfill()
+            throw ApplicationOperationAdmissionGate.AdmissionError.busy("fixture")
         }, finalizer: { finalized += 1 }, replyHandler: { reply in
             replies.append(reply)
-            if reply { accepted.fulfill() } else { rejected.fulfill() }
         })
         XCTAssertEqual(coordinator.requestTermination(), .terminateLater)
         await fulfillment(of: [rejected], timeout: 1)
-        XCTAssertEqual(replies, [false])
+        XCTAssertEqual(replies, [])
         XCTAssertEqual(finalized, 0)
-        reject = false
         XCTAssertEqual(coordinator.requestTermination(), .terminateLater)
-        await fulfillment(of: [accepted], timeout: 1)
-        XCTAssertEqual(replies, [false, true])
-        XCTAssertEqual(finalized, 1)
+        XCTAssertTrue(coordinator.isQuitting)
+        XCTAssertEqual(finalized, 0)
+    }
+
+    func testTerminationDeadlineRunsWhileMainActorIsBlocked() async {
+        let fired = expectation(description: "independent watchdog fired")
+        let coordinator = AppTerminationCoordinator(dispatcher: {
+            Thread.sleep(forTimeInterval: 0.15)
+        }, timeoutNanoseconds: 20_000_000, forceExit: { fired.fulfill() }, replyHandler: { _ in })
+        XCTAssertEqual(coordinator.requestTermination(), .terminateLater)
+        XCTAssertEqual(coordinator.requestTermination(), .terminateLater)
+        await fulfillment(of: [fired], timeout: 1)
+    }
+
+    func testQuitFencesLateUpdateFailureWithoutResumingProducers() async throws {
+        defer { ApplicationOperationAdmissionGate.resumeAll() }
+        let gate = ApplicationOperationAdmissionGate(name: "quit-interleave-fixture")
+        let lifecycle = ApplicationLifecycleCoordinator(requiredParticipantIDs: ["app"])
+        var continuation: CheckedContinuation<Void, Never>?
+        var resumeCount = 0
+        let entered = expectation(description: "update preparing")
+        try lifecycle.register(.init(id: "app", pauseAndDrain: {
+            await withCheckedContinuation { continuation = $0; entered.fulfill() }
+            throw CancellationError()
+        }, resume: { resumeCount += 1 }))
+        let update = Task { try? await lifecycle.prepare() }
+        await fulfillment(of: [entered], timeout: 1)
+        do { try await lifecycle.prepare(for: .quit); XCTFail("overlapping preparation succeeded") } catch { }
+        continuation?.resume()
+        await update.value
+        XCTAssertEqual(resumeCount, 0)
+        XCTAssertNil(gate.begin())
+        do { try await lifecycle.prepare(); XCTFail("quit was reclassified as update") } catch { }
+    }
+
+    func testQuitClosesNewAdmissionWhileExistingOperationDrains() async throws {
+        defer { ApplicationOperationAdmissionGate.resumeAll() }
+        let gate = ApplicationOperationAdmissionGate(name: "quit-drain-fixture")
+        let lease = try XCTUnwrap(gate.begin())
+        let lifecycle = ApplicationLifecycleCoordinator(requiredParticipantIDs: ["app"])
+        var prepared = false
+        try lifecycle.register(.init(id: "app", pauseAndDrain: { prepared = true }, resume: {}))
+        let quit = Task { try await lifecycle.prepare(for: .quit) }
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertNil(gate.begin())
+        XCTAssertFalse(prepared)
+        lease.release()
+        try await quit.value
+        XCTAssertTrue(prepared)
+        await lifecycle.resumeAfterCancelledUpdate()
+        XCTAssertNil(gate.begin(), "update recovery must not reopen committed quit")
     }
 
     func testApplicationChromeTypographyUsesNativeSystemFontsForEveryWeight() {
@@ -2910,6 +2948,27 @@ final class AppAppearanceTests: XCTestCase {
                 PermissionAssistKind.accessibility.settingsURL!,
             ]
         )
+    }
+
+    func testPermissionAssistOtherBundleCannotInheritMainAppPermission() {
+        let motion = PermissionAssistDeferredMotionSpy()
+        let presenter = PermissionAssistPanelPresenter(
+            permissionGranted: { _ in true },
+            systemSettingsWindowFrame: { nil },
+            isSystemSettingsRunning: { true },
+            openSystemSettings: { _ in },
+            panelPresentationCoordinator: BlocksFloatingPanelPresentationCoordinator(animationDriver: motion.driver)
+        )
+        defer { presenter.shutdown() }
+        presenter.present(kind: .accessibility, appURL: URL(fileURLWithPath: "/synthetic/Blocks Helper.app"))
+        presenter.completeFromUserActionForTesting()
+        XCTAssertEqual(presenter.sessionForTesting?.state, .failed)
+        var completed = 0
+        presenter.present(kind: .accessibility, appURL: URL(fileURLWithPath: "/synthetic/Blocks Helper.app"),
+                          targetPermissionGranted: { true }, onFlowEnded: { completed += 1 })
+        presenter.completeFromUserActionForTesting()
+        XCTAssertEqual(completed, 1)
+        XCTAssertNil(presenter.sessionForTesting)
     }
 
     func testPermissionAssistFailedCompletionKeepsCallbackForLaterGrantedMonitor() {

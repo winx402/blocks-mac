@@ -255,9 +255,17 @@ final class AppModel: ObservableObject {
         openClipboardPanelForVerificationIfRequested()
         translationCoordinator.openPanelForVerificationIfRequested()
         configureApplicationLifecycle()
+        if !BlocksRuntimeEnvironment.isUnitTestHost { FeedbackController.shared.startIfEnabled() }
     }
 
     private func configureApplicationLifecycle() {
+        AppTerminationCoordinator.shared.installQuitObserver { FeedbackController.shared.stopForQuit() }
+        applicationLifecycle.beforeQuitDrain = { [pluginRuntimeCoordinator] in
+            _ = await pluginRuntimeCoordinator.dispatch(.init(name: .appWillTerminate))
+        }
+        applicationLifecycle.onParticipant = { id, completed in
+            AppTerminationCoordinator.shared.recordParticipant(id, completed: completed)
+        }
         do {
             try applicationLifecycle.register(.init(id: "app", pauseAndDrain: { [applicationOperationGate] in
                 try applicationOperationGate.pauseIfIdle()
@@ -268,14 +276,15 @@ final class AppModel: ObservableObject {
             try applicationLifecycle.register(.init(id: "shortcuts", pauseAndDrain: { [shortcutStore] in
                 try await shortcutStore.prepareForApplicationUpdate()
             }, resume: { [shortcutStore] in await shortcutStore.resumeAfterCancelledApplicationUpdate() }))
-            try applicationLifecycle.register(.init(id: "helper", pauseAndDrain: { [selectionHelperSettingsController] in
+            try applicationLifecycle.register(.init(id: "helper", pauseAndDrain: { [weak self, selectionHelperSettingsController] in
+                guard self?.applicationLifecycle.intent != .quit else { return }
                 try await selectionHelperSettingsController?.prepareForApplicationUpdate()
             }, resume: { [selectionHelperSettingsController] in
                 await selectionHelperSettingsController?.resumeAfterCancelledApplicationUpdate()
             }))
             try applicationLifecycle.register(.init(id: "actionBroker", pauseAndDrain: { [weak self, actionBrokerManager] in
                 try await actionBrokerManager.prepareForApplicationUpdate(
-                    stopService: (self?.needsApplicationUpdateBackup ?? true) || BlocksRuntimeIdentity.isLocalDevelopment
+                    stopService: self?.applicationLifecycle.intent != .quit
                 )
             }, resume: { [actionBrokerManager] in await actionBrokerManager.resumeAfterCancelledApplicationUpdate() }))
             try applicationLifecycle.register(.init(id: "clipboard", pauseAndDrain: { [clipboardCoordinator] in
@@ -308,15 +317,11 @@ final class AppModel: ObservableObject {
         guard applicationLifecycle.hasCompleteSafetyCoverage else { return }
         AppTerminationCoordinator.shared.installDispatcher { [weak self] in
             guard let self else { throw ApplicationLifecycleCoordinator.SafetyError.configurationLocked }
-            do {
-                if applicationLifecycle.state != .prepared { needsApplicationUpdateBackup = false }
-                try await prepareApplicationLifecycle()
-            } catch {
-                await resumeAfterCancelledApplicationUpdate()
-                status = AppStatus(kind: .failed, title: L10n.string("status.failed.title"),
-                    detail: error.localizedDescription)
-                throw error
-            }
+            if applicationLifecycle.state != .prepared { needsApplicationUpdateBackup = false }
+            // User quit is not an update transaction and cannot be vetoed by
+            // remote helper registration or a stale recovery journal.
+            actionBrokerManager.beginApplicationQuit()
+            try await applicationLifecycle.prepare(for: .quit)
         }
         AppTerminationCoordinator.shared.installFinalizer { [weak self] in
             guard self?.applicationLifecycle.state == .prepared else { return }
@@ -333,8 +338,12 @@ final class AppModel: ObservableObject {
     }
 
     func prepareForApplicationUpdate() async throws {
+        guard !AppTerminationCoordinator.shared.isQuitting else {
+            throw ApplicationLifecycleCoordinator.SafetyError.preparationInProgress
+        }
         needsApplicationUpdateBackup = true
         try await prepareApplicationLifecycle()
+        guard !AppTerminationCoordinator.shared.isQuitting else { throw CancellationError() }
     }
 
     private func prepareApplicationLifecycle() async throws {
@@ -349,6 +358,7 @@ final class AppModel: ObservableObject {
     }
 
     func resumeAfterCancelledApplicationUpdate() async {
+        guard !AppTerminationCoordinator.shared.isQuitting else { return }
         await applicationLifecycle.resumeAfterCancelledUpdate()
         needsApplicationUpdateBackup = false
     }

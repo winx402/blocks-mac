@@ -6,6 +6,12 @@ import SwiftUI
 final class PermissionAssistPanelSessionModel: ObservableObject {
     @Published private(set) var session: PermissionAssistSession?
     @Published private(set) var appURL: URL
+    var appDisplayName: String {
+        let bundle = Bundle(url: appURL)
+        return (bundle?.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String)
+            ?? (bundle?.object(forInfoDictionaryKey: "CFBundleName") as? String)
+            ?? appURL.deletingPathExtension().lastPathComponent
+    }
 
     init(session: PermissionAssistSession?, appURL: URL) {
         self.session = session
@@ -72,6 +78,11 @@ struct PermissionAssistPanelView: View {
                         cornerRadius: BlocksVisualTokens.CornerRadius.section
                     )
 
+                    Button(L10n.format("permission.assist.revealTarget", sessionModel.appDisplayName)) {
+                        NSWorkspace.shared.activateFileViewerSelecting([sessionModel.appURL])
+                    }
+                    .accessibilityIdentifier("permissionAssist.revealTarget")
+
                     Label(L10n.string("permission.assist.openedSettings"), systemImage: "gearshape.arrow.triangle.2.circlepath")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -115,6 +126,7 @@ struct PermissionAssistPanelView: View {
             .onDrag {
                 NSItemProvider(object: sessionModel.appURL as NSURL)
             }
+            .accessibilityLabel(sessionModel.appDisplayName)
     }
 
     private func animatedArrow(direction: PermissionAssistArrowDirection) -> some View {
@@ -127,7 +139,7 @@ struct PermissionAssistPanelView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(L10n.string("permission.assist.dragTitle"))
                 .font(.subheadline.weight(.semibold))
-            Text(session.kind.detail)
+            Text(L10n.format("permission.assist.targetDetail", sessionModel.appDisplayName))
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

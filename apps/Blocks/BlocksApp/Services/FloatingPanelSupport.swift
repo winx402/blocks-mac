@@ -463,6 +463,7 @@ final class BlocksFloatingPanelPresentationCoordinator {
         makeKey: Bool,
         completion: @escaping @MainActor () -> Void = {}
     ) {
+        guard !AppTerminationCoordinator.shared.isQuitting else { return }
         generation &+= 1
         let presentationGeneration = generation
         BlocksAppKitMotion.cancelAnimations(on: window)
@@ -552,6 +553,7 @@ final class BlocksFloatingPanelPresentationCoordinator {
     }
 
     func bringForward(window: NSWindow, makeKey: Bool) {
+        guard !AppTerminationCoordinator.shared.isQuitting else { return }
         generation &+= 1
         BlocksAppKitMotion.cancelAnimations(on: window)
         window.ignoresMouseEvents = false
@@ -625,6 +627,10 @@ final class BlocksRegularWindowVisibilitySession {
 
     func restore() {
         guard isCapturing else { return }
+        guard !AppTerminationCoordinator.shared.isQuitting else {
+            discard()
+            return
+        }
         let entriesToRestore = entries
         let shouldRestoreKeyWindow = applicationWasActive
         discard()
