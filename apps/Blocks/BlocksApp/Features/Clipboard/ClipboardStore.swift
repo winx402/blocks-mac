@@ -423,6 +423,13 @@ struct ClipboardRecordMutationPipelineHooks: Sendable {
     var shouldFailMutation: @Sendable (ClipboardRecordMutationKind) -> Bool = { _ in false }
 }
 
+/// Observes real history reads at the publication boundary. Tests may suspend
+/// a completed read here without replacing its database snapshot.
+struct ClipboardHistoryReadPublicationHooks {
+    var beforePublication: @MainActor (ClipboardHistoryReadSnapshot) async -> Void = { _ in }
+    var didComplete: @MainActor (UInt64) -> Void = { _ in }
+}
+
 /// Runs record metadata and deletion writes on the same serial queue as
 /// capture, retention cleanup, and tag mutations. Once submitted, a database
 /// write is allowed to settle even if its caller is cancelled; the MainActor
@@ -974,6 +981,7 @@ final class ClipboardStore: ObservableObject {
     )
     private let repository: ClipboardRepository?
     private let historyReadPipeline: ClipboardHistoryReadPipeline
+    private let historyReadPublicationHooks: ClipboardHistoryReadPublicationHooks
     private let recordActionPipeline: ClipboardRecordActionPipeline
     private let recordMutationPipeline: ClipboardRecordMutationPipeline
     private let capturePersistencePipeline: ClipboardCapturePersistencePipeline
@@ -1035,6 +1043,7 @@ final class ClipboardStore: ObservableObject {
         cleanupMutationPipelineHooks: ClipboardCleanupMutationPipelineHooks = ClipboardCleanupMutationPipelineHooks(),
         capturePersistencePipelineHooks: ClipboardCapturePersistencePipelineHooks = ClipboardCapturePersistencePipelineHooks(),
         recordMutationPipelineHooks: ClipboardRecordMutationPipelineHooks = ClipboardRecordMutationPipelineHooks(),
+        historyReadPublicationHooks: ClipboardHistoryReadPublicationHooks = ClipboardHistoryReadPublicationHooks(),
         applicationUpdateGate: ApplicationOperationAdmissionGate = ApplicationOperationAdmissionGate(name: "Clipboard")
     ) {
         let repositoryMutationQueue = ClipboardRepositoryMutationQueue()
@@ -1045,6 +1054,7 @@ final class ClipboardStore: ObservableObject {
         self.recordCommitGate = recordCommitGate
         self.applicationUpdateGate = applicationUpdateGate
         self.historyReadPipeline = ClipboardHistoryReadPipeline(repository: repository)
+        self.historyReadPublicationHooks = historyReadPublicationHooks
         self.recordActionPipeline = ClipboardRecordActionPipeline(repository: repository)
         self.recordMutationPipeline = ClipboardRecordMutationPipeline(
             repository: repository,
@@ -1446,8 +1456,11 @@ final class ClipboardStore: ObservableObject {
             repositoryWasUnavailable: repositoryUnavailable
         )
         let pipeline = historyReadPipeline
+        let publicationHooks = historyReadPublicationHooks
         historyReadTask = Task { @MainActor [weak self] in
             let snapshot = await pipeline.read(request)
+            defer { publicationHooks.didComplete(snapshot.generation) }
+            await publicationHooks.beforePublication(snapshot)
             guard let self,
                   !Task.isCancelled,
                   snapshot.generation == self.historyReadGeneration else {
@@ -2114,6 +2127,12 @@ final class ClipboardStore: ObservableObject {
                 records.removeLast(records.count - lastLoadLimit)
             }
             updateActiveSearchResultAfterPromotion(promotedRecord)
+            // A read started before the durable copy can still contain the old
+            // order. Invalidate it before the next suspension, and reissue the
+            // user's current query/filter rather than dropping a pending search.
+            // Loaded copies keep their immediate local publication; this refresh
+            // must not delay the copy/automatic-paste transaction.
+            refreshActiveSearchResult()
         } else if persisted {
             // A committed copy must be visible before this method reports
             // success. Newly inserted translation/OCR copies are not present

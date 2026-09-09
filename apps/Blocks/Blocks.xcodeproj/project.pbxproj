@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B909R0000000000000000001 /* ClipboardRecencyPublicationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F909R0000000000000000001; };
 		B909W0000000000000000001 /* SettingsWindowBackingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F909W0000000000000000001; };
 		B909H0000000000000000001 /* SelectionHelperLocalAssociation.swift in Sources */ = {isa = PBXBuildFile; fileRef = F909H0000000000000000001; };
 		B909H0000000000000000002 /* SelectionHelperLocalAssociation.swift in Helper */ = {isa = PBXBuildFile; fileRef = F909H0000000000000000001; };
@@ -532,6 +533,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		F909R0000000000000000001 /* ClipboardRecencyPublicationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardRecencyPublicationTests.swift; sourceTree = "<group>"; };
 		F909W0000000000000000001 /* SettingsWindowBackingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsWindowBackingTests.swift; sourceTree = "<group>"; };
 		F909H0000000000000000001 /* SelectionHelperLocalAssociation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionHelperLocalAssociation.swift; sourceTree = "<group>"; };
 		F909H0000000000000000004 /* SelectionHelperLocalAssociationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionHelperLocalAssociationTests.swift; sourceTree = "<group>"; };
@@ -1094,6 +1096,7 @@
 				F15R00000000000000000001 /* ClipboardScreenshotHistoryRepositoryTests.swift */,
 				F15L00000000000000000030 /* TranslationCoreTests.swift */,
 				F15L00000000000000000031 /* TranslationEntryBridgeTests.swift */,
+				F909R0000000000000000001 /* ClipboardRecencyPublicationTests.swift */,
 				F909W0000000000000000001 /* SettingsWindowBackingTests.swift */,
 				F909H0000000000000000004 /* SelectionHelperLocalAssociationTests.swift */,
 				F909F0000000000000000007 /* SettingsSidebarRegressionTests.swift */,
@@ -2213,6 +2216,7 @@
 				B15E00000000000000000003 /* ScreenshotHistoryActionServiceTests.swift in Sources */,
 				B15L00000000000000000030 /* TranslationCoreTests.swift in Sources */,
 				B15L00000000000000000031 /* TranslationEntryBridgeTests.swift in Sources */,
+				B909R0000000000000000001 /* ClipboardRecencyPublicationTests.swift in Sources */,
 				B909W0000000000000000001 /* SettingsWindowBackingTests.swift in Sources */,
 				B909H0000000000000000004 /* SelectionHelperLocalAssociationTests.swift in Sources */,
 				B909F0000000000000000007 /* SettingsSidebarRegressionTests.swift in Sources */,
