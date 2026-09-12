@@ -4,6 +4,23 @@ import XCTest
 
 @MainActor
 final class FloatingPanelGeometryTests: XCTestCase {
+    func testTransientNonactivatingUtilityUsesStatusBarLevelAboveDock() {
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 240),
+            styleMask: [.nonactivatingPanel, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        defer { panel.close() }
+
+        BlocksFloatingPanelWindowRole.transientNonactivatingUtility.apply(
+            to: panel
+        )
+
+        XCTAssertEqual(panel.level, .statusBar)
+        XCTAssertLessThan(panel.level.rawValue, NSWindow.Level.screenSaver.rawValue)
+    }
+
     func testBottomFrameAlwaysUsesPhysicalBottomRegardlessOfDockInset() {
         let physicalScreen = CGRect(x: -1_440, y: 0, width: 1_440, height: 900)
         let beforeDockChange = CGRect(x: -1_440, y: 24, width: 1_440, height: 876)

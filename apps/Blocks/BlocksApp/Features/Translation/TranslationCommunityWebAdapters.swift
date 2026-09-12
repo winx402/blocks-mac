@@ -756,10 +756,11 @@ final class TranslationCommunityWebServiceAdapter:
                         return
                     case .timedOut:
                         errorCode = "network_timed_out"
+                    case .networkConnectionLost:
+                        errorCode = "network_connection_lost"
                     case .cannotFindHost,
                          .cannotConnectToHost,
                          .dnsLookupFailed,
-                         .networkConnectionLost,
                          .notConnectedToInternet:
                         errorCode = "network_unavailable"
                     default:

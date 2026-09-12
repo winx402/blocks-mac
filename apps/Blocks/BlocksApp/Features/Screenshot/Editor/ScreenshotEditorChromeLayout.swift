@@ -99,10 +99,12 @@ enum ScreenshotEditorChromeSafeArea {
 struct ScreenshotChromeContentLayout: Layout {
     let maximumWidth: CGFloat
     let height: CGFloat
+    var fillsProposedWidth = false
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let intrinsic = subviews.first?.sizeThatFits(.unspecified).width ?? 0
-        return CGSize(width: min(maximumWidth, proposal.width ?? maximumWidth, intrinsic), height: height)
+        let available = min(maximumWidth, proposal.width ?? maximumWidth)
+        return CGSize(width: fillsProposedWidth ? available : min(available, intrinsic), height: height)
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
@@ -122,13 +124,12 @@ struct ScreenshotEditorToolbarPanelLayout: Layout {
         let toolbar = subviews.first?.sizeThatFits(
             ProposedViewSize(width: proposedWidth, height: nil)
         ) ?? .zero
+        // The main actions define the grid; changing inspector controls must
+        // not resize the status strip or displace the main actions.
+        let width = min(proposedWidth, toolbar.width)
         let properties = subviews.dropFirst().first?.sizeThatFits(
-            ProposedViewSize(width: proposedWidth, height: nil)
+            ProposedViewSize(width: width, height: nil)
         ) ?? .zero
-        let width = min(
-            proposedWidth,
-            max(toolbar.width, properties.width)
-        )
         let propertiesHeight = max(
             ScreenshotDesignTokens.toolbarPropertyHeight,
             properties.height
@@ -191,11 +192,11 @@ struct ScreenshotEditorOverlayLayout: Layout {
                     ? safeAreaInsets.leading + safeAreaInsets.trailing
                     : 0)
         )
-        let statusSize = subviews[1].sizeThatFits(
-            ProposedViewSize(width: maximumChromeWidth, height: nil)
-        )
         let toolbarSize = subviews[2].sizeThatFits(
             ProposedViewSize(width: maximumChromeWidth, height: nil)
+        )
+        let statusSize = subviews[1].sizeThatFits(
+            ProposedViewSize(width: toolbarSize.width, height: nil)
         )
         let frames = ScreenshotEditorCropChromeLayout.resolve(
             availableSize: bounds.size, sourceRect: sourceRect, cropRect: cropRect,

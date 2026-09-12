@@ -106,7 +106,8 @@ def editor_layout_contract_failures(
     panel_layout = swift_scope(chrome, "struct ScreenshotEditorToolbarPanelLayout")
     overlay_layout = swift_scope(chrome, "struct ScreenshotEditorOverlayLayout")
     require("editor_synchronous_intrinsic_measurement_missing", EDITOR_CHROME_LAYOUT, content_layout, [
-        "subviews.first?.sizeThatFits(.unspecified).width", "min(maximumWidth, proposal.width ?? maximumWidth, intrinsic)",
+        "subviews.first?.sizeThatFits(.unspecified).width", "min(maximumWidth, proposal.width ?? maximumWidth)",
+        "fillsProposedWidth ? available : min(available, intrinsic)",
         "proposal: ProposedViewSize(width: bounds.width, height: bounds.height)",
     ])
     require("editor_plugin_inspector_dynamic_toolbar_measurement_missing", EDITOR_CHROME_LAYOUT, panel_layout, [
@@ -192,8 +193,8 @@ def editor_layout_contract_failures(
     property_strip = swift_scope(view, "private struct ScreenshotChromePropertyStrip")
     overflow = swift_scope(view, "private struct ScreenshotChromeOverflowRow<")
     require("editor_status_first_frame_geometry_missing", EDITOR_VIEW, status, [
-        "ScreenshotChromeContentLayout(", "ViewThatFits(in: .horizontal)", "chips.fixedSize(horizontal: true",
-        "ScreenshotChromeOverflowRow(", ".fixedSize(horizontal: true, vertical: true)",
+        "ScreenshotChromeContentLayout(", "fillsProposedWidth: true", "ScrollView(.horizontal)",
+        "ScrollViewReader", "proxy.scrollTo", ".fixedSize(horizontal: true, vertical: true)",
     ])
     forbid("editor_status_async_width_or_fade_restored", EDITOR_VIEW, status, [
         ".mask", "PreferenceKey", "onContentWidthChange", "measuredStatusContentWidth",
@@ -760,6 +761,13 @@ def main() -> int:
             "code": "editor_aspect_properties_uses_height_competing_system_scrollbar",
             "path": rel(EDITOR_VIEW),
         })
+    if "NSApp.activate(" in presenter:
+        failures.append({
+            "code": "editor_transition_activates_application",
+            "path": rel(EDITOR_PRESENTER),
+            "detail": "editor keyboard focus must not activate Blocks and switch the capture Space",
+        })
+
     for obsolete in [
         "ScreenshotPropertyContentWidthPreferenceKey",
         "ScreenshotPropertyViewportWidthPreferenceKey",
@@ -1163,7 +1171,8 @@ def main() -> int:
         "NSHostingView",
         "capture.editingContext?.sourceFrame",
         "panel.orderFrontRegardless()",
-        "NSApp.activate(ignoringOtherApps: true)",
+        "styleMask: [.borderless, .closable, .nonactivatingPanel]",
+        "override var canBecomeMain: Bool { false }",
         "prepareForNewCapture() async",
         "store?.shutdown()",
         "requestRetake",

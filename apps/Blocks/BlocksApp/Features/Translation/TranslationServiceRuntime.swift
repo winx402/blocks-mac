@@ -144,6 +144,18 @@ enum TranslationErrorPresentation {
             return L10n.string(
                 "translation.community.error.responseLanguageMismatch"
             )
+        case "network_connection_lost":
+            return L10n.string(
+                "translation.community.error.networkConnectionLost"
+            )
+        case "network_timed_out":
+            return L10n.string(
+                "translation.community.error.networkTimedOut"
+            )
+        case "network_rate_limited":
+            return L10n.string(
+                "translation.community.error.networkRateLimited"
+            )
         case "source_language_undetermined":
             return L10n.string(
                 "translation.error.sourceLanguageUndetermined"

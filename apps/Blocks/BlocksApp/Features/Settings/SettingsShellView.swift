@@ -55,7 +55,9 @@ struct SettingsShellView: View {
                             BlocksVisualTokens.Layout
                                 .settingsPageHorizontalPadding
                         )
-                        .padding(.top, BlocksVisualTokens.Spacing.xl)
+                        .padding(.top, routeStateStore.isSecondaryPage(for: mode)
+                            ? BlocksVisualTokens.Spacing.md
+                            : BlocksVisualTokens.Spacing.xl)
                         .padding(.bottom, 48)
                         .frame(maxWidth: .infinity, alignment: .center)
                     }
@@ -152,6 +154,11 @@ final class SettingsRouteStateStore: ObservableObject {
     @Published private(set) var focusRestorationRequest: SettingsFocusRestorationRequest?
     private var focusTargets: [String: String] = [:]
     private var providerDetailsDrafts: [String: ProviderDetailsRouteDraft] = [:]
+
+    func isSecondaryPage(for mode: SettingsViewMode) -> Bool {
+        guard let token = secondaryRouteTokens[mode] else { return false }
+        return token != defaultSecondaryRouteToken(for: mode)
+    }
 
     func scrollOffsetBinding(for mode: SettingsViewMode) -> Binding<CGFloat> {
         scrollOffsetBinding(key: scrollRestorationID(for: mode))

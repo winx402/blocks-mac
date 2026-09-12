@@ -145,9 +145,11 @@ def main() -> int:
             })
     editor_completion = closure_block(
         store,
-        "completion: { [weak self] outcome in",
+        "completion: { [weak self, editorUpdateLease] outcome in",
     )
-    editor_completion_defer = closure_block(editor_completion, "defer {")
+    editor_completion_defer = closure_block(
+        editor_completion, "defer {\n                        editorUpdateLease.release()"
+    )
     if not (
         editor_completion
         and editor_completion_defer
@@ -155,7 +157,8 @@ def main() -> int:
         and "clearActiveEditorApplicationContext(ifMatching: applicationContext)"
             in editor_completion_defer
         and "switch outcome" in editor_completion
-        and "finalOutputCoordinator.finalize(" in editor_completion
+        and "self.runEditorFinalOutput(" in editor_completion
+        and "finalOutputCoordinator.finalize(" in closure_block(store, "private func runEditorFinalOutput(")
         and editor_completion.index("defer {")
             < editor_completion.index("switch outcome")
     ):
@@ -317,7 +320,9 @@ def main() -> int:
             "detail": ", ".join(missing_countdown),
         })
 
-    if store.count("guard sessionGate.begin()") != 2 or "private let sessionGate" not in store:
+    if (store.count("guard sessionGate.begin(owner: sessionID)") != 2
+            or store.count("defer { sessionGate.end(owner: sessionID) }") != 2
+            or "private let sessionGate" not in store):
         failures.append({
             "code": "shared_gui_action_session_gate_missing",
             "path": rel(STORE),
@@ -395,7 +400,7 @@ def main() -> int:
         "captureSurfaceHandoff(",
         "selectionSurfaceWindowIDs: selectionController.selectionSurfaceWindowIDs",
         "let initialOwnApplication = captureExcludedApplication(in: content)",
-        "else if let initialOwnApplication",
+        "else if allowedOwnWindowID == nil, let initialOwnApplication",
         "captureExclusion = .application(initialOwnApplication)",
         "excludingApplications: [application]",
         "resolvedCaptureExclusion(in:",

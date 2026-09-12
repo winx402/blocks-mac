@@ -7,6 +7,51 @@ import XCTest
 
 @MainActor
 final class ScreenshotEditorIssueLayoutTests: XCTestCase {
+    func testPropertiesStripUpdatesItsActualControlsWhenTheToolChanges() throws {
+        let defaultsSuite = "ScreenshotEditorIssueLayoutTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: defaultsSuite))
+        defaults.removePersistentDomain(forName: defaultsSuite)
+        defer { defaults.removePersistentDomain(forName: defaultsSuite) }
+
+        let store = try ScreenshotEditorStore(
+            capture: propertyStripCapture(),
+            preferencesStore: ScreenshotPreferencesStore(userDefaults: defaults),
+            onComplete: { _ in },
+            onRetake: {},
+            onClose: {}
+        )
+        let aspect = ScreenshotAspectControlModel(
+            selection: ScreenshotAspectSelection(orientation: store.aspectOrientation, constraint: store.cropConstraint),
+            customConstraints: store.preferencesStore.preferences.customConstraints
+        )
+        let host = NSHostingView(rootView: ScreenshotExpandedPropertiesRow(
+            store: store, aspectControlModel: aspect, maximumWidth: 1200,
+            maximumPluginInspectorHeight: 300
+        ))
+        let window = NSWindow(
+            contentRect: CGRect(x: -20_000, y: -20_000, width: 1_200, height: 800),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        window.contentView = host
+        window.orderFront(nil)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        host.layoutSubtreeIfNeeded()
+
+        let selectionSize = host.fittingSize
+        XCTAssertGreaterThan(selectionSize.width, 0)
+
+        store.selectTool(.rectangle)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        host.layoutSubtreeIfNeeded()
+
+        XCTAssertGreaterThan(
+            host.fittingSize.width, selectionSize.width + 100,
+            "The actual rectangle controls must replace the compact selection hint without rebuilding the host."
+        )
+    }
+
     func testDisplayCaptureKeepsEveryPixelInFullCanvasWithChromeInside() {
         for size in [CGSize(width: 1440, height: 900), CGSize(width: 900, height: 1440), CGSize(width: 5120, height: 1440)] {
             let pixels = ScreenshotPixelRect(x: 0, y: 0, width: Int(size.width * 2), height: Int(size.height * 2))
@@ -184,7 +229,7 @@ final class ScreenshotEditorIssueLayoutTests: XCTestCase {
         XCTAssertEqual(inlineError, "default fixture failure")
     }
 
-    func testStatusFirstFrameHugsRealLocalizedContentAndPluginWithoutWidthCallback() {
+    func testStatusFirstFrameKeepsSharedGridAcrossLocalizedPluginContent() {
         for title in ["插件状态", "Plugin status and dimensions", "プラグインのステータスと寸法"] {
             let host = NSHostingView(rootView: ScreenshotEditorStatusBar(
                 elements: [], selectedElementID: nil, isRoundedOutput: false, width: 900,
@@ -195,8 +240,7 @@ final class ScreenshotEditorIssueLayoutTests: XCTestCase {
             let first = host.fittingSize
             host.frame = CGRect(origin: .zero, size: first)
             host.layoutSubtreeIfNeeded()
-            XCTAssertGreaterThan(first.width, 160)
-            XCTAssertLessThan(first.width, 900)
+            XCTAssertEqual(first.width, 900, accuracy: 0.5)
             XCTAssertEqual(first.height, ScreenshotEditorChromeMetrics.statusBarHeight, accuracy: 0.5)
             XCTAssertEqual(first.width, host.fittingSize.width, accuracy: 0.5)
         }
@@ -257,5 +301,53 @@ final class ScreenshotEditorIssueLayoutTests: XCTestCase {
             runtimeState: [:],
             performAction: { _, _ in }
         ))
+    }
+
+    private func propertyStripCapture() -> ScreenshotCapture {
+        let image = NSImage(size: NSSize(width: 64, height: 64))
+        image.lockFocus()
+        NSColor.white.setFill()
+        NSRect(x: 0, y: 0, width: 64, height: 64).fill()
+        image.unlockFocus()
+        let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil)!
+        let bounds = ScreenshotPixelRect(x: 0, y: 0, width: 64, height: 64)
+        return ScreenshotCapture(
+            id: "property-strip-fixture",
+            image: image,
+            pixelSize: CGSize(width: 64, height: 64),
+            sourceRect: CGRect(x: 0, y: 0, width: 64, height: 64),
+            kind: .region,
+            displayScope: nil,
+            sourceSummary: "property strip fixture",
+            editingContext: ScreenshotEditingContext(
+                sourceContext: ScreenshotSourceContext(
+                    sourceBounds: bounds,
+                    tileDescriptors: [ScreenshotSourceTileDescriptor(id: "display-1", bounds: bounds)],
+                    compositeSource: cgImage
+                ),
+                sourceFrame: CGRect(x: 0, y: 0, width: 64, height: 64),
+                screens: [ScreenshotEditingScreen(
+                    displayID: 1,
+                    frame: CGRect(x: 0, y: 0, width: 64, height: 64)
+                )],
+                initialCropRect: bounds,
+                supportsRangeExpansion: true
+            )
+        )
+    }
+
+    private func accessibilityStrings(in view: NSView) -> [String] {
+        var visited = Set<ObjectIdentifier>()
+        func collect(_ object: Any, depth: Int) -> [String] {
+            guard depth < 32, let node = object as? any NSAccessibilityProtocol,
+                  visited.insert(ObjectIdentifier(node as AnyObject)).inserted else { return [] }
+            let label = node.accessibilityLabel().map { [$0] } ?? []
+            let value = (node.accessibilityValue() as? String).map { [$0] } ?? []
+            // SwiftUI exposes virtual AX children; they are not NSView.subviews.
+            let children = (node.accessibilityChildren() ?? [])
+                + ((object as? NSView)?.subviews ?? [])
+            return label + value + children.flatMap { collect($0, depth: depth + 1) }
+        }
+        return collect(view, depth: 0)
     }
 }

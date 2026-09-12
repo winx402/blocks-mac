@@ -235,7 +235,11 @@ enum BlocksFloatingPanelWindowRole {
             panel.isMovable = false
             panel.isMovableByWindowBackground = false
             panel.acceptsMouseMovedEvents = true
-            panel.level = .floating
+            // Clipboard is the sole user of this role. It must remain visible
+            // above a visible Dock while its frame stays anchored to the
+            // physical display bottom; status-bar level provides that without
+            // using the screen-saver level reserved for capture overlays.
+            panel.level = .statusBar
             panel.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
             // This role owns its presentation lifecycle through
             // `BlocksAppKitMotion`; letting AppKit add a utility-window

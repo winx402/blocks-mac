@@ -238,6 +238,9 @@ struct TranslationFloatingPanelView: View {
             minWidth: TranslationPanelMetrics.minimumWidth,
             minHeight: TranslationPanelMetrics.minimumHeight
         )
+        // The content header already supplies its own drag lane. Consume the
+        // transparent titlebar inset, while retaining native window corners.
+        .ignoresSafeArea(.container, edges: .top)
         .background(BlocksWindowGlassConfigurator())
         // This is a titled, resizable AppKit window: its system frame owns
         // the outer corners. Do not overlap it with a second glass rim whose

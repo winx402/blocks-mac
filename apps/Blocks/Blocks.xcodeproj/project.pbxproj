@@ -36,6 +36,7 @@
 		B9090000000000000000001 /* CompactSourceHeaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9090000000000000000001; };
 		B9090000000000000000002 /* MainWindowPresentationCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9090000000000000000002; };
 		B9090000000000000000003 /* ScreenshotEditorIssueLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9090000000000000000003; };
+		B9120000000000000000001 /* TranslationCommunityWebNetworkFeedbackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9120000000000000000001; };
 		B9090000000000000000004 /* SurfaceBoundaryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9090000000000000000004; };
 		B9090000000000000000005 /* ClipboardToolbarDensityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9090000000000000000005; };
 		B9090000000000000000006 /* MainWindowPresentationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9090000000000000000006; };
@@ -559,6 +560,7 @@
 		F9090000000000000000001 /* CompactSourceHeaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompactSourceHeaderTests.swift; sourceTree = "<group>"; };
 		F9090000000000000000002 /* MainWindowPresentationCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindowPresentationCoordinatorTests.swift; sourceTree = "<group>"; };
 		F9090000000000000000003 /* ScreenshotEditorIssueLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotEditorIssueLayoutTests.swift; sourceTree = "<group>"; };
+		F9120000000000000000001 /* TranslationCommunityWebNetworkFeedbackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranslationCommunityWebNetworkFeedbackTests.swift; sourceTree = "<group>"; };
 		F9090000000000000000004 /* SurfaceBoundaryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SurfaceBoundaryTests.swift; sourceTree = "<group>"; };
 		F9090000000000000000005 /* ClipboardToolbarDensityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardToolbarDensityTests.swift; sourceTree = "<group>"; };
 		F9090000000000000000006 /* MainWindowPresentationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/MainWindowPresentationCoordinator.swift; sourceTree = "<group>"; };
@@ -1076,6 +1078,7 @@
 				F9090000000000000000001 /* CompactSourceHeaderTests.swift */,
 				F9090000000000000000002 /* MainWindowPresentationCoordinatorTests.swift */,
 				F9090000000000000000003 /* ScreenshotEditorIssueLayoutTests.swift */,
+				F9120000000000000000001 /* TranslationCommunityWebNetworkFeedbackTests.swift */,
 				F9090000000000000000004 /* SurfaceBoundaryTests.swift */,
 				F9090000000000000000005 /* ClipboardToolbarDensityTests.swift */,
 				F908U0000000000000000003 /* ActionBrokerUpdateSafetyTests.swift */,
@@ -2197,6 +2200,7 @@
 				B9090000000000000000001 /* CompactSourceHeaderTests.swift in Sources */,
 				B9090000000000000000002 /* MainWindowPresentationCoordinatorTests.swift in Sources */,
 				B9090000000000000000003 /* ScreenshotEditorIssueLayoutTests.swift in Sources */,
+				B9120000000000000000001 /* TranslationCommunityWebNetworkFeedbackTests.swift in Sources */,
 				B9090000000000000000004 /* SurfaceBoundaryTests.swift in Sources */,
 				B9090000000000000000005 /* ClipboardToolbarDensityTests.swift in Sources */,
 				B908U0000000000000000003 /* ActionBrokerUpdateSafetyTests.swift in Sources */,

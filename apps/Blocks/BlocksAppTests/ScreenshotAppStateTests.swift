@@ -178,7 +178,7 @@ final class ScreenshotAppStateTests: XCTestCase {
         XCTAssertEqual(clipboard.backgroundColor, .clear)
         XCTAssertFalse(clipboard.isMovable)
         XCTAssertFalse(clipboard.isMovableByWindowBackground)
-        XCTAssertEqual(clipboard.level, .floating)
+        XCTAssertEqual(clipboard.level, .statusBar)
         XCTAssertEqual(clipboard.animationBehavior, .none)
         XCTAssertTrue(clipboard.collectionBehavior.contains(.moveToActiveSpace))
         XCTAssertTrue(clipboard.collectionBehavior.contains(.fullScreenAuxiliary))
@@ -13125,7 +13125,8 @@ final class ScreenshotAppStateTests: XCTestCase {
 
         XCTAssertTrue(type(of: panel) == ScreenshotEditorHostPanel.self)
         XCTAssertTrue(panel.canBecomeKey)
-        XCTAssertTrue(panel.canBecomeMain)
+        XCTAssertFalse(panel.canBecomeMain)
+        XCTAssertTrue(panel.styleMask.contains(.nonactivatingPanel))
         XCTAssertEqual(panel.frame, CGRect(x: 20, y: 30, width: 640, height: 480))
         XCTAssertFalse(panel.styleMask.contains(.resizable))
         XCTAssertTrue(panel.acceptsMouseMovedEvents)
@@ -18872,6 +18873,194 @@ final class ScreenshotAppStateTests: XCTestCase {
         )
     }
 
+    func testCaptureAllowsOnlyTheOrdinaryForegroundOwnWindow() {
+        let main = ScreenCaptureKitAdapter.OwnCaptureWindowSnapshot(windowID: 10)
+        let key = ScreenCaptureKitAdapter.OwnCaptureWindowSnapshot(windowID: 12)
+        XCTAssertEqual(
+            ScreenCaptureKitAdapter.allowedOwnCaptureWindowID(
+                frontmostProcessID: 123,
+                ownProcessID: 123,
+                mainWindow: main,
+                keyWindow: key
+            ),
+            10
+        )
+        XCTAssertEqual(
+            ScreenCaptureKitAdapter.allowedOwnCaptureWindowID(
+                frontmostProcessID: 123,
+                ownProcessID: 123,
+                mainWindow: nil,
+                keyWindow: key
+            ),
+            12
+        )
+        for frontmostProcessID in [nil, 456] as [pid_t?] {
+            XCTAssertNil(ScreenCaptureKitAdapter.allowedOwnCaptureWindowID(
+                frontmostProcessID: frontmostProcessID,
+                ownProcessID: 123,
+                mainWindow: main,
+                keyWindow: key
+            ))
+        }
+        XCTAssertEqual(
+            ScreenCaptureKitAdapter.captureExcludedWindowIDs(
+                availableWindowIDs: [10, 11, 12, 20],
+                selectionSurfaceWindowIDs: [11],
+                ownWindowIDs: [10, 11, 12],
+                allowedOwnWindowID: 10
+            ),
+            [11, 12]
+        )
+    }
+
+    func testCaptureRejectsHiddenMinimizedPanelChildAndNonstandardOwnWindows() {
+        let rejected: [ScreenCaptureKitAdapter.OwnCaptureWindowSnapshot] = [
+            .init(windowID: 0),
+            .init(windowID: 10, isVisible: false),
+            .init(windowID: 10, isMiniaturized: true),
+            .init(windowID: 10, isNormalLevel: false),
+            .init(windowID: 10, isTitled: false),
+            .init(windowID: 10, isPanel: true),
+            .init(windowID: 10, hasParent: true),
+        ]
+        for window in rejected {
+            XCTAssertNil(ScreenCaptureKitAdapter.allowedOwnCaptureWindowID(
+                frontmostProcessID: 123,
+                ownProcessID: 123,
+                mainWindow: window,
+                keyWindow: window
+            ))
+        }
+    }
+
+    func testCaptureSelectionSurfaceExclusionOverridesAllowedOwnWindow() {
+        XCTAssertEqual(
+            ScreenCaptureKitAdapter.captureExcludedWindowIDs(
+                availableWindowIDs: [10, 11, 12],
+                selectionSurfaceWindowIDs: [10, 11, 99],
+                ownWindowIDs: [10, 12],
+                allowedOwnWindowID: 10
+            ),
+            [10, 11, 12]
+        )
+    }
+
+    func testCaptureAllowedOwnWindowIsSelectableAndOccludesExternalHitRegions() {
+        func candidate(
+            id: UInt32,
+            frame: CGRect,
+            isOwn: Bool,
+            allowedOwnWindowID: UInt32?
+        ) -> ScreenshotWindowVisibility.Candidate {
+            let role = ScreenshotWindowSurfaceClassifier.role(for: .init(
+                layer: 0,
+                frame: frame,
+                alpha: 1,
+                hasOwningApplication: true,
+                ownerKind: .regular,
+                isAppleOwned: false,
+                isBlocksSelectionSurface: ScreenCaptureKitAdapter.isBlocksSelectionSurface(
+                    windowID: id,
+                    isBlocksOwnedSurface: isOwn,
+                    selectionSurfaceWindowIDs: [11],
+                    allowedOwnWindowID: allowedOwnWindowID
+                )
+            ))
+            return .init(
+                id: id,
+                frame: frame,
+                title: "Window \(id)",
+                isSelectable: role.isSelectable,
+                isOccluding: role.isOccluding
+            )
+        }
+
+        let ownFrame = CGRect(x: 0, y: 0, width: 100, height: 100)
+        let externalFrame = CGRect(x: 50, y: 0, width: 100, height: 100)
+        for allowedOwnWindowID in [UInt32(10), nil] {
+            let candidates = ScreenshotWindowVisibility.selectionCandidates(frontToBack: [
+                candidate(id: 11, frame: ownFrame, isOwn: true, allowedOwnWindowID: allowedOwnWindowID),
+                candidate(id: 12, frame: ownFrame, isOwn: true, allowedOwnWindowID: allowedOwnWindowID),
+                candidate(id: 10, frame: ownFrame, isOwn: true, allowedOwnWindowID: allowedOwnWindowID),
+                candidate(id: 20, frame: ownFrame, isOwn: false, allowedOwnWindowID: allowedOwnWindowID),
+                candidate(id: 21, frame: externalFrame, isOwn: false, allowedOwnWindowID: allowedOwnWindowID),
+            ])
+            if allowedOwnWindowID != nil {
+                XCTAssertEqual(candidates.map(\.id), [10, 21])
+                XCTAssertEqual(candidates.first?.visibleHitRegions, [ownFrame])
+                // The covered external window is absent and the partially
+                // covered window can only be hit outside the visible own window.
+                XCTAssertEqual(candidates.last?.visibleHitRegions, [CGRect(x: 100, y: 0, width: 50, height: 100)])
+            } else {
+                // External-app capture keeps the old contract: all own chrome
+                // is nonselectable and nonoccluding, regardless of later focus.
+                XCTAssertEqual(candidates.map(\.id), [20, 21])
+                XCTAssertEqual(candidates.first?.visibleHitRegions, [ownFrame])
+            }
+        }
+    }
+
+    func testCaptureSurfaceRoleKeepsSelectionPriorityOverAllowedOwnWindow() {
+        XCTAssertFalse(ScreenCaptureKitAdapter.isBlocksSelectionSurface(
+            windowID: 10,
+            isBlocksOwnedSurface: true,
+            selectionSurfaceWindowIDs: [11],
+            allowedOwnWindowID: 10
+        ))
+        XCTAssertTrue(ScreenCaptureKitAdapter.isBlocksSelectionSurface(
+            windowID: 10,
+            isBlocksOwnedSurface: true,
+            selectionSurfaceWindowIDs: [10, 11],
+            allowedOwnWindowID: 10
+        ))
+        XCTAssertTrue(ScreenCaptureKitAdapter.isBlocksSelectionSurface(
+            windowID: 12,
+            isBlocksOwnedSurface: true,
+            selectionSurfaceWindowIDs: [11],
+            allowedOwnWindowID: 10
+        ))
+    }
+
+    func testCaptureOwnWindowIdentityStaysFrozenAcrossLiveSurfaceRefresh() async {
+        var mainWindow = ScreenCaptureKitAdapter.OwnCaptureWindowSnapshot(windowID: 10)
+        let allowedOwnWindowID = ScreenCaptureKitAdapter.allowedOwnCaptureWindowID(
+            frontmostProcessID: 123,
+            ownProcessID: 123,
+            mainWindow: mainWindow,
+            keyWindow: nil
+        )
+        let handoff = await ScreenCaptureKitAdapter.captureSurfaceHandoff(
+            selectionSurfaceWindowIDs: [11],
+            load: {
+                await Task.yield()
+                mainWindow = .init(windowID: 12)
+                return ("live", [(10, "original"), (11, "new-overlay"), (12, "new-main")])
+            }
+        )
+        XCTAssertEqual(mainWindow.windowID, 12)
+        XCTAssertEqual(allowedOwnWindowID, 10)
+        XCTAssertEqual(handoff.excludedWindows, ["new-overlay"])
+        XCTAssertEqual(
+            ScreenCaptureKitAdapter.captureExcludedWindowIDs(
+                availableWindowIDs: [10, 11, 12],
+                selectionSurfaceWindowIDs: [11],
+                ownWindowIDs: [10, 11, 12],
+                allowedOwnWindowID: allowedOwnWindowID
+            ),
+            [11, 12]
+        )
+        // Disappearing original windows must not promote the new main window.
+        XCTAssertEqual(
+            ScreenCaptureKitAdapter.captureExcludedWindowIDs(
+                availableWindowIDs: [11, 12],
+                selectionSurfaceWindowIDs: [11],
+                ownWindowIDs: [11, 12],
+                allowedOwnWindowID: allowedOwnWindowID
+            ),
+            [11, 12]
+        )
+    }
+
     func testCaptureSurfaceHandoffResolvesLiveWindowsWithoutDismissingOverlay() async throws {
         var events: [String] = []
 
@@ -20258,7 +20447,8 @@ final class ScreenshotAppStateTests: XCTestCase {
         XCTAssertFalse(window.styleMask.contains(.titled))
         XCTAssertFalse(window.styleMask.contains(.resizable))
         XCTAssertTrue(window.canBecomeKey)
-        XCTAssertTrue(window.canBecomeMain)
+        XCTAssertFalse(window.canBecomeMain)
+        XCTAssertTrue(window.styleMask.contains(.nonactivatingPanel))
     }
 
     func testEditorHostPanelCanCoverTheSourceScreen() {

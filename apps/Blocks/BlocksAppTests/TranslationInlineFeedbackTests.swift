@@ -100,6 +100,19 @@ final class TranslationInlineFeedbackTests: XCTestCase {
         let host = try XCTUnwrap(panel.contentView)
         let container = try XCTUnwrap(host.superview)
 
+        XCTAssertTrue(
+            panel.styleMask.contains(.titled),
+            "native titled chrome must retain the system outer corners"
+        )
+        XCTAssertTrue(panel.styleMask.contains(.nonactivatingPanel))
+        XCTAssertTrue(panel.styleMask.contains(.resizable))
+        XCTAssertEqual(
+            TranslationPanelMetrics.headerTotalHeight,
+            50,
+            accuracy: 0.5,
+            "consuming the native inset must preserve the 50pt content drag lane"
+        )
+
         for width: CGFloat in [420, 640, 980] {
             panel.setContentSize(NSSize(width: width, height: 520))
             host.layoutSubtreeIfNeeded()
@@ -114,6 +127,8 @@ final class TranslationInlineFeedbackTests: XCTestCase {
             }
             let titleDrag = try XCTUnwrap(headerAreas.max { $0.bounds.width < $1.bounds.width })
             let rect = titleDrag.convert(titleDrag.bounds, to: nil)
+            XCTAssertEqual(rect.maxY, host.convert(host.bounds, to: nil).maxY, accuracy: 0.5,
+                           "the content header must start at the window top, not below a transparent titlebar")
             XCTAssertGreaterThan(rect.width, 40, "title whitespace must not collapse")
             XCTAssertEqual(
                 rect.height, TranslationPanelMetrics.headerTotalHeight, accuracy: 0.5,

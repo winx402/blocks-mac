@@ -4,6 +4,19 @@ import XCTest
 
 @MainActor
 final class SettingsSidebarRegressionTests: XCTestCase {
+    func testSecondaryPageInsetDoesNotChangeOverviewRoutes() {
+        let routes = SettingsRouteStateStore()
+        for mode: SettingsViewMode in [.translation, .clipboard, .screenshot, .providers] {
+            XCTAssertFalse(routes.isSecondaryPage(for: mode))
+            let root = mode == .providers ? "overview" : "root"
+            let binding = routes.secondaryRouteBinding(for: mode, default: root)
+            binding.wrappedValue = "details"
+            XCTAssertTrue(routes.isSecondaryPage(for: mode))
+            binding.wrappedValue = root
+            XCTAssertFalse(routes.isSecondaryPage(for: mode))
+        }
+    }
+
     func testLocalizedSourceListKeepsViewportWidthAndVerticalSelectionAcrossResizeAndReload() async throws {
         let sourceList = SettingsSourceListNativeView(
             frame: NSRect(x: 0, y: 0, width: 208, height: 150),

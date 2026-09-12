@@ -51,15 +51,22 @@ struct ScreenshotEditorStatusBar: View {
     let onSelectElement: (UUID) -> Void
     let onDeleteElement: (UUID, UUID?) -> Void
     var pluginContent: AnyView? = nil
+    var pixelDimensions: String? = nil
 
     @FocusState private var focusedChip: ScreenshotEditorStatusChipID?
 
     var body: some View {
-        ScreenshotChromeContentLayout(maximumWidth: width, height: ScreenshotEditorChromeMetrics.statusBarHeight) {
-            ViewThatFits(in: .horizontal) {
-                chips.fixedSize(horizontal: true, vertical: false)
-                ScreenshotChromeOverflowRow(revealID: selectedElementID.map { AnyHashable(ScreenshotEditorStatusChipID.element($0)) }) {
+        ScreenshotChromeContentLayout(maximumWidth: width, height: ScreenshotEditorChromeMetrics.statusBarHeight, fillsProposedWidth: true) {
+            ScrollViewReader { proxy in
+                ScrollView(.horizontal) {
                     chips
+                }
+                .scrollIndicators(.hidden)
+                .onChange(of: focusedChip) { _, value in
+                    if let value { proxy.scrollTo(value) }
+                }
+                .onChange(of: selectedElementID) { _, value in
+                    if let value { proxy.scrollTo(ScreenshotEditorStatusChipID.element(value)) }
                 }
             }
         }
@@ -74,6 +81,15 @@ struct ScreenshotEditorStatusBar: View {
 
     private var chips: some View {
         HStack(spacing: ScreenshotEditorChromeMetrics.statusChipSpacing) {
+            if let pixelDimensions {
+                Text(pixelDimensions)
+                    .monospacedDigit()
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel(L10n.string("screenshot.editor.status.size"))
+                    .accessibilityValue(pixelDimensions)
+                Divider().frame(height: BlocksVisualTokens.Control.compactHeight)
+            }
             statusButton(id: .size, systemImage: "arrow.up.left.and.arrow.down.right",
                          title: L10n.string("screenshot.editor.status.size"), isSelected: isSizePanelPresented,
                          action: { isSizePanelPresented = true })
@@ -82,6 +98,9 @@ struct ScreenshotEditorStatusBar: View {
                          title: L10n.string("screenshot.editor.cornerRadius"), isSelected: isRoundedOutput,
                          accessibilityValue: L10n.string(isRoundedOutput ? "screenshot.editor.status.enabled" : "screenshot.editor.status.disabled"),
                          action: onToggleRounded)
+            if !elements.isEmpty {
+                Divider().frame(height: BlocksVisualTokens.Control.compactHeight)
+            }
             ForEach(elements) { element in
                 statusButton(id: .element(element.id), systemImage: element.kind.tool.toolbarItemID.systemImage,
                              title: ScreenshotEditorStatusBarModel.title(for: element),
@@ -350,7 +369,8 @@ struct ScreenshotUnifiedEditorView: View {
                     pluginContent: AnyView(screenshotPluginSlot(
                         .screenshotStatusItem,
                         context: screenshotPluginContext
-                    ))
+                    )),
+                    pixelDimensions: "\(store.cropRect.width) × \(store.cropRect.height)"
                 )
                 bottomToolbarContainer(
                     layout: layout,
@@ -1323,9 +1343,9 @@ private struct ScreenshotPluginInspectorViewportLayout: Layout {
     }
 }
 
-private struct ScreenshotExpandedPropertiesRow: View {
+struct ScreenshotExpandedPropertiesRow: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    let store: ScreenshotEditorStore
+    @ObservedObject var store: ScreenshotEditorStore
     @ObservedObject var aspectControlModel: ScreenshotAspectControlModel
     let maximumWidth: CGFloat
     let maximumPluginInspectorHeight: CGFloat

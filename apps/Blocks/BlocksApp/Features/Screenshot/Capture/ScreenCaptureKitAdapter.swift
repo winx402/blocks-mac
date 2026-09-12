@@ -336,6 +336,15 @@ final class ScreenCaptureKitAdapter: ScreenshotScrollingSessionControlling, Scre
         requiresEditingContext: Bool,
         purpose: ScreenshotCapturePurpose
     ) async throws -> ScreenshotCapture {
+        // Freeze the user's ordinary foreground window before any suspension or
+        // selection UI can change the app's main/key window identity.
+        let originatingApplication = NSWorkspace.shared.frontmostApplication
+        let allowedOwnWindowID = Self.allowedOwnCaptureWindowID(
+            frontmostProcessID: originatingApplication?.processIdentifier,
+            ownProcessID: ProcessInfo.processInfo.processIdentifier,
+            mainWindow: NSApp.mainWindow.map(Self.ownCaptureWindowSnapshot),
+            keyWindow: NSApp.keyWindow.map(Self.ownCaptureWindowSnapshot)
+        )
         // A replacement must make any previous ScreenCaptureKit one-shot
         // completion stale before it can compose a capture result.
         invalidateActiveSingleFrameRequests()
@@ -350,7 +359,6 @@ final class ScreenCaptureKitAdapter: ScreenshotScrollingSessionControlling, Scre
             purpose.selectionDefaultsOverride
                 ?? preferencesStore.preferences.captureDefaults
         )
-        let originatingApplication = NSWorkspace.shared.frontmostApplication
         let startsInScrollingMode = purpose.allowsScrollingCapture
             && startsNextSessionInScrollingMode
         startsNextSessionInScrollingMode = false
@@ -358,6 +366,10 @@ final class ScreenCaptureKitAdapter: ScreenshotScrollingSessionControlling, Scre
         let displayContext = try makeDisplayGeometryContext(for: content.displays)
         let displayDescriptors = displayContext.descriptors
         let initialOwnApplication = captureExcludedApplication(in: content)
+        let initialExclusion = resolvedCaptureExclusion(
+            in: content,
+            allowedOwnWindowID: allowedOwnWindowID
+        )
 
         switch intent.kind {
         case .display:
@@ -372,6 +384,7 @@ final class ScreenCaptureKitAdapter: ScreenshotScrollingSessionControlling, Scre
                     ),
                     content: content,
                     descriptors: displayDescriptors,
+                    exclusion: initialExclusion,
                     displayScope: .all,
                     editingContextRequirement: editingContextRequirement
                 )
@@ -380,6 +393,7 @@ final class ScreenCaptureKitAdapter: ScreenshotScrollingSessionControlling, Scre
                     planner.planDisplays(scope: .displayID(id), currentDisplayID: id, displays: displayDescriptors),
                     content: content,
                     descriptors: displayDescriptors,
+                    exclusion: initialExclusion,
                     displayScope: .displayID(id),
                     editingContextRequirement: editingContextRequirement
                 )
@@ -393,6 +407,7 @@ final class ScreenCaptureKitAdapter: ScreenshotScrollingSessionControlling, Scre
                     ),
                     content: content,
                     descriptors: displayDescriptors,
+                    exclusion: initialExclusion,
                     displayScope: .displayID(displayID),
                     editingContextRequirement: editingContextRequirement
                 )
@@ -404,6 +419,7 @@ final class ScreenCaptureKitAdapter: ScreenshotScrollingSessionControlling, Scre
         let initialWindowMetadata = frontToBackWindowMetadata()
         let candidateWindows = windowCandidates(
             from: content.windows,
+            allowedOwnWindowID: allowedOwnWindowID,
             windowMetadata: initialWindowMetadata
         )
         let windowsByID = Dictionary(uniqueKeysWithValues: candidateWindows.map { ($0.windowID, $0) })
@@ -412,6 +428,7 @@ final class ScreenCaptureKitAdapter: ScreenshotScrollingSessionControlling, Scre
             from: content.windows,
             bridge: displayContext.bridge,
             selectableWindowIDs: candidateWindowIDs,
+            allowedOwnWindowID: allowedOwnWindowID,
             windowMetadata: initialWindowMetadata
         )
         let selectionCandidatesByID = Dictionary(uniqueKeysWithValues: initialSelectionCandidates.map { ($0.id, $0) })
@@ -432,20 +449,23 @@ final class ScreenCaptureKitAdapter: ScreenshotScrollingSessionControlling, Scre
                         showsCursor: showsCursor,
                         allowedWindowIDs: candidateWindowIDs,
                         expectedDisplays: displayDescriptors,
-                        exclusion: initialOwnApplication.map(
-                            ScreenshotCaptureExclusion.application
-                        )
+                        allowedOwnWindowID: allowedOwnWindowID,
+                        exclusion: initialExclusion
                     )
                 }
                 return try await self.captureFrozenSelectionSnapshot(
                     showsCursor: showsCursor,
                     allowedWindowIDs: candidateWindowIDs,
-                    expectedDisplays: displayDescriptors
+                    expectedDisplays: displayDescriptors,
+                    allowedOwnWindowID: allowedOwnWindowID
                 )
             },
             magnifierSnapshotProvider: { [weak self] in
                 guard let self else { throw ScreenshotCaptureError.captureFailed("Capture service unavailable.") }
-                return try await self.captureFreshDisplaySnapshots(showsCursor: false)
+                return try await self.captureFreshDisplaySnapshots(
+                    showsCursor: false,
+                    allowedOwnWindowID: allowedOwnWindowID
+                )
             },
             onParametersChanged: { [weak preferencesStore] parameters in
                 guard purpose.persistsSelectionParameters else { return }
@@ -513,10 +533,8 @@ final class ScreenCaptureKitAdapter: ScreenshotScrollingSessionControlling, Scre
             // appeared. Reusing the original content avoids a second
             // ScreenCaptureKit query between mouse-up and editor creation.
             captureContent = content
-            captureExclusion = initialOwnApplication.map(
-                ScreenshotCaptureExclusion.application
-            ) ?? .windows(captureExcludedWindows(in: content))
-        } else if let initialOwnApplication {
+            captureExclusion = initialExclusion
+        } else if allowedOwnWindowID == nil, let initialOwnApplication {
             // An application exclusion keeps the already-created selection surfaces
             // out of the capture without another shareable-content directory query.
             captureContent = content
@@ -535,14 +553,18 @@ final class ScreenCaptureKitAdapter: ScreenshotScrollingSessionControlling, Scre
             )
             captureContent = surfaceSnapshot.content
             captureExclusion = .windows(
-                captureExcludedWindows(in: surfaceSnapshot.content)
+                captureExcludedWindows(
+                    in: surfaceSnapshot.content,
+                    allowedOwnWindowID: allowedOwnWindowID
+                )
             )
         }
         let captureDisplayContext = try makeDisplayGeometryContext(for: captureContent.displays)
         let captureDisplayDescriptors = captureDisplayContext.descriptors
         // The handoff snapshot contains both the temporary selection surfaces and any
         // persistent Blocks windows that may become visible again once the overlay closes.
-        // Exclude the complete set from the captured pixels and the editor source image.
+        // Exclude them from the pixels and editor source, except the ordinary
+        // foreground window whose identity was frozen at capture entry.
         let selectedFrozenSnapshots: [UInt32: CGImage]
         if let selectedFrozenSnapshot {
             let compatible = Self.compatibleFrozenImages(
@@ -625,6 +647,7 @@ final class ScreenCaptureKitAdapter: ScreenshotScrollingSessionControlling, Scre
                 let metadata = frontToBackWindowMetadata()
                 let liveWindows = windowCandidates(
                     from: delayedContent.windows,
+                    allowedOwnWindowID: allowedOwnWindowID,
                     windowMetadata: metadata
                 )
                 let liveWindowIDs = Set(liveWindows.map(\.windowID))
@@ -632,6 +655,7 @@ final class ScreenCaptureKitAdapter: ScreenshotScrollingSessionControlling, Scre
                     from: delayedContent.windows,
                     bridge: delayedContext.bridge,
                     selectableWindowIDs: liveWindowIDs,
+                    allowedOwnWindowID: allowedOwnWindowID,
                     windowMetadata: metadata
                 ).first(where: { $0.id == windowID }) else {
                     throw ScreenshotCaptureError.noCandidateWindow
@@ -639,7 +663,10 @@ final class ScreenCaptureKitAdapter: ScreenshotScrollingSessionControlling, Scre
                 windowContent = delayedContent
                 windowContext = delayedContext
                 windowCandidate = liveCandidate
-                windowExclusion = resolvedCaptureExclusion(in: delayedContent)
+                windowExclusion = resolvedCaptureExclusion(
+                    in: delayedContent,
+                    allowedOwnWindowID: allowedOwnWindowID
+                )
             } else {
                 guard let candidate = selectionCandidatesByID[windowID] else {
                     throw ScreenshotCaptureError.noCandidateWindow
@@ -1140,13 +1167,20 @@ final class ScreenCaptureKitAdapter: ScreenshotScrollingSessionControlling, Scre
         return snapshots
     }
 
-    private func captureFreshDisplaySnapshots(showsCursor: Bool) async throws -> [UInt32: CGImage] {
+    private func captureFreshDisplaySnapshots(
+        showsCursor: Bool,
+        allowedOwnWindowID: UInt32?
+    ) async throws -> [UInt32: CGImage] {
         let content = try await loadShareableContent()
         let descriptors = try makeDisplayGeometryContext(for: content.displays).descriptors
         return try await captureDisplaySnapshots(
             content: content,
             descriptors: descriptors,
-            showsCursor: showsCursor
+            showsCursor: showsCursor,
+            exclusion: resolvedCaptureExclusion(
+                in: content,
+                allowedOwnWindowID: allowedOwnWindowID
+            )
         )
     }
 
@@ -1166,12 +1200,59 @@ final class ScreenCaptureKitAdapter: ScreenshotScrollingSessionControlling, Scre
     static func captureExcludedWindowIDs(
         availableWindowIDs: Set<UInt32>,
         selectionSurfaceWindowIDs: Set<UInt32>,
-        ownWindowIDs: Set<UInt32> = []
+        ownWindowIDs: Set<UInt32> = [],
+        allowedOwnWindowID: UInt32? = nil
     ) -> Set<UInt32> {
-        availableWindowIDs.intersection(selectionSurfaceWindowIDs.union(ownWindowIDs))
+        var excludedOwnWindowIDs = ownWindowIDs
+        if let allowedOwnWindowID {
+            excludedOwnWindowIDs.remove(allowedOwnWindowID)
+        }
+        // Selection UI always wins, even if a stale/misclassified ID is allowed.
+        return availableWindowIDs.intersection(
+            selectionSurfaceWindowIDs.union(excludedOwnWindowIDs)
+        )
     }
 
-    private func captureExcludedWindows(in content: SCShareableContent) -> [SCWindow] {
+    struct OwnCaptureWindowSnapshot {
+        var windowID: UInt32
+        var isVisible = true
+        var isMiniaturized = false
+        var isNormalLevel = true
+        var isTitled = true
+        var isPanel = false
+        var hasParent = false
+    }
+
+    private static func ownCaptureWindowSnapshot(_ window: NSWindow) -> OwnCaptureWindowSnapshot {
+        OwnCaptureWindowSnapshot(
+            windowID: UInt32(max(0, window.windowNumber)),
+            isVisible: window.isVisible,
+            isMiniaturized: window.isMiniaturized,
+            isNormalLevel: window.level == .normal,
+            isTitled: window.styleMask.contains(.titled),
+            isPanel: window is NSPanel,
+            hasParent: window.parent != nil
+        )
+    }
+
+    static func allowedOwnCaptureWindowID(
+        frontmostProcessID: pid_t?,
+        ownProcessID: pid_t,
+        mainWindow: OwnCaptureWindowSnapshot?,
+        keyWindow: OwnCaptureWindowSnapshot?
+    ) -> UInt32? {
+        guard frontmostProcessID == ownProcessID else { return nil }
+        return [mainWindow, keyWindow].compactMap { $0 }.first { window in
+            window.windowID > 0 && window.isVisible && !window.isMiniaturized
+                && window.isNormalLevel && window.isTitled && !window.isPanel
+                && !window.hasParent
+        }?.windowID
+    }
+
+    private func captureExcludedWindows(
+        in content: SCShareableContent,
+        allowedOwnWindowID: UInt32? = nil
+    ) -> [SCWindow] {
         let ownBundleID = Bundle.main.bundleIdentifier
         let ownProcessID = ProcessInfo.processInfo.processIdentifier
         let ownWindowIDs = Set(content.windows.compactMap { window -> UInt32? in
@@ -1182,7 +1263,8 @@ final class ScreenCaptureKitAdapter: ScreenshotScrollingSessionControlling, Scre
         let excludedIDs = Self.captureExcludedWindowIDs(
             availableWindowIDs: Set(content.windows.map(\.windowID)),
             selectionSurfaceWindowIDs: selectionController.selectionSurfaceWindowIDs,
-            ownWindowIDs: ownWindowIDs
+            ownWindowIDs: ownWindowIDs,
+            allowedOwnWindowID: allowedOwnWindowID
         )
         return content.windows.filter { excludedIDs.contains($0.windowID) }
     }
@@ -1199,12 +1281,17 @@ final class ScreenCaptureKitAdapter: ScreenshotScrollingSessionControlling, Scre
     }
 
     private func resolvedCaptureExclusion(
-        in content: SCShareableContent
+        in content: SCShareableContent,
+        allowedOwnWindowID: UInt32? = nil
     ) -> ScreenshotCaptureExclusion {
-        if let application = captureExcludedApplication(in: content) {
+        if allowedOwnWindowID == nil,
+           let application = captureExcludedApplication(in: content) {
             return .application(application)
         }
-        return .windows(captureExcludedWindows(in: content))
+        return .windows(captureExcludedWindows(
+            in: content,
+            allowedOwnWindowID: allowedOwnWindowID
+        ))
     }
 
     private func captureFilter(
@@ -1226,7 +1313,8 @@ final class ScreenCaptureKitAdapter: ScreenshotScrollingSessionControlling, Scre
     private func captureFrozenSelectionSnapshot(
         showsCursor: Bool,
         allowedWindowIDs: Set<UInt32>,
-        expectedDisplays: [ScreenshotDisplayDescriptor]
+        expectedDisplays: [ScreenshotDisplayDescriptor],
+        allowedOwnWindowID: UInt32?
     ) async throws -> ScreenshotFrozenSelectionSnapshot {
         let content = try await loadShareableContent()
         return try await captureFrozenSelectionSnapshot(
@@ -1234,7 +1322,11 @@ final class ScreenCaptureKitAdapter: ScreenshotScrollingSessionControlling, Scre
             showsCursor: showsCursor,
             allowedWindowIDs: allowedWindowIDs,
             expectedDisplays: expectedDisplays,
-            exclusion: resolvedCaptureExclusion(in: content)
+            allowedOwnWindowID: allowedOwnWindowID,
+            exclusion: resolvedCaptureExclusion(
+                in: content,
+                allowedOwnWindowID: allowedOwnWindowID
+            )
         )
     }
 
@@ -1243,6 +1335,7 @@ final class ScreenCaptureKitAdapter: ScreenshotScrollingSessionControlling, Scre
         showsCursor: Bool,
         allowedWindowIDs: Set<UInt32>,
         expectedDisplays: [ScreenshotDisplayDescriptor],
+        allowedOwnWindowID: UInt32?,
         exclusion: ScreenshotCaptureExclusion?
     ) async throws -> ScreenshotFrozenSelectionSnapshot {
         let displayContext = try makeDisplayGeometryContext(for: content.displays)
@@ -1260,7 +1353,8 @@ final class ScreenCaptureKitAdapter: ScreenshotScrollingSessionControlling, Scre
             from: content.windows,
             bridge: displayContext.bridge,
             selectableWindowIDs: allowedWindowIDs,
-            nonOccludingWindowIDs: selectionController.selectionSurfaceWindowIDs
+            nonOccludingWindowIDs: selectionController.selectionSurfaceWindowIDs,
+            allowedOwnWindowID: allowedOwnWindowID
         )
         return ScreenshotFrozenSelectionSnapshot(
             images: images,
@@ -1288,6 +1382,7 @@ final class ScreenCaptureKitAdapter: ScreenshotScrollingSessionControlling, Scre
         bridge: ScreenshotCoordinateBridge,
         selectableWindowIDs: Set<UInt32>,
         nonOccludingWindowIDs: Set<UInt32> = [],
+        allowedOwnWindowID: UInt32? = nil,
         windowMetadata suppliedWindowMetadata: FrontToBackWindowMetadata? = nil
     ) -> [ScreenshotSelectionCandidate] {
         let windowMetadata = suppliedWindowMetadata ?? frontToBackWindowMetadata()
@@ -1300,7 +1395,8 @@ final class ScreenCaptureKitAdapter: ScreenshotScrollingSessionControlling, Scre
                 for: window,
                 selectionFrame: frame,
                 alpha: alpha,
-                selectionSurfaceWindowIDs: nonOccludingWindowIDs
+                selectionSurfaceWindowIDs: nonOccludingWindowIDs,
+                allowedOwnWindowID: allowedOwnWindowID
             )
             let isSelectable = selectableWindowIDs.contains(window.windowID) && role.isSelectable
             return ScreenshotWindowVisibility.Candidate(
@@ -1446,6 +1542,7 @@ final class ScreenCaptureKitAdapter: ScreenshotScrollingSessionControlling, Scre
 
     private func windowCandidates(
         from windows: [SCWindow],
+        allowedOwnWindowID: UInt32? = nil,
         windowMetadata suppliedWindowMetadata: FrontToBackWindowMetadata? = nil
     ) -> [SCWindow] {
         let alphaByWindowNumber = (
@@ -1457,17 +1554,29 @@ final class ScreenCaptureKitAdapter: ScreenshotScrollingSessionControlling, Scre
                 for: window,
                 selectionFrame: window.frame,
                 alpha: alphaByWindowNumber[window.windowID] ?? 1,
-                selectionSurfaceWindowIDs: []
+                selectionSurfaceWindowIDs: [],
+                allowedOwnWindowID: allowedOwnWindowID
             )
             return role.isSelectable
         }
+    }
+
+    static func isBlocksSelectionSurface(
+        windowID: UInt32,
+        isBlocksOwnedSurface: Bool,
+        selectionSurfaceWindowIDs: Set<UInt32>,
+        allowedOwnWindowID: UInt32? = nil
+    ) -> Bool {
+        (isBlocksOwnedSurface && windowID != allowedOwnWindowID)
+            || selectionSurfaceWindowIDs.contains(windowID)
     }
 
     private func windowSurfaceRole(
         for window: SCWindow,
         selectionFrame: CGRect,
         alpha: CGFloat,
-        selectionSurfaceWindowIDs: Set<UInt32>
+        selectionSurfaceWindowIDs: Set<UInt32>,
+        allowedOwnWindowID: UInt32? = nil
     ) -> ScreenshotWindowSurfaceRole {
         let application = window.owningApplication.flatMap {
             NSRunningApplication(processIdentifier: $0.processID)
@@ -1489,11 +1598,15 @@ final class ScreenCaptureKitAdapter: ScreenshotScrollingSessionControlling, Scre
             hasOwningApplication: window.owningApplication != nil,
             ownerKind: ownerKind,
             isAppleOwned: bundleIdentifier?.hasPrefix("com.apple.") == true,
-            // All Blocks chrome is excluded here, not only the temporary selection panels.
-            // The main window can become frontmost during the capture handoff and must not
-            // make an otherwise visible external window fail the final visibility check.
-            isBlocksSelectionSurface: isBlocksOwnedSurface
-                || selectionSurfaceWindowIDs.contains(window.windowID)
+            // Match pixel exclusion: only the ordinary own window frozen at
+            // session entry is selectable and occluding. Other Blocks chrome
+            // stays excluded even if it becomes frontmost during handoff.
+            isBlocksSelectionSurface: Self.isBlocksSelectionSurface(
+                windowID: window.windowID,
+                isBlocksOwnedSurface: isBlocksOwnedSurface,
+                selectionSurfaceWindowIDs: selectionSurfaceWindowIDs,
+                allowedOwnWindowID: allowedOwnWindowID
+            )
         ))
     }
 

@@ -15,7 +15,7 @@ final class ScreenshotEditorHostPanel: NSPanel {
     init(contentRect: NSRect) {
         super.init(
             contentRect: contentRect,
-            styleMask: [.borderless, .closable],
+            styleMask: [.borderless, .closable, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
@@ -30,7 +30,7 @@ final class ScreenshotEditorHostPanel: NSPanel {
     }
 
     override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
+    override var canBecomeMain: Bool { false }
 
     override func sendEvent(_ event: NSEvent) {
         if event.type == .keyDown,
@@ -704,7 +704,7 @@ final class ScreenshotEditorPresenter: NSObject, NSWindowDelegate {
             panel.onEscape = store.handleEscape
             panel.delegate = self
             panel.level = NSWindow.Level(Int(CGWindowLevelForKey(.screenSaverWindow)))
-            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
             panel.hasShadow = false
             panel.alphaValue = 0
             let transitionID = UUID()
@@ -843,7 +843,8 @@ final class ScreenshotEditorPresenter: NSObject, NSWindowDelegate {
         editorTransitionWatchdog?.cancel()
         editorTransitionWatchdog = nil
         panel.orderFrontRegardless()
-        NSApp.activate(ignoringOtherApps: true)
+        // Take keyboard focus within the current Space, not app activation:
+        // activating Blocks can move an external full-screen capture to its desktop.
         panel.makeKey()
         if let firstResponder = panel.initialFirstResponder {
             panel.makeFirstResponder(firstResponder)

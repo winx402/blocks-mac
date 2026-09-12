@@ -646,7 +646,7 @@ struct SettingsSecondaryPageHeader: View {
             .controlSize(.small)
             Spacer(minLength: 0)
         }
-        .frame(minHeight: BlocksVisualTokens.Control.settingsRowMinimumHeight)
+        .frame(minHeight: BlocksVisualTokens.Control.compactHeight)
         .accessibilityLabel("\(backTitle), \(title)")
         .accessibilityElement(children: .contain)
     }
