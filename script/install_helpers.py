@@ -370,7 +370,7 @@ def pinned_signing_identity(target: Path, policy: Policy, work: Path, label: str
     if authority.search(output) is None:
         fail(f"{label} is not signed by a Developer ID Application certificate for the trusted Team")
     certificate_base = work / "signing-certificate"
-    checked(["codesign", "-d", "--extract-certificates", str(certificate_base), str(target)], f"{label} signing certificate extraction", capture=True)
+    checked(["codesign", "-d", f"--extract-certificates={certificate_base}", str(target)], f"{label} signing certificate extraction", capture=True)
     certificate = Path(str(certificate_base) + "0")
     try:
         fingerprint = checked(["openssl", "x509", "-inform", "der", "-in", str(certificate), "-noout", "-fingerprint", "-sha1"], f"{label} signing certificate inspection", capture=True).stdout

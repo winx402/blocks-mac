@@ -799,9 +799,9 @@ def verify_direct_signature_audit_is_hermetic() -> None:
                 "  if [[ \"$mutation_target\" == \"$component_role\" && \"$mutation_property\" == runtime ]]; then printf '%s\\n' 'flags=0x0'; else printf '%s\\n' 'flags=0x10000(runtime)'; fi\n"
                 "  exit 0\n"
                 "fi\n"
-                "if [[ \"$1\" == -d && \"$2\" == --extract-certificates ]]; then\n"
+                "if [[ \"$1\" == -d && \"$2\" == --extract-certificates=* ]]; then\n"
                 "  trace cert \"$component_role\"\n"
-                "  printf '%s' \"$component_role\" > \"${3}0\"\n"
+                "  printf '%s' \"$component_role\" > \"${2#--extract-certificates=}0\"\n"
                 "  exit 0\n"
                 "fi\n"
                 "if [[ \"$1\" == -d && \"$2\" == --entitlements && \"$3\" == :- ]]; then\n"
@@ -1339,9 +1339,9 @@ def verify_store_signature_audit_is_hermetic() -> None:
                 "  if [[ \"$mutation_target\" == \"$component_role\" && \"$mutation_property\" == runtime ]]; then printf '%s\\n' 'flags=0x0'; else printf '%s\\n' 'flags=0x10000(runtime)'; fi\n"
                 "  exit 0\n"
                 "fi\n"
-                "if [[ \"$1\" == -d && \"$2\" == --extract-certificates ]]; then\n"
+                "if [[ \"$1\" == -d && \"$2\" == --extract-certificates=* ]]; then\n"
                 "  trace cert \"$component_role\"\n"
-                "  printf '%s' \"$component_role\" > \"${3}0\"\n"
+                "  printf '%s' \"$component_role\" > \"${2#--extract-certificates=}0\"\n"
                 "  exit 0\n"
                 "fi\n"
                 "if [[ \"$1\" == -d && \"$2\" == --entitlements && \"$3\" == :- ]]; then\n"
@@ -1673,9 +1673,9 @@ def verify_selection_helper_signature_audit_is_hermetic() -> None:
                 "  if [[ \"$mutation\" == helper:runtime ]]; then printf '%s\\n' 'flags=0x0'; else printf '%s\\n' 'flags=0x10000(runtime)'; fi\n"
                 "  exit 0\n"
                 "fi\n"
-                "if [[ \"$1\" == -d && \"$2\" == --extract-certificates ]]; then\n"
+                "if [[ \"$1\" == -d && \"$2\" == --extract-certificates=* ]]; then\n"
                 "  trace cert helper\n"
-                "  printf '%s' helper > \"${3}0\"\n"
+                "  printf '%s' helper > \"${2#--extract-certificates=}0\"\n"
                 "  exit 0\n"
                 "fi\n"
                 "if [[ \"$1\" == -d && \"$2\" == --entitlements && \"$3\" == :- ]]; then\n"
@@ -2679,7 +2679,7 @@ def main() -> None:
     signing_shared = read("apps/Blocks/Config/Signing.shared.xcconfig")
     local_development = read("apps/Blocks/Config/LocalDevelopment.xcconfig")
     require("BLOCKS_DISPLAY_NAME = Blocks for Mac" in signing_shared, "shared release display name drifted")
-    require("BLOCKS_DISPLAY_NAME = Blocks Dev" in local_development, "local-development display name drifted")
+    require("BLOCKS_DISPLAY_NAME = Blocks\n" in local_development, "local-development display name drifted")
 
     info_localizations = json.loads(
         read("apps/Blocks/BlocksApp/Resources/InfoPlist.xcstrings")

@@ -325,7 +325,7 @@ if ((require_signature)); then
       || fail "signing Authority differs for ${component#"$app_bundle/"}"
     if [[ -n "$expected_cert_sha1" ]]; then
       certificate_file="$(mktemp "${TMPDIR:-/tmp}/blocks-signing-cert.XXXXXX")"
-      codesign -d --extract-certificates "$certificate_file" "$component" >/dev/null 2>&1 \
+      codesign -d --extract-certificates="$certificate_file" "$component" >/dev/null 2>&1 \
         || fail "cannot extract signing certificate for ${component#"$app_bundle/"}"
       fingerprint="$(openssl x509 -inform der -in "${certificate_file}0" -noout -fingerprint -sha1 2>/dev/null | sed 's/^[^=]*=//; s/://g')"
       /bin/rm -f -- "$certificate_file"{,0,1,2,3,4,5,6,7,8,9}

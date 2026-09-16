@@ -164,7 +164,7 @@ dmg_authority="$(awk '/^Authority=/{print substr($0, 11); exit}' <<<"$dmg_signat
 [[ "$dmg_authority" == "$identity" ]] \
   || { echo "error: DMG signing Authority differs from expected Authority" >&2; exit 1; }
 certificate_file="$(mktemp "${TMPDIR:-/tmp}/blocks-dmg-signing-cert.XXXXXX")"
-codesign -d --extract-certificates "$certificate_file" "$temporary_dmg" >/dev/null 2>&1 \
+codesign -d --extract-certificates="$certificate_file" "$temporary_dmg" >/dev/null 2>&1 \
   || { echo "error: cannot extract the DMG signing certificate" >&2; exit 1; }
 dmg_cert_sha1="$(openssl x509 -inform der -in "${certificate_file}0" -noout -fingerprint -sha1 2>/dev/null | sed 's/^[^=]*=//; s/://g')"
 [[ "$(printf '%s' "$dmg_cert_sha1" | tr '[:lower:]' '[:upper:]')" \

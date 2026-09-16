@@ -163,7 +163,7 @@ if ((require_signature)); then
   [[ "$actual_authority" == "$expected_authority" ]] || { echo "error: Helper signing Authority differs from expected Authority" >&2; exit 1; }
   if [[ -n "$expected_cert_sha1" ]]; then
     certificate_file="$(mktemp "${TMPDIR:-/tmp}/blocks-helper-signing-cert.XXXXXX")"
-    codesign -d --extract-certificates "$certificate_file" "$app_bundle" >/dev/null 2>&1 || { echo "error: cannot extract Helper signing certificate" >&2; exit 1; }
+    codesign -d --extract-certificates="$certificate_file" "$app_bundle" >/dev/null 2>&1 || { echo "error: cannot extract Helper signing certificate" >&2; exit 1; }
     fingerprint="$(openssl x509 -inform der -in "${certificate_file}0" -noout -fingerprint -sha1 2>/dev/null | sed 's/^[^=]*=//; s/://g')"
     /bin/rm -f -- "$certificate_file"{,0,1,2,3,4,5,6,7,8,9}
     [[ "$(printf '%s' "$fingerprint" | tr '[:lower:]' '[:upper:]')" == "$(printf '%s' "${expected_cert_sha1//:/}" | tr '[:lower:]' '[:upper:]')" ]] || { echo "error: Helper signing certificate SHA-1 differs from expected certificate" >&2; exit 1; }

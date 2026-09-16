@@ -100,7 +100,7 @@ verify_pinned_signature() {
   [[ "$actual_authority" == "$expected_authority" ]] \
     || { echo "error: ${label} signing Authority differs from expected Authority" >&2; return 1; }
   certificate_file="$(mktemp "${TMPDIR:-/tmp}/blocks-notary-signing-cert.XXXXXX")"
-  codesign -d --extract-certificates "$certificate_file" "$target" >/dev/null 2>&1 \
+  codesign -d --extract-certificates="$certificate_file" "$target" >/dev/null 2>&1 \
     || { echo "error: cannot extract ${label} signing certificate" >&2; return 1; }
   fingerprint="$(openssl x509 -inform der -in "${certificate_file}0" -noout -fingerprint -sha1 2>/dev/null | sed 's/^[^=]*=//; s/://g')"
   /bin/rm -f -- "$certificate_file"{,0,1,2,3,4,5,6,7,8,9}

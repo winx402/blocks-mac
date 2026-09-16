@@ -138,8 +138,8 @@ def fake_command(arguments, *, capture=False):
     elif name == "codesign":
         if os.environ.get("FIXTURE_BAD_SIGNATURE") == "1" and "--verify" in args:
             status = 1
-        elif "--extract-certificates" in args:
-            Path(args[args.index("--extract-certificates") + 1] + "0").write_bytes(b"certificate")
+        elif any(arg.startswith("--extract-certificates=") for arg in args):
+            Path(next(arg.split("=", 1)[1] for arg in args if arg.startswith("--extract-certificates=")) + "0").write_bytes(b"certificate")
         elif "-dvv" in args:
             stderr = (
                 "TeamIdentifier=" + os.environ.get("FIXTURE_TEAM", "ABCDE12345") + "\n"
