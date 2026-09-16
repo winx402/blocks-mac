@@ -64,7 +64,7 @@ build_args=(
   ONLY_ACTIVE_ARCH=NO
   BLOCKS_DISTRIBUTION_CHANNEL="$channel"
 )
-if ((!unsigned)); then build_args+=(PROVISIONING_PROFILE_SPECIFIER="$provisioning_profile"); fi
+if ((!unsigned)); then build_args+=(BLOCKS_MAIN_APP_DISTRIBUTION_PROFILE="$provisioning_profile"); fi
 if [[ -n "$version" ]]; then
   build_args+=(MARKETING_VERSION="$version" CURRENT_PROJECT_VERSION="$build_number" BLOCKS_RELEASE_NAME="$release_name" BLOCKS_UPDATE_FEED_URL="$update_feed_url")
 fi

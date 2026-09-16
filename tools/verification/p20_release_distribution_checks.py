@@ -2558,6 +2558,12 @@ def main() -> None:
         in release_configuration.group("body"),
         "Blocks Release must not inherit the development Helper read exception",
     )
+    require('PROVISIONING_PROFILE_SPECIFIER = "$(BLOCKS_MAIN_APP_DISTRIBUTION_PROFILE)";'
+            in release_configuration.group("body"), "direct release profile must be scoped to the main App target")
+    direct_build_script = read("script/release/build_direct_beta.sh")
+    require('build_args+=(BLOCKS_MAIN_APP_DISTRIBUTION_PROFILE="$provisioning_profile")' in direct_build_script
+            and 'build_args+=(PROVISIONING_PROFILE_SPECIFIER=' not in direct_build_script,
+            "direct build must not apply the main App profile to all dependency targets")
     app_store_configuration = re.search(
         r"L00300000000000000000004 /\* AppStoreRelease \*/ = \{(?P<body>.*?)\n\t\t\};",
         project,
