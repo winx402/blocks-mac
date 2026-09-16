@@ -1,7 +1,7 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+<?xml version='1.0' encoding='utf-8'?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
   <channel>
-    <title>Blocks — Beta Updates</title>
+    <item><title>0.1.0-beta.1</title><pubDate>Wed, 16 Sep 2026 16:58:02 GMT</pubDate><enclosure url="https://github.com/winx402/blocks-mac/releases/download/v0.1.0-beta.1/Blocks-v0.1.0-beta.1-arm64.dmg" length="21885234" type="application/octet-stream" sparkle:edSignature="gBR39txIltBLdLhxxZXupRr0XJ4bYbJVQINWezHj2SvdKZX2doJSHDz7O8U1ENG12u+ewC9pW5F2GTqVUl41Aw==" sparkle:version="1" sparkle:shortVersionString="0.1.0" /></item><title>Blocks — Beta Updates</title>
     <link>https://github.com/winx402/blocks-mac/releases</link>
     <description>Opt-in signed beta updates. No release has passed distribution acceptance yet.</description>
     <language>en</language>
