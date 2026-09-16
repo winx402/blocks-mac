@@ -19,7 +19,7 @@ development_team="$(awk -F= '/^[[:space:]]*DEVELOPMENT_TEAM[[:space:]]*=/{gsub(/
 [[ "$development_team" =~ ^[A-Z0-9]{10}$ && "$development_team" != *YOUR* ]] \
   || { echo "error: ReleaseIdentity.local.xcconfig must contain a confirmed DEVELOPMENT_TEAM." >&2; exit 67; }
 
-resolved_main_entitlements="$(mktemp "${TMPDIR:-/tmp}/blocks-direct-entitlements.XXXXXX.plist")"
+resolved_main_entitlements="$(mktemp "${TMPDIR:-/tmp}/blocks-direct-entitlements.plist.XXXXXX")"
 trap '/bin/rm -f -- "${resolved_main_entitlements:-}"' EXIT
 /bin/cp "$repo_root/apps/Blocks/BlocksApp/Blocks.entitlements" "$resolved_main_entitlements"
 plutil -replace keychain-access-groups -xml "<array><string>${development_team}.app.blocks.app</string><string>${development_team}.app.blocks.selection-helper.shared</string></array>" "$resolved_main_entitlements"

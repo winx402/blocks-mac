@@ -350,7 +350,7 @@ if ((require_signature)); then
     local component_identifier="$2"
     local entitlement_file actual_keys key allowed expected_application_id
     local allowed_keys=()
-    entitlement_file="$(mktemp "${TMPDIR:-/tmp}/blocks-component-entitlements.XXXXXX.plist")"
+    entitlement_file="$(mktemp "${TMPDIR:-/tmp}/blocks-component-entitlements.plist.XXXXXX")"
     trap '/bin/rm -f -- "${entitlement_file:-}"' EXIT
     codesign -d --entitlements :- "$component" > "$entitlement_file" 2>/dev/null \
       || fail "cannot read signed entitlements: ${component#"$app_bundle/"}"
@@ -507,7 +507,7 @@ if ((require_signature)); then
 
   validate_sparkle_entitlements() {
     local component="$1" entitlement_file entitlement_key
-    entitlement_file="$(mktemp "${TMPDIR:-/tmp}/blocks-sparkle-entitlements.XXXXXX.plist")"
+    entitlement_file="$(mktemp "${TMPDIR:-/tmp}/blocks-sparkle-entitlements.plist.XXXXXX")"
     codesign -d --entitlements :- "$component" > "$entitlement_file" 2>/dev/null \
       || fail "cannot read Sparkle signed entitlements: ${component#"$app_bundle/"}"
     if [[ -s "$entitlement_file" ]]; then
@@ -537,7 +537,7 @@ if ((require_signature)); then
   fi
 
   if [[ "$channel" == "app-store-beta" ]]; then
-    signed_entitlements="$(mktemp "${TMPDIR:-/tmp}/blocks-store-entitlements.XXXXXX.plist")"
+    signed_entitlements="$(mktemp "${TMPDIR:-/tmp}/blocks-store-entitlements.plist.XXXXXX")"
     trap '/bin/rm -f -- "${signed_entitlements:-}"' EXIT
     codesign -d --entitlements :- "$app_bundle" > "$signed_entitlements" 2>/dev/null \
       || fail "cannot read Store app signed entitlements"

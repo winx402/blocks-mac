@@ -99,7 +99,7 @@ if [[ -n "$version" ]]; then
 fi
 "$repo_root/script/release/audit_selection_helper_bundle.sh" "${helper_audit_args[@]}"
 if ((!unsigned)); then
-  resolved_helper_entitlements="$(mktemp "${TMPDIR:-/tmp}/blocks-helper-entitlements.XXXXXX.plist")"
+  resolved_helper_entitlements="$(mktemp "${TMPDIR:-/tmp}/blocks-helper-entitlements.plist.XXXXXX")"
   trap '/bin/rm -f -- "${resolved_helper_entitlements:-}"' EXIT
   /bin/cp "$repo_root/apps/Blocks/BlocksSelectionHelper/BlocksSelectionHelper.entitlements" "$resolved_helper_entitlements"
   plutil -replace keychain-access-groups -xml "<array><string>${development_team}.app.blocks.selection-helper.shared</string></array>" "$resolved_helper_entitlements"

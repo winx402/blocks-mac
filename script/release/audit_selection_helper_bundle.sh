@@ -172,7 +172,7 @@ if ((require_signature)); then
     echo "error: Helper signature does not enable Hardened Runtime" >&2
     exit 1
   }
-  helper_entitlements="$(mktemp "${TMPDIR:-/tmp}/blocks-helper-entitlements.XXXXXX.plist")"
+  helper_entitlements="$(mktemp "${TMPDIR:-/tmp}/blocks-helper-entitlements.plist.XXXXXX")"
   trap '/bin/rm -f -- "${helper_entitlements:-}"' EXIT
   codesign -d --entitlements :- "$app_bundle" > "$helper_entitlements" 2>/dev/null \
     || { echo "error: cannot read Helper signed entitlements" >&2; exit 1; }

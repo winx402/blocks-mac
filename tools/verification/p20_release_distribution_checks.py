@@ -2420,6 +2420,14 @@ def verify_notarize_dmg_identity_pins_are_hermetic() -> None:
 
 
 def main() -> None:
+    for path in (
+        "script/release/build_selection_helper_beta.sh",
+        "script/release/sign_direct_bundle.sh",
+        "script/release/audit_selection_helper_bundle.sh",
+        "script/release/audit_app_bundle.sh",
+    ):
+        require(not re.search(r"mktemp[^\n]*XXXXXX\.plist", read(path)),
+                f"BSD mktemp random suffix must end the template: {path}")
     expected_bundle_ids = {
         "app.blocks.app",
         "app.blocks.core",
