@@ -2267,6 +2267,7 @@ def verify_notarize_dmg_identity_pins_are_hermetic() -> None:
         dmg_mode: str = "correct",
         component_mode: str = "correct",
         detach_mode: str = "correct",
+        mount_mode: str = "correct",
         root_payload: str = "correct",
         expected_authority: str = authority,
     ) -> tuple[subprocess.CompletedProcess[str], list[str], bool]:
@@ -2336,8 +2337,33 @@ def verify_notarize_dmg_identity_pins_are_hermetic() -> None:
                 shims / "hdiutil",
                 "#!/usr/bin/env bash\n"
                 "printf '%s\\n' hdiutil-\"$1\" >> \"$P20_NOTARY_TRACE\"\n"
-                "[[ \"$1\" == detach && \"${P20_NOTARY_DETACH_MODE:-correct}\" == fail ]] && exit 1\n"
-                "exit 0\n",
+                "case \"$1\" in\n"
+                "  attach)\n"
+                "    exec /usr/bin/python3 - \"$P20_NOTARY_MOUNT\" \"${P20_NOTARY_MOUNT_MODE:-correct}\" <<'PY'\n"
+                "import plistlib\n"
+                "import sys\n"
+                "mount, mode = sys.argv[1:]\n"
+                "entities = [\n"
+                "    {'dev-entry': '/dev/disk99', 'content-hint': 'GUID_partition_scheme'},\n"
+                "    {'dev-entry': '/dev/disk99s1', 'content-hint': 'Apple_APFS_ISC'},\n"
+                "    {'dev-entry': '/dev/disk99s1', 'mount-point': mount, 'volume-kind': 'apfs'},\n"
+                "]\n"
+                "if mode == 'double':\n"
+                "    entities.append({'dev-entry': '/dev/disk100s1', 'mount-point': mount + '-second'})\n"
+                "elif mode == 'missing':\n"
+                "    entities.pop()\n"
+                "elif mode != 'correct':\n"
+                "    raise SystemExit('unknown fixture mount mode: ' + mode)\n"
+                "sys.stdout.buffer.write(plistlib.dumps({'system-entities': entities}))\n"
+                "PY\n"
+                "    ;;\n"
+                "  detach)\n"
+                "    printf 'hdiutil-detach-target|%s\\n' \"${2:-}\" >> \"$P20_NOTARY_TRACE\"\n"
+                "    if [[ \"${P20_NOTARY_DETACH_MODE:-correct}\" == fail ]]; then exit 1; fi\n"
+                "    exit 0\n"
+                "    ;;\n"
+                "  *) exit 2 ;;\n"
+                "esac\n",
             )
             write_executable(
                 shims / "plutil",
@@ -2345,9 +2371,7 @@ def verify_notarize_dmg_identity_pins_are_hermetic() -> None:
                 "case \"$2\" in\n"
                 "  status) grep -Fq '\"status\":\"Accepted\"' \"$4\" && echo Accepted ;;\n"
                 "  id) grep -Fq '\"id\":\"mock-submission\"' \"$4\" && echo mock-submission ;;\n"
-                "  system-entities.1.mount-point|system-entities.0.mount-point) echo \"$P20_NOTARY_MOUNT\" ;;\n"
-                "  system-entities.0.dev-entry) echo /dev/disk99 ;;\n"
-                "  CFBundleIdentifier|BLOCKS_DISTRIBUTION_CHANNEL) exec /usr/bin/plutil \"$@\" ;;\n"
+                "  system-entities.0.dev-entry|CFBundleIdentifier|BLOCKS_DISTRIBUTION_CHANNEL) exec /usr/bin/plutil \"$@\" ;;\n"
                 "  *) exit 2 ;;\n"
                 "esac\n",
             )
@@ -2378,6 +2402,7 @@ def verify_notarize_dmg_identity_pins_are_hermetic() -> None:
                 "P20_NOTARY_DMG_MODE": dmg_mode,
                 "P20_NOTARY_COMPONENT_MODE": component_mode,
                 "P20_NOTARY_DETACH_MODE": detach_mode,
+                "P20_NOTARY_MOUNT_MODE": mount_mode,
                 "P20_NOTARY_DMG": str(dmg),
                 "PYTHONDONTWRITEBYTECODE": "1",
             }
@@ -2425,6 +2450,20 @@ def verify_notarize_dmg_identity_pins_are_hermetic() -> None:
     require("component identity mismatch" in component.stderr, "mounted component rejection was not retained")
     require("notarytool-submit" not in component_trace, "mounted component mismatch reached notarytool")
     require(not component_checksum, "mounted component mismatch published a final checksum")
+
+    for mount_mode in ("double", "missing"):
+        result, trace_lines, checksum_exists = run_fixture(mount_mode=mount_mode)
+        require(result.returncode != 0, f"notarize accepted a {mount_mode}-mount attach plist")
+        require(
+            "ambiguous or invalid mounted DMG volume" in result.stderr,
+            f"{mount_mode}-mount rejection was not explicit",
+        )
+        require("notarytool-submit" not in trace_lines, f"{mount_mode}-mount fixture reached notarytool")
+        require(not checksum_exists, f"{mount_mode}-mount fixture published a final checksum")
+        require(
+            "hdiutil-detach-target|/dev/disk99" in trace_lines,
+            f"{mount_mode}-mount fixture did not clean up its attached device",
+        )
 
     for root_payload, error in [
         ("extra-file", "unexpected DMG root entry"),

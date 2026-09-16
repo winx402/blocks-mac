@@ -112,7 +112,21 @@ verify_pinned_signature() {
 attach_readonly_dmg() {
   hdiutil attach -readonly -nobrowse -plist "$dmg_path" > "$attach_plist"
   attached_device="$(plutil -extract 'system-entities.0.dev-entry' raw "$attach_plist" 2>/dev/null || true)"
-  mount_point="$(plutil -extract 'system-entities.1.mount-point' raw "$attach_plist" 2>/dev/null || plutil -extract 'system-entities.0.mount-point' raw "$attach_plist" 2>/dev/null || true)"
+  # APFS can place the mounted volume after both the physical partition and
+  # synthesized container entries. Do not assume an entity array index.
+  mount_point="$(python3 - "$attach_plist" <<'PY'
+import os
+import plistlib
+import sys
+with open(sys.argv[1], "rb") as source:
+    entities = plistlib.load(source).get("system-entities", [])
+mounts = [item["mount-point"] for item in entities
+          if isinstance(item, dict) and isinstance(item.get("mount-point"), str)]
+if len(mounts) != 1 or not os.path.isabs(mounts[0]) or "\n" in mounts[0]:
+    raise SystemExit("expected exactly one absolute mounted DMG volume")
+print(mounts[0])
+PY
+  )" || { echo "error: ambiguous or invalid mounted DMG volume; cleanup will retry attached device ${attached_device:-unknown}" >&2; return 1; }
   [[ -n "$mount_point" && -d "$mount_point" ]] || { echo "error: could not determine mounted DMG volume; cleanup will retry attached device ${attached_device:-unknown}" >&2; return 1; }
 }
 
