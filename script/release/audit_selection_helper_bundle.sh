@@ -188,12 +188,12 @@ if ((require_signature)); then
       *) echo "error: unexpected Helper signed entitlement: $key" >&2; exit 1 ;;
     esac
   done <<< "$helper_entitlement_keys"
-  if plutil -extract com.apple.developer.team-identifier raw "$helper_entitlements" >/dev/null 2>&1; then
-    [[ "$(plutil -extract com.apple.developer.team-identifier raw "$helper_entitlements")" == "$expected_team_id" ]] \
+  if plutil -extract 'com\.apple\.developer\.team-identifier' raw "$helper_entitlements" >/dev/null 2>&1; then
+    [[ "$(plutil -extract 'com\.apple\.developer\.team-identifier' raw "$helper_entitlements")" == "$expected_team_id" ]] \
       || { echo "error: Helper signed entitlement Team ID differs" >&2; exit 1; }
   fi
-  if plutil -extract com.apple.application-identifier raw "$helper_entitlements" >/dev/null 2>&1; then
-    [[ "$(plutil -extract com.apple.application-identifier raw "$helper_entitlements")" == "$expected_team_id.app.blocks.selection-helper" ]] \
+  if plutil -extract 'com\.apple\.application-identifier' raw "$helper_entitlements" >/dev/null 2>&1; then
+    [[ "$(plutil -extract 'com\.apple\.application-identifier' raw "$helper_entitlements")" == "$expected_team_id.app.blocks.selection-helper" ]] \
       || { echo "error: Helper signed application identifier differs" >&2; exit 1; }
   fi
   helper_keychain_group="$(plutil -extract 'keychain-access-groups.0' raw "$helper_entitlements" 2>/dev/null || true)"

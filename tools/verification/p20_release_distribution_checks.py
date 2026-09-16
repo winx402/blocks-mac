@@ -536,6 +536,48 @@ def verify_unexpected_bundle_members_are_rejected() -> None:
         )
 
 
+def verify_real_plutil_escaped_keypaths() -> None:
+    """Lock fixture key-path parsing to the platform plutil escape grammar."""
+    team = "ABCDE12345"
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        fixture = Path(temporary_directory) / "keypath-fixture.plist"
+        fixture.write_bytes(plistlib.dumps({
+            "com.apple.security.app-sandbox": True,
+            "keychain-access-groups": [team + ".app.blocks.app"],
+            "Entitlements": {
+                "com.apple.developer.team-identifier": team,
+            },
+        }))
+        expected_values = {
+            r"com\.apple\.security\.app-sandbox": "true\n",
+            "keychain-access-groups.0": team + ".app.blocks.app\n",
+            r"Entitlements.com\.apple\.developer\.team-identifier": team + "\n",
+        }
+        for keypath, expected in expected_values.items():
+            result = run_fixture_subprocess(
+                "real plutil escaped key path",
+                ["/usr/bin/plutil", "-extract", keypath, "raw", str(fixture)],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            require(
+                result.returncode == 0 and result.stdout == expected,
+                f"system plutil escaped key path drifted: {keypath}: {result.stderr}",
+            )
+        unescaped = run_fixture_subprocess(
+            "real plutil rejects unescaped dotted key",
+            ["/usr/bin/plutil", "-extract", "com.apple.security.app-sandbox", "raw", str(fixture)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        require(
+            unescaped.returncode != 0,
+            "system plutil unexpectedly accepted an unescaped dotted dictionary key",
+        )
+
+
 def verify_direct_signature_audit_is_hermetic() -> None:
     """Run the Direct signing branch against isolated, deterministic tool shims."""
     audit_script = ROOT / "script/release/audit_app_bundle.sh"
@@ -543,6 +585,7 @@ def verify_direct_signature_audit_is_hermetic() -> None:
     expected_authority = "Developer ID Application: Blocks Test (ABCDE12345)"
     expected_sha1 = "0123456789ABCDEF0123456789ABCDEF01234567"
     expected_errors = {
+        "sparkle:alias-escape": "error: symbolic link is forbidden in release bundle: Contents/Frameworks/Sparkle.framework/XPCServices\n",
         "main:deep-verify": "mock codesign deep verify failed\n",
         "main:team": "error: main app TeamIdentifier differs from expected Team ID\n",
         "clipboard:team": (
@@ -615,7 +658,7 @@ def verify_direct_signature_audit_is_hermetic() -> None:
             "error: Direct app keychain-access-groups must contain exactly default and shared groups\n"
         ),
     }
-    require(len(expected_errors) == 25, "Direct signature fixture mutation count drifted")
+    require(len(expected_errors) == 26, "Direct signature fixture mutation count drifted")
 
     def write_shim(path: Path, contents: str) -> None:
         path.write_text(contents, encoding="utf-8")
@@ -686,6 +729,11 @@ def verify_direct_signature_audit_is_hermetic() -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
             app = write_bundle(temporary_root)
+            sparkle = app / "Contents/Frameworks/Sparkle.framework"
+            (sparkle / "Versions/Current").symlink_to("B")
+            (sparkle / "XPCServices").symlink_to(
+                "/tmp" if mutation == "sparkle:alias-escape" else "Versions/Current/XPCServices"
+            )
             shims = temporary_root / "shims"
             shims.mkdir()
             trace = temporary_root / "signature-trace.txt"
@@ -720,40 +768,6 @@ def verify_direct_signature_audit_is_hermetic() -> None:
                 "else\n"
                 "  printf '%s\\n' 'sha1 Fingerprint=0123456789ABCDEF0123456789ABCDEF01234567'\n"
                 "fi\n",
-            )
-            write_shim(
-                shims / "plutil",
-                "#!/usr/bin/env bash\n"
-                "exec /usr/bin/python3 - \"$@\" <<'PY'\n"
-                "import plistlib\n"
-                "import sys\n"
-                "\n"
-                "args = sys.argv[1:]\n"
-                "if args[:1] == ['-lint']:\n"
-                "    source = args[-1]\n"
-                "    if source == '-':\n"
-                "        plistlib.loads(sys.stdin.buffer.read())\n"
-                "    else:\n"
-                "        plistlib.load(open(source, 'rb'))\n"
-                "    raise SystemExit(0)\n"
-                "if len(args) < 4 or args[0] != '-extract' or args[2] != 'raw':\n"
-                "    raise SystemExit(2)\n"
-                "key, source = args[1], args[-1]\n"
-                "if source == '-':\n"
-                "    value = plistlib.loads(sys.stdin.buffer.read())\n"
-                "else:\n"
-                "    value = plistlib.load(open(source, 'rb'))\n"
-                "for component in key.split('.'):\n"
-                "    value = value[int(component)] if component.isdigit() else value[component]\n"
-                "if '-expect' in args and args[args.index('-expect') + 1] == 'string' and not isinstance(value, str):\n"
-                "    raise SystemExit(1)\n"
-                "if isinstance(value, bool):\n"
-                "    print(str(value).lower())\n"
-                "elif isinstance(value, str):\n"
-                "    print(value, end='' if '-n' in args else '\\n')\n"
-                "else:\n"
-                "    raise SystemExit(1)\n"
-                "PY\n",
             )
             write_shim(
                 shims / "codesign",
@@ -842,14 +856,24 @@ def verify_direct_signature_audit_is_hermetic() -> None:
                 "if len(args) < 4 or args[0] != '-extract' or args[2] != 'raw': raise SystemExit(2)\n"
                 "source = args[-1]\n"
                 "value = plistlib.loads(sys.stdin.buffer.read()) if source == '-' else plistlib.load(open(source, 'rb'))\n"
-                "parts = args[1].split('.')\n"
-                "while parts:\n"
-                "    if parts[0].isdigit(): value = value[int(parts.pop(0))]; continue\n"
-                "    for count in range(len(parts), 0, -1):\n"
-                "        candidate = '.'.join(parts[:count])\n"
-                "        if isinstance(value, dict) and candidate in value:\n"
-                "            value = value[candidate]; parts = parts[count:]; break\n"
-                "    else: raise KeyError('.'.join(parts))\n"
+                "def keypath_components(path):\n"
+                "    components, current, escaped = [], [], False\n"
+                "    for character in path:\n"
+                "        if escaped:\n"
+                "            current.append(character); escaped = False\n"
+                "        elif character == '\\\\':\n"
+                "            escaped = True\n"
+                "        elif character == '.':\n"
+                "            components.append(''.join(current)); current = []\n"
+                "        else:\n"
+                "            current.append(character)\n"
+                "    if escaped: raise ValueError('unterminated key-path escape')\n"
+                "    components.append(''.join(current))\n"
+                "    return components\n"
+                "for component in keypath_components(args[1]):\n"
+                "    if isinstance(value, dict): value = value[component]\n"
+                "    elif isinstance(value, list) and component.isdigit(): value = value[int(component)]\n"
+                "    else: raise KeyError(component)\n"
                 "if '-expect' in args and args[args.index('-expect') + 1] == 'string' and not isinstance(value, str): raise SystemExit(1)\n"
                 "if isinstance(value, bool): print(str(value).lower())\n"
                 "elif isinstance(value, str): print(value, end='' if '-n' in args else '\\n')\n"
@@ -1191,19 +1215,24 @@ def verify_store_signature_audit_is_hermetic() -> None:
                 "    return plistlib.loads(data)\n"
                 "\n"
                 "def extract(value, path):\n"
-                "    parts = path.split('.')\n"
-                "    while parts:\n"
+                "    parts, current, escaped = [], [], False\n"
+                "    for character in path:\n"
+                "        if escaped:\n"
+                "            current.append(character); escaped = False\n"
+                "        elif character == '\\\\':\n"
+                "            escaped = True\n"
+                "        elif character == '.':\n"
+                "            parts.append(''.join(current)); current = []\n"
+                "        else:\n"
+                "            current.append(character)\n"
+                "    if escaped:\n"
+                "        raise ValueError('unterminated key-path escape')\n"
+                "    parts.append(''.join(current))\n"
+                "    for component in parts:\n"
                 "        if isinstance(value, dict):\n"
-                "            for length in range(len(parts), 0, -1):\n"
-                "                candidate = '.'.join(parts[:length])\n"
-                "                if candidate in value:\n"
-                "                    value = value[candidate]\n"
-                "                    parts = parts[length:]\n"
-                "                    break\n"
-                "            else:\n"
-                "                raise KeyError(path)\n"
-                "        elif isinstance(value, list):\n"
-                "            value = value[int(parts.pop(0))]\n"
+                "            value = value[component]\n"
+                "        elif isinstance(value, list) and component.isdigit():\n"
+                "            value = value[int(component)]\n"
                 "        else:\n"
                 "            raise KeyError(path)\n"
                 "    return value\n"
@@ -1455,11 +1484,11 @@ def verify_store_signature_audit_is_hermetic() -> None:
                     "TeamIdentifier.0",
                     "UUID",
                     "Entitlements.application-identifier",
-                    "Entitlements.com.apple.developer.team-identifier",
+                    r"Entitlements.com\.apple\.developer\.team-identifier",
                     "ExpirationDate",
-                    "Entitlements.com.apple.security.app-sandbox",
-                    "Entitlements.com.apple.security.files.user-selected.read-write",
-                    "Entitlements.com.apple.security.network.client",
+                    r"Entitlements.com\.apple\.security\.app-sandbox",
+                    r"Entitlements.com\.apple\.security\.files\.user-selected\.read-write",
+                    r"Entitlements.com\.apple\.security\.network\.client",
                 ]:
                     require(
                         f"plutil|profile:{key}" in trace_lines,
@@ -1613,19 +1642,24 @@ def verify_selection_helper_signature_audit_is_hermetic() -> None:
                 "import sys\n"
                 "\n"
                 "def extract(value, path):\n"
-                "    parts = path.split('.')\n"
-                "    while parts:\n"
+                "    parts, current, escaped = [], [], False\n"
+                "    for character in path:\n"
+                "        if escaped:\n"
+                "            current.append(character); escaped = False\n"
+                "        elif character == '\\\\':\n"
+                "            escaped = True\n"
+                "        elif character == '.':\n"
+                "            parts.append(''.join(current)); current = []\n"
+                "        else:\n"
+                "            current.append(character)\n"
+                "    if escaped:\n"
+                "        raise ValueError('unterminated key-path escape')\n"
+                "    parts.append(''.join(current))\n"
+                "    for component in parts:\n"
                 "        if isinstance(value, dict):\n"
-                "            for length in range(len(parts), 0, -1):\n"
-                "                candidate = '.'.join(parts[:length])\n"
-                "                if candidate in value:\n"
-                "                    value = value[candidate]\n"
-                "                    parts = parts[length:]\n"
-                "                    break\n"
-                "            else:\n"
-                "                raise KeyError(path)\n"
-                "        elif isinstance(value, list):\n"
-                "            value = value[int(parts.pop(0))]\n"
+                "            value = value[component]\n"
+                "        elif isinstance(value, list) and component.isdigit():\n"
+                "            value = value[int(component)]\n"
                 "        else:\n"
                 "            raise KeyError(path)\n"
                 "    return value\n"
@@ -2863,6 +2897,7 @@ def main() -> None:
         and "grep -Fq '$(AppIdentifierPrefix)' \"$resolved_main_entitlements\"" in sign_direct_script,
         "Direct post-sign must use a resolved Keychain entitlement file without an AppIdentifierPrefix placeholder",
     )
+    verify_real_plutil_escaped_keypaths()
     verify_unexpected_bundle_members_are_rejected()
     verify_direct_signature_audit_is_hermetic()
     verify_store_signature_audit_is_hermetic()

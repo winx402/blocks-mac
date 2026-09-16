@@ -95,7 +95,8 @@ while IFS= read -r -d '' symbolic_link; do
     Contents/Frameworks/Sparkle.framework/Sparkle:Versions/Current/Sparkle|\
     Contents/Frameworks/Sparkle.framework/Resources:Versions/Current/Resources|\
     Contents/Frameworks/Sparkle.framework/Autoupdate:Versions/Current/Autoupdate|\
-    Contents/Frameworks/Sparkle.framework/Updater.app:Versions/Current/Updater.app)
+    Contents/Frameworks/Sparkle.framework/Updater.app:Versions/Current/Updater.app|\
+    Contents/Frameworks/Sparkle.framework/XPCServices:Versions/Current/XPCServices)
       ;;
     *) fail "symbolic link is forbidden in release bundle: $relative_link" ;;
   esac
@@ -424,33 +425,33 @@ if ((require_signature)); then
         || fail "unexpected signed entitlement for ${component#"$app_bundle/"}: $key"
     done <<< "$actual_keys"
 
-    if plutil -extract com.apple.developer.team-identifier raw "$entitlement_file" >/dev/null 2>&1; then
-      [[ "$(plutil -extract com.apple.developer.team-identifier raw "$entitlement_file")" == "$expected_team_id" ]] \
+    if plutil -extract 'com\.apple\.developer\.team-identifier' raw "$entitlement_file" >/dev/null 2>&1; then
+      [[ "$(plutil -extract 'com\.apple\.developer\.team-identifier' raw "$entitlement_file")" == "$expected_team_id" ]] \
         || fail "signed entitlement Team ID differs for ${component#"$app_bundle/"}"
     fi
-    if plutil -extract com.apple.application-identifier raw "$entitlement_file" >/dev/null 2>&1; then
+    if plutil -extract 'com\.apple\.application-identifier' raw "$entitlement_file" >/dev/null 2>&1; then
       expected_application_id="$expected_team_id.$component_identifier"
-      [[ "$(plutil -extract com.apple.application-identifier raw "$entitlement_file")" == "$expected_application_id" ]] \
+      [[ "$(plutil -extract 'com\.apple\.application-identifier' raw "$entitlement_file")" == "$expected_application_id" ]] \
         || fail "signed application identifier differs for ${component#"$app_bundle/"}"
     fi
 
     case "$component" in
       "$app_bundle")
         for key in com.apple.security.app-sandbox com.apple.security.files.user-selected.read-write com.apple.security.network.client; do
-          [[ "$(plutil -extract "$key" raw "$entitlement_file")" == "true" ]] \
+          [[ "$(plutil -extract "${key//./\\.}" raw "$entitlement_file")" == "true" ]] \
             || fail "Direct app entitlement is not true: $key"
         done
         expected_mach_services=(app.blocks.action-broker.xpc app.blocks.app-spks app.blocks.app-spki)
         for mach_index in 0 1 2; do
-          [[ "$(plutil -extract "com.apple.security.temporary-exception.mach-lookup.global-name.$mach_index" raw "$entitlement_file")" == "${expected_mach_services[$mach_index]}" ]] \
+          [[ "$(plutil -extract "com\.apple\.security\.temporary-exception\.mach-lookup\.global-name.$mach_index" raw "$entitlement_file")" == "${expected_mach_services[$mach_index]}" ]] \
             || fail "Direct app Sparkle/ActionBroker Mach exception differs at index $mach_index"
         done
-        if plutil -extract 'com.apple.security.temporary-exception.mach-lookup.global-name.3' raw "$entitlement_file" >/dev/null 2>&1; then
+        if plutil -extract 'com\.apple\.security\.temporary-exception\.mach-lookup\.global-name.3' raw "$entitlement_file" >/dev/null 2>&1; then
           fail "Direct app Mach exceptions must contain exactly ActionBroker and Sparkle spks/spki"
         fi
-        [[ "$(plutil -extract 'com.apple.security.temporary-exception.files.absolute-path.read-only.0' raw "$entitlement_file")" == "/Applications/Blocks Selection Helper.app/" ]] \
+        [[ "$(plutil -extract 'com\.apple\.security\.temporary-exception\.files\.absolute-path\.read-only.0' raw "$entitlement_file")" == "/Applications/Blocks Selection Helper.app/" ]] \
           || fail "Direct app Helper read exception differs from the stable bundle"
-        if plutil -extract 'com.apple.security.temporary-exception.files.absolute-path.read-only.1' raw "$entitlement_file" >/dev/null 2>&1; then
+        if plutil -extract 'com\.apple\.security\.temporary-exception\.files\.absolute-path\.read-only.1' raw "$entitlement_file" >/dev/null 2>&1; then
           fail "Direct app Helper read exception must contain exactly one path"
         fi
         default_keychain_group="$(plutil -extract 'keychain-access-groups.0' raw "$entitlement_file" 2>/dev/null || true)"
@@ -465,12 +466,12 @@ if ((require_signature)); then
         ;;
       "$clipboard_broker")
         for key in com.apple.security.app-sandbox com.apple.security.inherit; do
-          [[ "$(plutil -extract "$key" raw "$entitlement_file")" == "true" ]] \
+          [[ "$(plutil -extract "${key//./\\.}" raw "$entitlement_file")" == "true" ]] \
             || fail "Clipboard Broker entitlement is not true: $key"
         done
         ;;
       "$plugin_runner"|"$contents/MacOS/BlocksActionBroker")
-        [[ "$(plutil -extract com.apple.security.app-sandbox raw "$entitlement_file")" == "true" ]] \
+        [[ "$(plutil -extract 'com\.apple\.security\.app-sandbox' raw "$entitlement_file")" == "true" ]] \
           || fail "sandbox entitlement is not true for ${component#"$app_bundle/"}"
         ;;
     esac
@@ -517,7 +518,7 @@ if ((require_signature)); then
       # artifacts must never retain development debugging or accessibility
       # capabilities.
       for entitlement_key in com.apple.security.get-task-allow com.apple.security.accessibility com.apple.security.automation.apple-events; do
-        if plutil -extract "$entitlement_key" raw "$entitlement_file" >/dev/null 2>&1; then
+        if plutil -extract "${entitlement_key//./\\.}" raw "$entitlement_file" >/dev/null 2>&1; then
           fail "forbidden Sparkle entitlement for ${component#"$app_bundle/"}: $entitlement_key"
         fi
       done
@@ -558,12 +559,12 @@ if ((require_signature)); then
     [[ "$actual_store_keys" == "$expected_store_keys" || "$actual_store_keys" == "$expected_store_keys_with_keychain" ]] \
       || fail "Store app signed entitlements differ from the allowed whitelist"
     for entitlement in com.apple.security.app-sandbox com.apple.security.files.user-selected.read-write com.apple.security.network.client; do
-      [[ "$(plutil -extract "$entitlement" raw "$signed_entitlements")" == "true" ]] \
+      [[ "$(plutil -extract "${entitlement//./\\.}" raw "$signed_entitlements")" == "true" ]] \
         || fail "Store app entitlement is not true: $entitlement"
     done
-    [[ "$(plutil -extract com.apple.application-identifier raw "$signed_entitlements")" == "$expected_team_id.app.blocks.app" ]] \
+    [[ "$(plutil -extract 'com\.apple\.application-identifier' raw "$signed_entitlements")" == "$expected_team_id.app.blocks.app" ]] \
       || fail "Store app signed application identifier differs from expected App ID"
-    [[ "$(plutil -extract com.apple.developer.team-identifier raw "$signed_entitlements")" == "$expected_team_id" ]] \
+    [[ "$(plutil -extract 'com\.apple\.developer\.team-identifier' raw "$signed_entitlements")" == "$expected_team_id" ]] \
       || fail "Store app signed team identifier differs from expected Team ID"
     if [[ "$actual_store_keys" == "$expected_store_keys_with_keychain" ]]; then
       [[ "$(plutil -extract 'keychain-access-groups.0' raw "$signed_entitlements")" == "$expected_team_id.app.blocks.app" ]] \
@@ -589,7 +590,7 @@ if ((require_signature)); then
       || fail "Store embedded provisioning profile is missing application-identifier"
     [[ "$profile_app_identifier" == "$expected_team_id.app.blocks.app" ]] \
       || fail "Store embedded provisioning profile application-identifier differs from expected App ID"
-    profile_entitlement_team="$(printf '%s' "$profile_plist" | plutil -extract Entitlements.com.apple.developer.team-identifier raw -)" \
+    profile_entitlement_team="$(printf '%s' "$profile_plist" | plutil -extract 'Entitlements.com\.apple\.developer\.team-identifier' raw -)" \
       || fail "Store embedded provisioning profile is missing entitlement team identifier"
     [[ "$profile_entitlement_team" == "$expected_team_id" ]] \
       || fail "Store embedded provisioning profile entitlement team identifier differs from expected Team ID"
@@ -599,7 +600,7 @@ if ((require_signature)); then
     [[ -n "$expiration_epoch" && "$expiration_epoch" -gt "$(date +%s)" ]] \
       || fail "Store embedded provisioning profile is expired or has an invalid ExpirationDate"
     for entitlement in com.apple.security.app-sandbox com.apple.security.files.user-selected.read-write com.apple.security.network.client; do
-      profile_value="$(printf '%s' "$profile_plist" | plutil -extract "Entitlements.$entitlement" raw - 2>/dev/null || true)"
+      profile_value="$(printf '%s' "$profile_plist" | plutil -extract "Entitlements.${entitlement//./\\.}" raw - 2>/dev/null || true)"
       [[ "$profile_value" == "true" ]] \
         || fail "Store embedded provisioning profile lacks required entitlement: $entitlement"
     done
