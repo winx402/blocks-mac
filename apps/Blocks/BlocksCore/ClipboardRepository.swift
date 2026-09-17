@@ -1415,7 +1415,7 @@ public final class ClipboardRepository: @unchecked Sendable {
         deleteSidecars(outcome.sidecars)
     }
 
-    private func deleteRecordsFromDatabase(_ recordIDs: [String]) throws -> [String] {
+    func deleteRecordsFromDatabase(_ recordIDs: [String]) throws -> [String] {
         guard !recordIDs.isEmpty else { return [] }
         let sidecars = try sidecarPaths(recordIDs: recordIDs)
         try enqueueSidecarCleanup(sidecars)

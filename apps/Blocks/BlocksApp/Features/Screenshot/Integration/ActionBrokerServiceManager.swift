@@ -189,7 +189,8 @@ final class ActionBrokerServiceManager: ObservableObject {
         screenshotStore: ScreenshotStore,
         historyService: ScreenshotHistoryActionService,
         translationSourceService: TranslationSourceManagementService,
-        pluginDevelopmentService: PluginDevelopmentService
+        pluginDevelopmentService: PluginDevelopmentService,
+        clipboardStore: ClipboardStore? = nil
     ) {
         service = ActionBrokerServiceControl(
             service: SMAppService.agent(plistName: BlocksActionBrokerXPC.launchAgentPlistName)
@@ -199,7 +200,8 @@ final class ActionBrokerServiceManager: ObservableObject {
             screenshotStore: screenshotStore,
             historyService: historyService,
             translationSourceService: translationSourceService,
-            pluginDevelopmentService: pluginDevelopmentService
+            pluginDevelopmentService: pluginDevelopmentService,
+            clipboardStore: clipboardStore
         )
         retryPolicy = .default
         retryScheduler = Self.liveRetryScheduler

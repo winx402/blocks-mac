@@ -17,6 +17,7 @@ CLI = ROOT / "apps" / "Blocks" / "BlocksCLI" / "main.swift"
 PROJECT = ROOT / "apps" / "Blocks" / "Blocks.xcodeproj"
 
 CORE_SOURCES = [
+    CORE / "BlocksRuntimeIdentity.swift",
     CORE / "ActionEnvelope.swift",
     CORE / "BlocksPluginPlatform.swift",
     CORE / "BlocksNativePluginXPC.swift",
@@ -457,12 +458,14 @@ def run_cli_checks(failures: list[dict[str, str]], executable: Path) -> None:
     ]
     for arguments in broker_cases:
         code, payload = run_cli(executable, arguments)
-        if code != 1 or not terminal_shape(payload):
+        # This fixture builds an unsigned Debug CLI. Its missing production
+        # identity must reject before it can submit to any user's real Broker.
+        if code != 4 or not terminal_shape(payload):
             add_failure(failures, "valid_cli_request_not_terminal", "Valid screenshot request did not return a structured terminal response", CLI)
             continue
         error = payload.get("error", {}) if isinstance(payload, dict) else {}
-        if payload.get("status") != "failed" or error.get("code") != "broker_unavailable":
-            add_failure(failures, "broker_unavailable_contract_wrong", "Pending broker platform must fail explicitly", CLI)
+        if payload.get("status") != "failed" or error.get("code") != "cli_identity_unavailable":
+            add_failure(failures, "unsigned_cli_identity_contract_wrong", "Unsigned CLI must fail identity checks before submission", CLI)
 
     invalid_cases = [
         ["run", "blocks.screenshot.capture", "--dry-run", "--interactive", "--no-editor"],

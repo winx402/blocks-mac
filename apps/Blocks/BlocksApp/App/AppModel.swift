@@ -170,7 +170,8 @@ final class AppModel: ObservableObject {
             historyService: screenshotHistoryActionService,
             translationSourceService:
                 translationSourceManagementService,
-            pluginDevelopmentService: pluginDevelopmentService
+            pluginDevelopmentService: pluginDevelopmentService,
+            clipboardStore: resolvedClipboardStore
         )
         let resolvedShortcutStore = shortcutStore ?? ShortcutStore()
         let resolvedPrivacyStore = privacyStore ?? PrivacyStore()

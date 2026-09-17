@@ -48,6 +48,7 @@ struct AgentCLISettingsPane: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
+                .disabled(true)
             }
 
             SettingsRowDivider()
@@ -63,7 +64,12 @@ struct AgentCLISettingsPane: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
+                .disabled(true)
             }
+
+            SettingsSectionNote(
+                text: L10n.string("settings.clipboardAgentSingleRequestOnly")
+            )
         }
 
         SettingsSection(

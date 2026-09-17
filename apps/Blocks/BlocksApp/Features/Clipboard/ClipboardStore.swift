@@ -404,6 +404,13 @@ private final class ClipboardRepositoryMutationQueue: ClipboardRepositoryMutatio
     }
 }
 
+private final class ClipboardManagementCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false
+    func cancel() { lock.withLock { cancelled = true } }
+    var isCancelled: Bool { lock.withLock { cancelled } }
+}
+
 private enum ClipboardRecordMutationOutcome: Sendable {
     case deleted
     case copied(Date)
@@ -981,6 +988,7 @@ final class ClipboardStore: ObservableObject {
     )
     private let repository: ClipboardRepository?
     private let historyReadPipeline: ClipboardHistoryReadPipeline
+    private let managementMutationQueue: ClipboardRepositoryMutationQueue
     private let historyReadPublicationHooks: ClipboardHistoryReadPublicationHooks
     private let recordActionPipeline: ClipboardRecordActionPipeline
     private let recordMutationPipeline: ClipboardRecordMutationPipeline
@@ -1047,6 +1055,7 @@ final class ClipboardStore: ObservableObject {
         applicationUpdateGate: ApplicationOperationAdmissionGate = ApplicationOperationAdmissionGate(name: "Clipboard")
     ) {
         let repositoryMutationQueue = ClipboardRepositoryMutationQueue()
+        self.managementMutationQueue = repositoryMutationQueue
         let recordActionValidity = ClipboardRecordActionValidity()
         let recordCommitGate = ClipboardRecordCommitGate()
         self.repository = repository
@@ -1204,6 +1213,50 @@ final class ClipboardStore: ObservableObject {
             limit: activeSearchLimit ?? safeLimit
         )
         return true
+    }
+
+    /// CLI management shares the same mutation queue, paste commit gate and
+    /// update admission as capture/cleanup. It never writes the pasteboard or
+    /// dispatches import contents to plugins. Repository execution is off-main.
+    func executeManagement(_ input: ClipboardManagementActionInput) async throws -> ClipboardManagementResult {
+        try Task.checkCancellation()
+        guard let repository else { throw ClipboardManagementError("repository_unavailable") }
+        guard !cleanupMutationInProgress else { throw ClipboardManagementError("cleanup_in_progress") }
+        guard let lease = applicationUpdateGate.begin() else { throw ClipboardManagementError("application_update_preparing") }
+        defer { lease.release() }
+        let cancellation = ClipboardManagementCancellation()
+        return try await withTaskCancellationHandler {
+            guard let permit = await recordCommitGate.acquire() else { throw CancellationError() }
+            do {
+                let result: ClipboardManagementResult = try await withCheckedThrowingContinuation { continuation in
+                    managementMutationQueue.enqueue {
+                        do {
+                            let result = try repository.executeManagement(input, isCancelled: { cancellation.isCancelled })
+                            continuation.resume(returning: result)
+                        } catch {
+                            continuation.resume(throwing: error)
+                        }
+                    }
+                }
+                if input.isMutating && !result.dryRun {
+                    // A physical commit stays successful even if its awaiting
+                    // task was cancelled immediately after COMMIT.
+                    recordActionValidity.invalidate(recordIDs: result.mutatedRecordIDs)
+                    for id in result.mutatedRecordIDs {
+                        invalidateCaches(for: id)
+                        if input.operation == "delete" { removeRecordFromPublishedState(recordID: id) }
+                    }
+                    _ = loadRepositoryState(limit: lastLoadLimit)
+                }
+                await recordCommitGate.release(permit)
+                return result
+            } catch {
+                await recordCommitGate.release(permit)
+                throw error
+            }
+        } onCancel: {
+            cancellation.cancel()
+        }
     }
 
     var canLoadMoreHistory: Bool {

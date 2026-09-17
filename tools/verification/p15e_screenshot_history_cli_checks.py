@@ -18,6 +18,7 @@ PROJECT = ROOT / "apps" / "Blocks" / "Blocks.xcodeproj"
 SERVICE = ROOT / "apps" / "Blocks" / "BlocksApp" / "Features" / "Screenshot" / "Integration" / "ScreenshotHistoryActionService.swift"
 HISTORY_REPOSITORY = CORE / "ClipboardRepository+ScreenshotActions.swift"
 CORE_SOURCES = [
+    CORE / "BlocksRuntimeIdentity.swift",
     CORE / "ActionEnvelope.swift",
     CORE / "BlocksPluginPlatform.swift",
     CORE / "BlocksNativePluginXPC.swift",

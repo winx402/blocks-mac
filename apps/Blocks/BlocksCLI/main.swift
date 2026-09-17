@@ -1011,8 +1011,461 @@ func executeAction<Payload: Codable, Result: Codable>(
     }
 }
 
+// Clipboard management deliberately has a separate command path from the
+// screenshot actions above. In particular, a management dry-run is evaluated
+// by the broker against its database; it is never a CLI-side echo of input.
+private struct ClipboardCLIInvocation {
+    let input: ClipboardManagementActionInput
+    let outputPath: String?
+}
+
+private struct ClipboardCLIOptions {
+    var recordIDs: [String] = []
+    var query: String?
+    var pinboardID: String?
+    var tag: String?
+    var name: String?
+    var filePath: String?
+    var outputPath: String?
+    var limit = 100
+    var offset = 0
+    var all = false
+    var dryRun = false
+    var confirmationToken: String?
+}
+
+private func clipboardOptionValue(
+    _ option: String,
+    _ index: Int,
+    _ args: [String]
+) throws -> String {
+    let value = try optionValue(after: option, at: index, in: args)
+    guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        throw ScreenshotCLIParseError(code: "invalid_arguments", message: "\(option) must not be empty.")
+    }
+    return value
+}
+
+private func parseClipboardOptions(
+    _ args: [String],
+    allowed: Set<String>
+) throws -> ClipboardCLIOptions {
+    var options = ClipboardCLIOptions()
+    var seen = Set<String>()
+    var recordIDs = Set<String>()
+    var index = 0
+
+    while index < args.count {
+        let option = args[index]
+        guard allowed.contains(option) else {
+            throw ScreenshotCLIParseError(message: "Unknown or unsupported clipboard option: \(option)")
+        }
+        switch option {
+        case "--record-id":
+            let value = try clipboardOptionValue(option, index, args)
+            guard recordIDs.insert(value).inserted else {
+                throw ScreenshotCLIParseError(code: "duplicate_record_id", message: "Duplicate record ID.")
+            }
+            guard options.recordIDs.count < ClipboardManagementLimits.maxRecords else {
+                throw ScreenshotCLIParseError(code: "too_many_record_ids", message: "At most 1000 record IDs are allowed.")
+            }
+            options.recordIDs.append(value)
+            index += 2
+        case "--query":
+            try rejectDuplicate(option, seen: &seen)
+            options.query = try clipboardOptionValue(option, index, args)
+            index += 2
+        case "--pinboard-id":
+            try rejectDuplicate(option, seen: &seen)
+            options.pinboardID = try clipboardOptionValue(option, index, args)
+            index += 2
+        case "--tag":
+            try rejectDuplicate(option, seen: &seen)
+            options.tag = try clipboardOptionValue(option, index, args)
+            index += 2
+        case "--name":
+            try rejectDuplicate(option, seen: &seen)
+            options.name = try clipboardOptionValue(option, index, args)
+            index += 2
+        case "--file":
+            try rejectDuplicate(option, seen: &seen)
+            options.filePath = try clipboardOptionValue(option, index, args)
+            index += 2
+        case "--output":
+            try rejectDuplicate(option, seen: &seen)
+            options.outputPath = try clipboardOptionValue(option, index, args)
+            index += 2
+        case "--limit":
+            try rejectDuplicate(option, seen: &seen)
+            let value = try clipboardOptionValue(option, index, args)
+            guard let parsed = Int(value), (1...ClipboardManagementLimits.maxRecords).contains(parsed) else {
+                throw ScreenshotCLIParseError(code: "invalid_limit", message: "--limit must be between 1 and 1000.")
+            }
+            options.limit = parsed
+            index += 2
+        case "--offset":
+            try rejectDuplicate(option, seen: &seen)
+            let value = try clipboardOptionValue(option, index, args)
+            guard let parsed = Int(value), parsed >= 0 else {
+                throw ScreenshotCLIParseError(code: "invalid_offset", message: "--offset must be a non-negative integer.")
+            }
+            options.offset = parsed
+            index += 2
+        case "--confirm":
+            try rejectDuplicate(option, seen: &seen)
+            options.confirmationToken = try clipboardOptionValue(option, index, args)
+            index += 2
+        case "--all":
+            try rejectDuplicate(option, seen: &seen)
+            options.all = true
+            index += 1
+        case "--dry-run":
+            try rejectDuplicate(option, seen: &seen)
+            options.dryRun = true
+            index += 1
+        default:
+            throw ScreenshotCLIParseError(message: "Unknown clipboard option: \(option)")
+        }
+    }
+    return options
+}
+
+private func clipboardImportDocument(at path: String) throws -> ClipboardImportDocument {
+    let descriptor = path.withCString {
+        Darwin.open($0, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+    }
+    guard descriptor >= 0 else {
+        let code = errno == ELOOP ? "import_symlink_rejected" : "import_unavailable"
+        throw ScreenshotCLIParseError(code: code, message: "Unable to read import document safely.")
+    }
+    defer { Darwin.close(descriptor) }
+
+    var metadata = stat()
+    guard fstat(descriptor, &metadata) == 0 else {
+        throw ScreenshotCLIParseError(code: "import_unavailable", message: "Unable to inspect import document.")
+    }
+    guard metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else {
+        throw ScreenshotCLIParseError(code: "import_not_regular_file", message: "Import document must be a regular file.")
+    }
+    guard metadata.st_size >= 0, metadata.st_size <= off_t(ClipboardManagementLimits.maxDocumentBytes) else {
+        throw ScreenshotCLIParseError(code: "document_too_large", message: "Import document exceeds the 32 MiB limit.")
+    }
+
+    var data = Data()
+    var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+    while true {
+        let count = buffer.withUnsafeMutableBytes { bytes in
+            Darwin.read(descriptor, bytes.baseAddress, bytes.count)
+        }
+        if count == 0 { break }
+        if count < 0 {
+            if errno == EINTR { continue }
+            throw ScreenshotCLIParseError(code: "import_unavailable", message: "Unable to read import document safely.")
+        }
+        guard data.count <= ClipboardManagementLimits.maxDocumentBytes - count else {
+            throw ScreenshotCLIParseError(code: "document_too_large", message: "Import document exceeds the 32 MiB limit.")
+        }
+        data.append(contentsOf: buffer.prefix(count))
+    }
+    do {
+        return try ClipboardImportDocument.decode(data)
+    } catch let error as ClipboardManagementError {
+        throw ScreenshotCLIParseError(code: error.code, message: "Import document is invalid.")
+    } catch {
+        throw ScreenshotCLIParseError(code: "invalid_document", message: "Import document is invalid.")
+    }
+}
+
+private func makeClipboardInput(
+    operation: String,
+    options: ClipboardCLIOptions,
+    document: ClipboardImportDocument? = nil,
+    forceDryRun: Bool? = nil
+) -> ClipboardManagementActionInput {
+    ClipboardManagementActionInput(
+        operation: operation,
+        document: document,
+        dryRun: forceDryRun ?? options.dryRun,
+        recordIDs: options.recordIDs,
+        query: options.query,
+        pinboardID: options.pinboardID,
+        tag: options.tag,
+        name: options.name,
+        limit: options.limit,
+        offset: options.offset,
+        all: options.all,
+        confirmationToken: options.confirmationToken
+    )
+}
+
+private func requireRecordIDs(_ options: ClipboardCLIOptions, command: String) throws {
+    guard !options.recordIDs.isEmpty else {
+        throw ScreenshotCLIParseError(message: "\(command) requires at least one --record-id ID.")
+    }
+}
+
+private func requireSelector(_ options: ClipboardCLIOptions, command: String) throws {
+    guard !options.recordIDs.isEmpty || options.pinboardID != nil || options.tag != nil || options.query != nil || options.all else {
+        throw ScreenshotCLIParseError(message: "\(command) requires a selector (--record-id, --pinboard-id, --tag, --query, or --all).")
+    }
+    if options.all, (!options.recordIDs.isEmpty || options.pinboardID != nil || options.tag != nil || options.query != nil) {
+        throw ScreenshotCLIParseError(message: "--all cannot be combined with another selector.")
+    }
+}
+
+private func validateAllIsExclusive(_ options: ClipboardCLIOptions) throws {
+    if options.all, (!options.recordIDs.isEmpty || options.pinboardID != nil || options.tag != nil || options.query != nil) {
+        throw ScreenshotCLIParseError(message: "--all cannot be combined with another selector.")
+    }
+}
+
+private func parseClipboardInvocation(_ args: [String]) throws -> ClipboardCLIInvocation {
+    guard let command = args.first else {
+        throw ScreenshotCLIParseError(message: clipboardUsage)
+    }
+    let tail = Array(args.dropFirst())
+    let selectorFlags: Set<String> = ["--record-id", "--pinboard-id", "--tag", "--query", "--all"]
+    let paginationFlags: Set<String> = ["--limit", "--offset"]
+    let dryRunFlags: Set<String> = ["--dry-run"]
+
+    switch command {
+    case "list":
+        let options = try parseClipboardOptions(tail, allowed: selectorFlags.union(paginationFlags))
+        try validateAllIsExclusive(options)
+        return .init(input: makeClipboardInput(operation: "list", options: options), outputPath: nil)
+    case "search":
+        let options = try parseClipboardOptions(tail, allowed: ["--query", "--limit", "--offset"])
+        guard options.query != nil else {
+            throw ScreenshotCLIParseError(message: "search requires --query QUERY.")
+        }
+        return .init(input: makeClipboardInput(operation: "search", options: options), outputPath: nil)
+    case "show":
+        let options = try parseClipboardOptions(tail, allowed: ["--record-id"])
+        try requireRecordIDs(options, command: "show")
+        return .init(input: makeClipboardInput(operation: "show", options: options), outputPath: nil)
+    case "import":
+        let options = try parseClipboardOptions(tail, allowed: ["--file", "--dry-run"])
+        guard let filePath = options.filePath else {
+            throw ScreenshotCLIParseError(message: "import requires --file PATH.")
+        }
+        return .init(
+            input: makeClipboardInput(operation: "import", options: options, document: try clipboardImportDocument(at: filePath)),
+            outputPath: nil
+        )
+    case "export":
+        let options = try parseClipboardOptions(tail, allowed: selectorFlags.union(dryRunFlags).union(["--output"]))
+        try requireSelector(options, command: "export")
+        try validateAllIsExclusive(options)
+        guard let outputPath = options.outputPath else {
+            throw ScreenshotCLIParseError(message: "export requires --output PATH.")
+        }
+        return .init(input: makeClipboardInput(operation: "export", options: options), outputPath: outputPath)
+    case "pin", "unpin":
+        let options = try parseClipboardOptions(tail, allowed: ["--record-id", "--dry-run"])
+        try requireRecordIDs(options, command: command)
+        return .init(input: makeClipboardInput(operation: command, options: options), outputPath: nil)
+    case "move":
+        let options = try parseClipboardOptions(tail, allowed: ["--record-id", "--pinboard-id", "--dry-run"])
+        try requireRecordIDs(options, command: command)
+        guard options.pinboardID != nil else {
+            throw ScreenshotCLIParseError(message: "move requires --pinboard-id ID.")
+        }
+        return .init(input: makeClipboardInput(operation: "move", options: options), outputPath: nil)
+    case "tag":
+        guard let operation = tail.first, ["add", "remove"].contains(operation) else {
+            throw ScreenshotCLIParseError(message: "Usage: blocks clipboard tag add|remove --record-id ID [--record-id ID ...] --tag TAG [--dry-run]")
+        }
+        let options = try parseClipboardOptions(Array(tail.dropFirst()), allowed: ["--record-id", "--tag", "--dry-run"])
+        try requireRecordIDs(options, command: "tag \(operation)")
+        guard options.tag != nil else {
+            throw ScreenshotCLIParseError(message: "tag \(operation) requires --tag TAG.")
+        }
+        return .init(input: makeClipboardInput(operation: "tag_\(operation)", options: options), outputPath: nil)
+    case "pinboard":
+        guard let operation = tail.first else {
+            throw ScreenshotCLIParseError(message: "Usage: blocks clipboard pinboard list|create|rename ...")
+        }
+        let operationArgs = Array(tail.dropFirst())
+        switch operation {
+        case "list":
+            let options = try parseClipboardOptions(operationArgs, allowed: [])
+            return .init(input: makeClipboardInput(operation: "pinboard_list", options: options), outputPath: nil)
+        case "create":
+            let options = try parseClipboardOptions(operationArgs, allowed: ["--name", "--dry-run"])
+            guard options.name != nil else {
+                throw ScreenshotCLIParseError(message: "pinboard create requires --name NAME.")
+            }
+            return .init(input: makeClipboardInput(operation: "pinboard_create", options: options), outputPath: nil)
+        case "rename":
+            let options = try parseClipboardOptions(operationArgs, allowed: ["--pinboard-id", "--name", "--dry-run"])
+            guard options.pinboardID != nil, options.name != nil else {
+                throw ScreenshotCLIParseError(message: "pinboard rename requires --pinboard-id ID and --name NAME.")
+            }
+            return .init(input: makeClipboardInput(operation: "pinboard_rename", options: options), outputPath: nil)
+        default:
+            throw ScreenshotCLIParseError(message: "Unknown pinboard command: \(operation). Use list, create, or rename.")
+        }
+    case "delete":
+        let options = try parseClipboardOptions(tail, allowed: selectorFlags.union(paginationFlags).union(["--confirm", "--dry-run"]))
+        try requireSelector(options, command: "delete")
+        // Delete is always broker-previewed unless a previously issued token is
+        // supplied. The CLI never manufactures a confirmation token.
+        let preview = options.confirmationToken == nil || options.dryRun
+        return .init(input: makeClipboardInput(operation: "delete", options: options, forceDryRun: preview), outputPath: nil)
+    default:
+        throw ScreenshotCLIParseError(message: "Unknown clipboard command: \(command).\n\(clipboardUsage)")
+    }
+}
+
+private struct ClipboardManagementTerminalOutput: Codable {
+    let protocolVersion: Int
+    let requestID: ActionRequestID
+    let actionID: ActionID
+    let status: ActionBrokerTerminalStatus
+    let result: ClipboardManagementResult?
+    let error: ActionBrokerError?
+
+    init(_ response: ActionBrokerTerminalResponse<ClipboardManagementResult>) {
+        protocolVersion = response.protocolVersion
+        requestID = response.requestID
+        actionID = response.actionID
+        status = response.status
+        var terminalResult = response.result
+        // Export documents are only written to the explicit destination and
+        // never echoed alongside completion metadata. `show` remains a
+        // deliberate, explicitly-record-scoped content read.
+        if terminalResult?.operation == "export" {
+            terminalResult?.document = nil
+        }
+        result = terminalResult
+        error = response.error
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case protocolVersion = "protocol_version"
+        case requestID = "request_id"
+        case actionID = "action_id"
+        case status, result, error
+    }
+}
+
+private func stableClipboardJSON(_ document: ClipboardImportDocument) throws -> Data {
+    try document.encoded()
+}
+
+private func emitClipboardArgumentFailure(
+    requestID: ActionRequestID,
+    error: Error
+) -> Never {
+    let brokerError: ActionBrokerError
+    if let error = error as? ScreenshotCLIParseError {
+        brokerError = .init(category: .invalidRequest, code: error.code, message: error.message, retryable: false)
+    } else if let error = error as? ClipboardManagementError {
+        brokerError = .init(category: .invalidRequest, code: error.code, message: "Invalid clipboard management request.", retryable: false)
+    } else {
+        brokerError = .init(category: .invalidRequest, code: "invalid_arguments", message: "Invalid clipboard management request.", retryable: false)
+    }
+    emitActionFailure(
+        actionID: BlocksAction.clipboardManage.actionID,
+        requestID: requestID,
+        error: brokerError,
+        resultType: ClipboardManagementResult.self,
+        exitCode: 2
+    )
+}
+
+private func runClipboardCLI(args: [String]) -> Never {
+    let requestID = ActionRequestID.make()
+    var destination: PreparedOutputDestination?
+    do {
+        let invocation = try parseClipboardInvocation(args)
+        let request = ActionBrokerRequest(
+            requestID: requestID,
+            actionID: BlocksAction.clipboardManage.actionID,
+            payload: invocation.input
+        )
+        let response = try submitToBroker(
+            request,
+            // Only screenshot exports pass an FD through XPC. Clipboard export
+            // returns a typed document and this process writes it locally.
+            outputFile: nil,
+            timeout: 60,
+            resultType: ClipboardManagementResult.self
+        )
+
+        if response.status == .completed,
+           invocation.input.operation == "export",
+           !invocation.input.dryRun {
+            guard let path = invocation.outputPath,
+                  let document = response.result?.document else {
+                throw ScreenshotCLIParseError(code: "invalid_broker_response", message: "The broker did not return an export document.")
+            }
+            do {
+                destination = try prepareOutputDestination(path: path, allowOverwrite: false)
+                try destination?.file.write(contentsOf: stableClipboardJSON(document))
+                try destination?.finish(success: true)
+                destination = nil
+            } catch let error as ScreenshotCLIParseError {
+                throw error
+            } catch {
+                try? destination?.finish(success: false)
+                throw ScreenshotCLIParseError(
+                    code: "output_write_failed",
+                    message: "Unable to write clipboard export."
+                )
+            }
+        }
+        emit(ClipboardManagementTerminalOutput(response), exitCode: response.status == .completed ? 0 : 1)
+    } catch let error as ScreenshotCLIParseError {
+        try? destination?.finish(success: false)
+        emitClipboardArgumentFailure(requestID: requestID, error: error)
+    } catch let error as BlocksCLITransportError {
+        try? destination?.finish(success: false)
+        emitActionFailure(
+            actionID: BlocksAction.clipboardManage.actionID,
+            requestID: requestID,
+            error: error.brokerError,
+            resultType: ClipboardManagementResult.self,
+            exitCode: error.exitCode
+        )
+    } catch {
+        try? destination?.finish(success: false)
+        emitActionFailure(
+            actionID: BlocksAction.clipboardManage.actionID,
+            requestID: requestID,
+            error: ActionBrokerError(
+                category: .availability,
+                code: "broker_unavailable",
+                message: "BlocksActionBroker is unavailable. Enable CLI integration in Blocks settings.",
+                retryable: false,
+                details: ["explicit_enable_required": .bool(true)]
+            ),
+            resultType: ClipboardManagementResult.self,
+            exitCode: 1
+        )
+    }
+}
+
+private let clipboardUsage = """
+clipboard management:
+  blocks clipboard list [--pinboard-id ID] [--tag TAG] [--query QUERY] [--all] [--limit 1...1000] [--offset N]
+  blocks clipboard search --query QUERY [--limit 1...1000] [--offset N]
+  blocks clipboard show --record-id ID [--record-id ID ...]
+  blocks clipboard import --file PATH [--dry-run]
+  blocks clipboard export (--record-id ID [--record-id ID ...] | --pinboard-id ID | --tag TAG | --query QUERY | --all) --output PATH [--dry-run]
+  blocks clipboard pin|unpin --record-id ID [--record-id ID ...] [--dry-run]
+  blocks clipboard move --record-id ID [--record-id ID ...] --pinboard-id ID [--dry-run]
+  blocks clipboard tag add|remove --record-id ID [--record-id ID ...] --tag TAG [--dry-run]
+  blocks clipboard pinboard list
+  blocks clipboard pinboard create --name NAME [--dry-run]
+  blocks clipboard pinboard rename --pinboard-id ID --name NAME [--dry-run]
+  blocks clipboard delete (--record-id ID [--record-id ID ...] | --pinboard-id ID | --tag TAG | --query QUERY | --all) [--confirm TOKEN] [--dry-run]
+
+The same operations are available through: blocks run blocks.clipboard.manage OP ...
+"""
+
 private let usage = """
-blocks list | blocks run ACTION [options] | blocks privacy subjects|policy|action ... | blocks plugin COMMAND ... | blocks translation-source COMMAND ...
+blocks list | blocks run ACTION [options] | blocks clipboard COMMAND ... | blocks privacy subjects|policy|action ... | blocks plugin COMMAND ... | blocks translation-source COMMAND ...
 capture: blocks run blocks.screenshot.capture [--dry-run] (--interactive [--kind smart] | --no-editor --kind region|window|display) [--display-scope current|all|DISPLAY_ID] [--copy] [--output PATH] [--format png|jpeg] [--watermark default|none|PRESET_UUID]
 history: blocks run blocks.screenshot.history.query [--cursor CURSOR] [--limit 1...100] [--include-ocr] [--dry-run]
 search: blocks run blocks.screenshot.history.search --query QUERY [--cursor CURSOR] [--limit 1...100] [--include-ocr] [--dry-run]
@@ -1020,6 +1473,7 @@ ocr: blocks run blocks.screenshot.ocr.status --record-id ID [--record-id ID ...]
 export: blocks run blocks.screenshot.history.export --record-id ID --output PATH [--format png|jpeg] [--overwrite] [--dry-run]
 scrolling: blocks run blocks.screenshot.scrolling.status [--dry-run] | blocks run blocks.screenshot.scrolling.finish --session-id ID [--dry-run] | blocks run blocks.screenshot.scrolling.cancel --session-id ID --confirm [--dry-run]
 translation sources: blocks translation-source --help
+clipboard: blocks clipboard --help
 feedback: blocks feedback --help
 """
 
@@ -1049,6 +1503,18 @@ case "feedback":
 
 case "list":
     emit(ActionListOutput(actions: ActionRegistry.actions))
+
+case "clipboard":
+    let clipboardArguments = Array(args.dropFirst())
+    if clipboardArguments.isEmpty
+        || clipboardArguments == ["--help"]
+        || clipboardArguments == ["help"] {
+        emit(HelpOutput(
+            usage: clipboardUsage,
+            actions: [BlocksAction.clipboardManage.rawValue]
+        ))
+    }
+    runClipboardCLI(args: clipboardArguments)
 
 case "privacy":
     let (envelope, exitCode) = PrivacyCLIService.run(args: Array(args.dropFirst()))
@@ -1285,6 +1751,8 @@ case "run":
             resultType: PluginDevelopmentActionResult.self,
             exitCode: 2
         )
+    case .clipboardManage:
+        runClipboardCLI(args: actionArguments)
     }
 
 default:

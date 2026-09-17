@@ -78,6 +78,7 @@ public enum BlocksAction: String, CaseIterable, Codable, Sendable {
     case screenshotScrollingCancel = "blocks.screenshot.scrolling.cancel"
     case translationSourceManage = "blocks.translation.sources.manage"
     case pluginManage = "blocks.plugin.manage"
+    case clipboardManage = "blocks.clipboard.manage"
 
     public var actionID: ActionID {
         ActionID(rawValue: rawValue)!
@@ -192,6 +193,13 @@ public enum ActionRegistry {
             requestType: "PluginDevelopmentActionInput",
             resultType: "PluginDevelopmentActionResult",
             risk: "sensitive_local_plugin_management"
+        ),
+        ActionDescriptor(
+            actionID: BlocksAction.clipboardManage.actionID,
+            protocolVersion: ActionBrokerRequest<JSONValue>.currentProtocolVersion,
+            requestType: "ClipboardManagementActionInput",
+            resultType: "ClipboardManagementResult",
+            risk: "sensitive_local_clipboard_management"
         )
     ]
 

@@ -150,6 +150,8 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
     private let translationSourceService:
         TranslationSourceManagementService
     private let pluginDevelopmentService: PluginDevelopmentService
+    private let clipboardStore: ClipboardStore?
+    private let clipboardManagementAccess = ClipboardManagementAccessController()
     private let listener = NSXPCListener.anonymous()
     private lazy var exportedService = ScreenshotActionHostService(
         executeHandler: { [weak self] data, file in
@@ -255,12 +257,14 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
         historyService: ScreenshotHistoryActionService,
         translationSourceService: TranslationSourceManagementService,
         pluginDevelopmentService: PluginDevelopmentService,
+        clipboardStore: ClipboardStore? = nil,
         connectionLifecycle: ActionBrokerHostConnectionLifecycle = .init()
     ) {
         self.screenshotStore = screenshotStore
         self.historyService = historyService
         self.translationSourceService = translationSourceService
         self.pluginDevelopmentService = pluginDevelopmentService
+        self.clipboardStore = clipboardStore
         self.connectionLifecycle = connectionLifecycle
         super.init()
         listener.delegate = self
@@ -457,6 +461,16 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
                     await screenshotStore.cancelScrollingAction(input)
                 }
             )
+        case BlocksAction.clipboardManage.actionID:
+            return await executeTyped(
+                data, action: .clipboardManage,
+                handler: { [clipboardStore, clipboardManagementAccess] (input: ClipboardManagementActionInput, _: ActionRequestID) in
+                    guard let clipboardStore else { throw ClipboardManagementError("repository_unavailable") }
+                    return try await clipboardManagementAccess.execute(input) {
+                        try await clipboardStore.executeManagement($0)
+                    }
+                }
+            )
         case BlocksAction.translationSourceManage.actionID:
             return await executeTyped(
                 data,
@@ -574,7 +588,7 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
 
     @MainActor private func executeTyped<
         Input: Codable & Sendable,
-        Result: Codable
+        Result: Codable & Sendable
     >(
         _ data: Data,
         action: BlocksAction,
@@ -621,10 +635,40 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
                 request.payload,
                 request.requestID
             )
-            return Self.encode(.completed(
+            let terminal = ActionBrokerTerminalResponse.completed(
                 requestID: request.requestID,
                 actionID: request.actionID,
                 result: result
+            )
+            // Large migration documents must not be serialized on the UI
+            // thread. Host update admission is held until this reply completes.
+            if action == .clipboardManage,
+               let input = request.payload as? ClipboardManagementActionInput,
+               var managementResult = result as? ClipboardManagementResult {
+                while true {
+                    let allowed = (UserDefaults.standard.object(forKey: "clipboard.agent.summaryAccess") as? Bool) ?? true
+                    managementResult = try ClipboardManagementAccessController.prepareForDelivery(
+                        managementResult, input: input, summaryAllowed: allowed)
+                    let response = ActionBrokerTerminalResponse.completed(
+                        requestID: request.requestID, actionID: request.actionID, result: managementResult)
+                    let encoded = await Task.detached(priority: .utility) { Self.encode(response) }.value
+                    let currentAllowed = (UserDefaults.standard.object(forKey: "clipboard.agent.summaryAccess") as? Bool) ?? true
+                    managementResult = try ClipboardManagementAccessController.prepareForDelivery(
+                        managementResult, input: input, summaryAllowed: currentAllowed)
+                    // No await between this final check and handing the bytes
+                    // to the host service. A revoked summary is re-encoded.
+                    if allowed && !currentAllowed { continue }
+                    return encoded
+                }
+            }
+            return Self.encode(terminal)
+        } catch let error as ClipboardManagementError {
+            return Self.encode(ActionBrokerTerminalResponse<Result>.failed(
+                requestID: request.requestID, actionID: action.actionID,
+                error: ActionBrokerError(category: .invalidRequest, code: error.code,
+                                         message: error.code == "full_content_requires_visible_window"
+                                            ? "Open a Blocks window, then retry and confirm the requested clipboard scope."
+                                            : error.localizedDescription, retryable: false)
             ))
         } catch let error as ScreenshotHistoryActionServiceError {
             return Self.encode(ActionBrokerTerminalResponse<Result>.failed(
@@ -721,7 +765,7 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
         ))
     }
 
-    private static func encode<Result: Codable>(_ response: ActionBrokerTerminalResponse<Result>) -> Data {
+    nonisolated private static func encode<Result: Codable>(_ response: ActionBrokerTerminalResponse<Result>) -> Data {
         (try? JSONEncoder().encode(response)) ?? Data()
     }
 
@@ -765,6 +809,16 @@ final class ScreenshotActionHostService: NSObject, BlocksActionHostXPCProtocol {
         outputFile: FileHandle?,
         withReply reply: @escaping (Data) -> Void
     ) {
+        // Bound parsing before even decoding the header. All binary import
+        // data is inline; no caller-controlled path reaches the sandboxed App.
+        guard requestData.count <= ClipboardManagementLimits.maxDocumentBytes + 4 * 1024 * 1024 else {
+            reply((try? JSONEncoder().encode(ActionBrokerTerminalResponse<JSONValue>.failed(
+                requestID: .make(), actionID: ActionID(rawValue: "unknown")!,
+                error: ActionBrokerError(category: .invalidRequest, code: "request_too_large",
+                                         message: "The action request exceeds the size limit.", retryable: false)
+            ))) ?? Data())
+            return
+        }
         let requestHeader = try? JSONDecoder().decode(
             ActionBrokerRequestHeader.self,
             from: requestData
