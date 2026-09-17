@@ -1,8 +1,12 @@
 # 积木工具阶段性公开发布
 
-状态：mutable-worktree-evidence-current / immutable-release-candidate-blocked / external-distribution-blocked
-最后更新：2026-09-06
+状态：0.1.0-beta.1 已公开发布；0.1.0-beta.2 待本轮验证与公证
+最后更新：2026-09-17
 负责人：项目负责人
+
+## 当前工作（2026-09-17）
+
+Beta 1 已完成 Developer ID 签名、公证和 GitHub Release 发布。本轮修复新报的权限、钥匙串、助手恢复、剪贴板屏幕选择与翻译输入问题，证据见 [Issues #34–#42](Issues-34-42权限与交互-2026-09-17.md)。下方 9 月 6 日及更早内容为当时的历史快照，不表示当前发行仍被阻塞。
 
 ## 当前工作（2026-09-06）
 

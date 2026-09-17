@@ -208,6 +208,7 @@ struct TranslationFloatingPanelView: View {
     @StateObject private var speechController = TranslationSpeechController()
     @State private var collapsedServiceIDs: Set<String> = []
     @State private var sourceEditorFocused = false
+    @State private var sourceEditorHasDisplayedText = false
 
     private var targetLanguageSections: TranslationLanguageMenuSections {
         TranslationLanguagePreferences.menuSections(
@@ -495,10 +496,15 @@ struct TranslationFloatingPanelView: View {
                         .layoutPriority(-1)
                 }
             }
+            // Compact feedback and OCR actions stay in the trailing lane. The
+            // text-line frame anchors their larger hit targets upward, so they
+            // remain an overlay rather than increasing the source section or
+            // touching the editor below.
             .frame(
                 height:
                     TranslationPanelSourceLayout
-                        .sourceHeaderHeight(for: model.inputSource)
+                        .sourceHeaderHeight(for: model.inputSource),
+                alignment: .bottom
             )
 
             ZStack(alignment: .topLeading) {
@@ -510,6 +516,9 @@ struct TranslationFloatingPanelView: View {
                     },
                     onFocusChange: {
                         sourceEditorFocused = $0
+                    },
+                    onDisplayedTextChange: {
+                        sourceEditorHasDisplayedText = $0
                     }
                 )
                     .frame(height: editorHeight)
@@ -520,7 +529,8 @@ struct TranslationFloatingPanelView: View {
                         "translation.panel.sourceEditor"
                     )
 
-                if model.sourceText.isEmpty {
+                if model.sourceText.isEmpty,
+                   !sourceEditorHasDisplayedText {
                     Text(L10n.string("translation.panel.emptyInput"))
                         .font(.body)
                         .foregroundStyle(.tertiary)

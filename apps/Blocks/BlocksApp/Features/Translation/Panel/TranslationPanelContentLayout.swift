@@ -3,11 +3,9 @@ import BlocksCore
 import SwiftUI
 
 enum TranslationPanelSourceLayout {
-    /// Every source header reserves the compact-control hit target. Selection
-    /// and operation feedback is rendered in this same row between the source
-    /// label and editor, so arriving feedback never moves the editor or the
-    /// language controls. The row itself is horizontally scrollable when a
-    /// localized detail is long; it deliberately does not grow vertically.
+    /// The source label owns the header's vertical geometry. Feedback and OCR
+    /// controls are overlaid in its trailing lane, so their compact hit targets
+    /// do not add empty space above the editor or move fixed controls below it.
     static var sourceTextHeaderHeight: CGFloat {
         NSLayoutManager().defaultLineHeight(
             for: NSFont.preferredFont(forTextStyle: .subheadline)
@@ -17,12 +15,12 @@ enum TranslationPanelSourceLayout {
     static func sourceHeaderHeight(
         for source: TranslationInputSource
     ) -> CGFloat {
-        TranslationPanelMetrics.compactIconHitTarget
+        sourceTextHeaderHeight
     }
     static let sourceEditorMinimumHeight: CGFloat = 48
     static let sourceEditorDefaultHeight: CGFloat = 72
     static let screenshotEditorDefaultHeight: CGFloat = 96
-    static let sourceEditorSpacing: CGFloat = 8
+    static let sourceEditorSpacing = BlocksVisualTokens.Spacing.xs
     static let languageBarHeight: CGFloat = 44
 
     static func expandedEditorHeight(

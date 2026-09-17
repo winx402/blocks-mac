@@ -408,7 +408,10 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
         recentCloseGuard.clear()
         startApplicationObservationIfNeeded()
 
-        let initialFrame = frame(for: position)
+        let targetScreen = FloatingPanelTargetScreenResolver.screen(
+            for: invocationContext.targetContext
+        )
+        let initialFrame = frame(for: position, screen: targetScreen)
         let contentView = ClipboardFloatingPanelView(
             position: position,
             actions: actions,
@@ -472,8 +475,8 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
             position: position
         )
         focusCoordinator.registerParentWindow(panel)
-        panel.minSize = minSize(for: position)
-        panel.maxSize = maxSize(for: position)
+        panel.minSize = minSize(for: position, screen: targetScreen)
+        panel.maxSize = maxSize(for: position, screen: targetScreen)
         panel.setFrame(initialFrame, display: false)
         anchorPanel(panel)
         dismissMonitor.stop()
@@ -758,8 +761,11 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
         return panel
     }
 
-    private func frame(for position: FloatingPanelPosition) -> CGRect {
-        FloatingPanelFrameStore.clipboardFrame(position: position)
+    private func frame(
+        for position: FloatingPanelPosition,
+        screen: NSScreen?
+    ) -> CGRect {
+        FloatingPanelFrameStore.clipboardFrame(position: position, screen: screen)
     }
 
     private func anchorPanel(_ panel: NSPanel, preservingBottomHeight height: CGFloat? = nil) {
@@ -842,23 +848,37 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
             return
         }
         applySideBorderResize(proposedWidth: panel.frame.width, panel: panel)
-        FloatingPanelFrameStore.saveClipboardSideWidth(frame: panel.frame, position: currentPosition)
+        FloatingPanelFrameStore.saveClipboardSideWidth(
+            frame: panel.frame,
+            position: currentPosition,
+            screen: FloatingPanelScreenResolver.screen(for: panel)
+        )
     }
 
-    private func minSize(for position: FloatingPanelPosition) -> CGSize {
+    private func minSize(
+        for position: FloatingPanelPosition,
+        screen: NSScreen?
+    ) -> CGSize {
         switch position {
         case .bottom:
             return FloatingPanelFrameStore.clipboardResizeSize(
                 proposedSize: .zero,
-                position: position
+                position: position,
+                screen: screen
             )
         case .left, .right:
-            let frame = FloatingPanelFrameStore.clipboardFrame(position: position)
+            let frame = FloatingPanelFrameStore.clipboardFrame(
+                position: position,
+                screen: screen
+            )
             return CGSize(width: FloatingPanelFrameStore.clipboardSideMinWidth, height: frame.height)
         }
     }
 
-    private func maxSize(for position: FloatingPanelPosition) -> CGSize {
+    private func maxSize(
+        for position: FloatingPanelPosition,
+        screen: NSScreen?
+    ) -> CGSize {
         switch position {
         case .bottom:
             return FloatingPanelFrameStore.clipboardResizeSize(
@@ -866,7 +886,8 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
                     width: CGFloat.greatestFiniteMagnitude,
                     height: CGFloat.greatestFiniteMagnitude
                 ),
-                position: position
+                position: position,
+                screen: screen
             )
         case .left, .right:
             return FloatingPanelFrameStore.clipboardResizeSize(
@@ -874,7 +895,8 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
                     width: CGFloat.greatestFiniteMagnitude,
                     height: CGFloat.greatestFiniteMagnitude
                 ),
-                position: position
+                position: position,
+                screen: screen
             )
         }
     }
@@ -1015,7 +1037,11 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
                 childWindow.orderOut(nil)
             }
             FloatingPanelFrameStore.saveClipboard(frame: panel.frame, position: currentPosition)
-            FloatingPanelFrameStore.saveClipboardSideWidth(frame: panel.frame, position: currentPosition)
+            FloatingPanelFrameStore.saveClipboardSideWidth(
+                frame: panel.frame,
+                position: currentPosition,
+                screen: FloatingPanelScreenResolver.screen(for: panel)
+            )
         }
         if let clipboardPanel = panel as? ClipboardHistoryPanel {
             clipboardPanel.keyboardRouter = nil

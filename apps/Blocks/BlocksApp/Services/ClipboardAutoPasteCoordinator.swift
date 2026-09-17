@@ -1209,7 +1209,8 @@ final class ClipboardAutoPasteCoordinator {
 
     private static func systemEventPostingAccess(prompt: Bool) -> Bool {
         if CGPreflightPostEventAccess() { return true }
-        guard prompt else { return false }
+        guard prompt,
+              PermissionSystemPromptGate.processLifetimeShared.claimSystemPrompt(for: .accessibility) else { return false }
         return CGRequestPostEventAccess()
     }
 

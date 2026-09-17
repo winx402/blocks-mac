@@ -1,3 +1,4 @@
+import ApplicationServices
 import AppKit
 import Carbon.HIToolbox
 import QuartzCore
@@ -794,6 +795,176 @@ enum FloatingPanelScreenResolver {
     }
 }
 
+/// Resolves the display for a new clipboard panel from the captured
+/// window-server route. This deliberately does not inspect AX content: the
+/// route's window ID is the same identity later used to preserve paste focus.
+@MainActor
+enum FloatingPanelTargetScreenResolver {
+    static func screen(
+        for targetContext: ClipboardPasteTargetContext?,
+        screens: [NSScreen] = NSScreen.screens,
+        mainScreen: NSScreen? = NSScreen.main,
+        pointerLocation: CGPoint = NSEvent.mouseLocation,
+        windowInfo: [[String: Any]]? = nil
+    ) -> NSScreen? {
+        let screenMappings = coordinateSpaces(for: screens)
+        let coordinateSpaces = screenMappings.map(\.coordinateSpace)
+        let targetWindowFrame = targetContext.flatMap { targetContext in
+            quartzWindowFrame(for: targetContext, windowInfo: windowInfo)
+        }
+        let pointerScreenIndex = screenMappings.firstIndex { mapping in
+            mapping.screen.frame.contains(pointerLocation)
+        }
+        let mainScreenIndex = mainScreen.flatMap { mainScreen in
+            let identifier = FloatingPanelScreenResolver.displayIdentifier(for: mainScreen)
+            return screenMappings.firstIndex {
+                FloatingPanelScreenResolver.displayIdentifier(for: $0.screen) == identifier
+            }
+        }
+        guard let mappingIndex = FloatingPanelTargetScreenGeometry.resolvedScreenIndex(
+            forQuartzWindow: targetWindowFrame,
+            coordinateSpaces: coordinateSpaces,
+            pointerScreenIndex: pointerScreenIndex,
+            mainScreenIndex: mainScreenIndex
+        ), screenMappings.indices.contains(mappingIndex) else {
+            return nil
+        }
+        return screenMappings[mappingIndex].screen
+    }
+
+    private static func coordinateSpaces(
+        for screens: [NSScreen]
+    ) -> [(screen: NSScreen, coordinateSpace: FloatingPanelTargetScreenGeometry.CoordinateSpace)] {
+        screens.compactMap { screen in
+            guard let number = screen.deviceDescription[
+                NSDeviceDescriptionKey("NSScreenNumber")
+            ] as? NSNumber else {
+                return nil
+            }
+            return (
+                screen: screen,
+                coordinateSpace: FloatingPanelTargetScreenGeometry.CoordinateSpace(
+                    quartzFrame: CGDisplayBounds(CGDirectDisplayID(number.uint32Value)),
+                    appKitFrame: screen.frame
+                )
+            )
+        }
+    }
+
+    private static func quartzWindowFrame(
+        for targetContext: ClipboardPasteTargetContext,
+        windowInfo: [[String: Any]]?
+    ) -> CGRect? {
+        guard let windowID = targetContext.windowID,
+              windowID != 0 else {
+            return nil
+        }
+        let windows = windowInfo ?? (CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] ?? [])
+        guard let window = windows.first(where: { window in
+            (window[kCGWindowNumber as String] as? NSNumber)?.uint32Value == windowID
+                && (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value
+                    == targetContext.target.processIdentifier
+        }), let bounds = window[kCGWindowBounds as String] as? [String: Any] else {
+            return nil
+        }
+        guard let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary) else {
+            return nil
+        }
+        return FloatingPanelTargetScreenGeometry.isUsable(frame) ? frame : nil
+    }
+}
+
+/// Pure coordinate conversion and display-selection model for clipboard panel
+/// placement. Quartz window bounds use a top-left origin; AppKit screen frames
+/// use a bottom-left origin. Conversion is per display so mixed backing scales
+/// and negative/stacked display origins remain well-defined.
+enum FloatingPanelTargetScreenGeometry {
+    struct CoordinateSpace: Equatable {
+        let quartzFrame: CGRect
+        let appKitFrame: CGRect
+    }
+
+    static func appKitFrame(
+        forQuartzFrame frame: CGRect,
+        in coordinateSpace: CoordinateSpace
+    ) -> CGRect? {
+        guard isUsable(frame),
+              isUsable(coordinateSpace.quartzFrame),
+              isUsable(coordinateSpace.appKitFrame) else {
+            return nil
+        }
+        let scaleX = coordinateSpace.appKitFrame.width / coordinateSpace.quartzFrame.width
+        let scaleY = coordinateSpace.appKitFrame.height / coordinateSpace.quartzFrame.height
+        guard scaleX.isFinite, scaleY.isFinite, scaleX > 0, scaleY > 0 else {
+            return nil
+        }
+        return CGRect(
+            x: coordinateSpace.appKitFrame.minX
+                + (frame.minX - coordinateSpace.quartzFrame.minX) * scaleX,
+            y: coordinateSpace.appKitFrame.maxY
+                - (frame.maxY - coordinateSpace.quartzFrame.minY) * scaleY,
+            width: frame.width * scaleX,
+            height: frame.height * scaleY
+        )
+    }
+
+    static func screenIndex(
+        containingMostOfQuartzWindow frame: CGRect,
+        coordinateSpaces: [CoordinateSpace]
+    ) -> Int? {
+        guard isUsable(frame) else { return nil }
+        var best: (index: Int, area: CGFloat)?
+        for (index, coordinateSpace) in coordinateSpaces.enumerated() {
+            guard isUsable(coordinateSpace.quartzFrame),
+                  let convertedIntersection = appKitFrame(
+                    forQuartzFrame: frame.intersection(coordinateSpace.quartzFrame),
+                    in: coordinateSpace
+                  ), convertedIntersection.width > 0,
+                  convertedIntersection.height > 0 else {
+                continue
+            }
+            let area = convertedIntersection.width * convertedIntersection.height
+            if best == nil || area > best!.area {
+                best = (index, area)
+            }
+        }
+        return best?.index
+    }
+
+    static func resolvedScreenIndex(
+        forQuartzWindow frame: CGRect?,
+        coordinateSpaces: [CoordinateSpace],
+        pointerScreenIndex: Int?,
+        mainScreenIndex: Int?
+    ) -> Int? {
+        if let frame,
+           let targetScreenIndex = screenIndex(
+            containingMostOfQuartzWindow: frame,
+            coordinateSpaces: coordinateSpaces
+           ) {
+            return targetScreenIndex
+        }
+        if let pointerScreenIndex,
+           coordinateSpaces.indices.contains(pointerScreenIndex) {
+            return pointerScreenIndex
+        }
+        if let mainScreenIndex,
+           coordinateSpaces.indices.contains(mainScreenIndex) {
+            return mainScreenIndex
+        }
+        return coordinateSpaces.indices.first
+    }
+
+    static func isUsable(_ frame: CGRect) -> Bool {
+        frame.minX.isFinite && frame.minY.isFinite
+            && frame.width.isFinite && frame.height.isFinite
+            && frame.width > 0 && frame.height > 0
+    }
+}
+
 enum FloatingPanelFrameStore {
     private static let margin: CGFloat = 22
     private static let clipboardSideDefaultWidth: CGFloat = 390
@@ -995,11 +1166,15 @@ enum FloatingPanelFrameStore {
         UserDefaults.standard.set(frame.height, forKey: clipboardBottomHeightKey)
     }
 
-    static func saveClipboardSideWidth(frame: CGRect, position: FloatingPanelPosition) {
+    static func saveClipboardSideWidth(
+        frame: CGRect,
+        position: FloatingPanelPosition,
+        screen: NSScreen? = NSScreen.main
+    ) {
         guard position != .bottom else {
             return
         }
-        let visibleFrame = visibleFrame(screen: NSScreen.main)
+        let visibleFrame = visibleFrame(screen: screen)
         UserDefaults.standard.set(clipboardSideWidth(proposedWidth: frame.width, visibleFrame: visibleFrame), forKey: clipboardSideWidthKey)
     }
 

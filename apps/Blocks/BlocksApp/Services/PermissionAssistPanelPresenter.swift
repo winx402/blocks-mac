@@ -3,7 +3,7 @@ import AppKit
 import BlocksCore
 import SwiftUI
 
-enum PermissionAssistKind: Equatable {
+enum PermissionAssistKind: Hashable {
     case screenRecording
     case accessibility
     case inputMonitoring

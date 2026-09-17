@@ -4,21 +4,17 @@ import XCTest
 @testable import BlocksCore
 
 final class CompactSourceHeaderTests: XCTestCase {
-    func testSourceHeadersReserveStableInlineFeedbackHeight() {
+    func testSourceHeadersUseTextHeightWhileControlsOverlay() {
         let expected = NSLayoutManager().defaultLineHeight(
             for: NSFont.preferredFont(forTextStyle: .subheadline)
         )
 
-        for source in [
-            TranslationInputSource.manual,
-            .selection,
-            .clipboardRecord,
-        ] {
+        for source in TranslationInputSource.allCases {
             XCTAssertEqual(
                 TranslationPanelSourceLayout.sourceHeaderHeight(
                     for: source
                 ),
-                TranslationPanelMetrics.compactIconHitTarget
+                expected
             )
         }
         XCTAssertLessThan(
@@ -29,7 +25,7 @@ final class CompactSourceHeaderTests: XCTestCase {
 
     func testSourceSectionGeometryKeepsCompactActionHeightAcrossSources() {
         let textHeaderHeight =
-            TranslationPanelMetrics.compactIconHitTarget
+            TranslationPanelSourceLayout.sourceTextHeaderHeight
         let sourceEditorHeight =
             TranslationPanelSourceLayout.expandedEditorHeight(for: .manual)
 
@@ -46,7 +42,11 @@ final class CompactSourceHeaderTests: XCTestCase {
             TranslationPanelSourceLayout.sourceHeaderHeight(
                 for: .screenshotOCR
             ),
-            TranslationPanelMetrics.compactIconHitTarget
+            textHeaderHeight
+        )
+        XCTAssertEqual(
+            TranslationPanelSourceLayout.sourceEditorSpacing,
+            BlocksVisualTokens.Spacing.xs
         )
     }
 }

@@ -20,6 +20,7 @@ enum SelectionAgentServiceFailure: Error, Equatable {
     case invalidResponse
     case disconnectNotConfirmed
     case bootstrapUnavailable
+    case keychainUnavailable
 }
 
 struct SelectionHelperBundleIdentity: Equatable, Sendable {
@@ -344,6 +345,7 @@ struct SelectionHelperApplicationLocator {
 
 protocol SelectionHelperSharedKeyStoring: AnyObject {
     func load() -> Data?
+    func loadForAssociation() -> Result<Data?, SelectionAgentServiceFailure>
     func save(_ data: Data) throws
     func delete()
     func permitsLocalAssociation() -> Bool
@@ -351,6 +353,7 @@ protocol SelectionHelperSharedKeyStoring: AnyObject {
 }
 
 extension SelectionHelperSharedKeyStoring {
+    func loadForAssociation() -> Result<Data?, SelectionAgentServiceFailure> { .success(load()) }
     func permitsLocalAssociation() -> Bool { false }
     func saveLocalAssociationIfAbsent(_ data: Data) -> Bool { false }
 }
@@ -416,14 +419,14 @@ final class SelectionHelperSharedKeyStore:
         itemCopyMatching: @escaping (
             CFDictionary,
             UnsafeMutablePointer<CFTypeRef?>?
-        ) -> OSStatus = SecItemCopyMatching,
+        ) -> OSStatus = BlocksKeychainAccess.helperCopyMatching,
         itemUpdate: @escaping (CFDictionary, CFDictionary) -> OSStatus =
-            SecItemUpdate,
+            BlocksKeychainAccess.helperUpdate,
         itemAdd: @escaping (
             CFDictionary,
             UnsafeMutablePointer<CFTypeRef?>?
-        ) -> OSStatus = SecItemAdd,
-        itemDelete: @escaping (CFDictionary) -> OSStatus = SecItemDelete
+        ) -> OSStatus = BlocksKeychainAccess.helperAdd,
+        itemDelete: @escaping (CFDictionary) -> OSStatus = BlocksKeychainAccess.helperDelete
     ) {
         self.service = service
         self.account = account
@@ -435,27 +438,34 @@ final class SelectionHelperSharedKeyStore:
     }
 
     func load() -> Data? {
+        try? loadForAssociation().get()
+    }
+
+    func loadForAssociation() -> Result<Data?, SelectionAgentServiceFailure> {
         var result: CFTypeRef?
         guard var query = keychainQuery(
             service: service,
             account: account
         ) else {
-            return nil
+            return .failure(.keychainUnavailable)
         }
         query.merge([
             kSecReturnData as String: true,
             kSecMatchLimit as String:
                 kSecMatchLimitOne,
         ]) { _, new in new }
-        guard itemCopyMatching(
+        let status = itemCopyMatching(
             query as CFDictionary,
             &result
-        ) == errSecSuccess,
+        )
+        if status == errSecItemNotFound { return .success(nil) }
+        guard status == errSecSuccess,
               let data = result as? Data,
               data.count == 32 else {
-            return nil
+            Self.localAssociationLogger.notice("stage=app-keychain-read status=\(status, privacy: .public)")
+            return .failure(.keychainUnavailable)
         }
-        return data
+        return .success(data)
     }
 
     func save(_ data: Data) throws {
@@ -588,7 +598,7 @@ final class SelectionHelperBootstrapKeyStore:
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]) { _, new in new }
-        guard SecItemCopyMatching(
+        guard BlocksKeychainAccess.helperCopyMatching(
             query as CFDictionary,
             &result
         ) == errSecSuccess,
@@ -609,7 +619,7 @@ final class SelectionHelperBootstrapKeyStore:
                     return errSecAuthFailed
                 }
                 item[kSecValueData as String] = key
-                return SecItemAdd(item as CFDictionary, nil)
+                return BlocksKeychainAccess.helperAdd(item as CFDictionary, nil)
             }
         )
     }
@@ -879,6 +889,8 @@ final class SelectionHelperClient: @unchecked Sendable {
         applicationLocator.isInstalled
     }
 
+    var isRunning: Bool { applicationLocator.isRunning }
+
     var trustedApplicationURL: URL? {
         guard !hasInstallationConflict else { return nil }
         return applicationLocator.resolvedApplicationURL
@@ -911,8 +923,10 @@ final class SelectionHelperClient: @unchecked Sendable {
         defer { Self.pairingMutationLock.unlock() }
         guard let lease = applicationUpdateGate.begin() else { return .failure(.connectionFailed) }
         defer { lease.release() }
-        guard keyStore.load() != nil else {
-            return .success(())
+        switch keyStore.loadForAssociation() {
+        case .failure(let failure): return .failure(failure)
+        case .success(nil): return .success(())
+        case .success(.some): break
         }
         switch booleanCommand(.disconnect, timeout: timeout) {
         case .success(true):
@@ -1037,7 +1051,11 @@ final class SelectionHelperClient: @unchecked Sendable {
     ) -> Result<SelectionHelperHealth, SelectionAgentServiceFailure> {
         Self.pairingMutationLock.lock()
         defer { Self.pairingMutationLock.unlock() }
-        if keyStore.load() != nil { return health(timeout: timeout) }
+        switch keyStore.loadForAssociation() {
+        case .failure(let failure): return .failure(failure)
+        case .success(.some): return health(timeout: timeout)
+        case .success(nil): break
+        }
         #if BLOCKS_LOCAL_DEVELOPMENT
         guard let lease = applicationUpdateGate.begin() else { return .failure(.connectionFailed) }
         defer { lease.release() }
@@ -1052,7 +1070,7 @@ final class SelectionHelperClient: @unchecked Sendable {
             .init(kind: .authorize, requestID: requestID, clientPublicKey: publicKey), timeout: timeout
         )?.authorization else {
             Self.logger.notice("local-association stage=authorization-unavailable")
-            return .failure(.notPaired)
+            return .failure(.connectionFailed)
         }
         guard authorization.requestID == requestID, authorization.clientPublicKey == publicKey,
               authorization.bootstrapKey.count == 32, !authorization.code.isEmpty,
@@ -1107,8 +1125,11 @@ final class SelectionHelperClient: @unchecked Sendable {
         guard !hasInstallationConflict else {
             return .failure(.helperInstallationConflict)
         }
-        guard let key = keyStore.load() else {
-            return .failure(.notPaired)
+        let key: Data
+        switch keyStore.loadForAssociation() {
+        case .failure(let failure): return .failure(failure)
+        case .success(.some(let stored)): key = stored
+        case .success(nil): return .failure(.notPaired)
         }
         return sendAuthenticated(
             SelectionHelperCommand(kind: .health),
@@ -1127,6 +1148,28 @@ final class SelectionHelperClient: @unchecked Sendable {
             }
             return .success(health)
         }
+    }
+
+    /// A separate, bounded cold-start budget; never restarts an unresponsive
+    /// process, requests permission, or resets a pairing on authentication errors.
+    func recoverHealth(timeout: TimeInterval = 3, allowLaunch: Bool = true) -> Result<SelectionHelperHealth, SelectionAgentServiceFailure> {
+        guard let lease = applicationUpdateGate.begin() else { return .failure(.connectionFailed) }
+        defer { lease.release() }
+        guard !hasInstallationConflict else { return .failure(.helperInstallationConflict) }
+        guard isInstalled else { return .failure(.helperNotInstalled) }
+        return SelectionHelperReadiness.wait(
+            timeout: timeout,
+            allowLaunch: allowLaunch,
+            isRunning: { self.isRunning },
+            launch: { self.openHelper(activates: false) },
+            check: { budget in
+                #if BLOCKS_LOCAL_DEVELOPMENT
+                self.associateLocallyIfNeeded(timeout: budget / 3)
+                #else
+                self.health(timeout: budget)
+                #endif
+            }
+        )
     }
 
     /// Best-effort optional enhancement for paste admission. It never launches
@@ -1209,6 +1252,20 @@ final class SelectionHelperClient: @unchecked Sendable {
         maximumCharacters: Int =
             BlocksSelectionCaptureProtocol.maximumSelectionCharacters
     ) -> AXSelectionElementReadResult {
+        captureWhileCurrent(target: target, requestID: requestID, timeout: timeout,
+                            maximumCharacters: maximumCharacters, operationAllowed: { true })
+    }
+
+    var additionalReadinessBudget: TimeInterval { 3.3 }
+
+    func captureWhileCurrent(
+        target: AXSelectionTarget,
+        requestID: String,
+        timeout: TimeInterval,
+        maximumCharacters: Int,
+        operationAllowed: @escaping @Sendable () -> Bool
+    ) -> AXSelectionElementReadResult {
+        guard operationAllowed() else { return .failure(.cancelled) }
         guard let lease = applicationUpdateGate.begin() else { return .failure(.cancelled) }
         defer { lease.release() }
         let startedAt = CFAbsoluteTimeGetCurrent()
@@ -1229,6 +1286,7 @@ final class SelectionHelperClient: @unchecked Sendable {
             )
             return .failure(.agentUnavailable)
         }
+        let helperWasRunning = isRunning
         let healthResult = health(timeout: 0.15)
         if case .failure(.incompatibleVersion) = healthResult {
             Self.logger.error(
@@ -1236,29 +1294,22 @@ final class SelectionHelperClient: @unchecked Sendable {
             )
             return .failure(.agentVersionOutdated)
         }
-        let shouldAutolaunch: Bool
-        switch healthResult {
-        case .failure(.connectionFailed),
-             .failure(.timedOut),
-             .failure(.helperNotRunning):
-            shouldAutolaunch = true
-        default:
-            shouldAutolaunch = false
-        }
-        if shouldAutolaunch,
-           applicationLocator.isInstalled,
-           applicationLocator.open(activates: false) {
-            Self.logger.info(
-                "capture autolaunch request=\(requestID, privacy: .public)"
+        if case .failure(let failure) = healthResult,
+           SelectionHelperReadiness.isRetryable(failure) {
+            let ready = SelectionHelperReadiness.wait(
+                timeout: 3, allowLaunch: !helperWasRunning,
+                isRunning: { self.isRunning },
+                launch: { self.openHelper(activates: false) },
+                check: { self.health(timeout: $0) },
+                operationAllowed: operationAllowed
             )
-            for _ in 0..<5 {
-                Thread.sleep(forTimeInterval: 0.1)
-                if case .success = health(timeout: 0.12) {
-                    deadline = Date().addingTimeInterval(timeout)
-                    break
-                }
+            guard operationAllowed() else { return .failure(.cancelled) }
+            guard case .success = ready else {
+                return .failure(isRunning ? .timedOut : .agentUnavailable)
             }
+            deadline = Date().addingTimeInterval(timeout)
         }
+        guard operationAllowed() else { return .failure(.cancelled) }
         guard Date() < deadline else {
             return .failure(.timedOut)
         }
@@ -1385,8 +1436,11 @@ final class SelectionHelperClient: @unchecked Sendable {
         _ kind: SelectionHelperCommandKind,
         timeout: TimeInterval
     ) -> Result<Bool, SelectionAgentServiceFailure> {
-        guard let key = keyStore.load() else {
-            return .failure(.notPaired)
+        let key: Data
+        switch keyStore.loadForAssociation() {
+        case .failure(let failure): return .failure(failure)
+        case .success(.some(let stored)): key = stored
+        case .success(nil): return .failure(.notPaired)
         }
         return sendAuthenticated(
             SelectionHelperCommand(kind: kind),
@@ -1596,6 +1650,49 @@ private struct SelectionHelperPasteTargetInspectionDeadline {
     }
 }
 
+enum SelectionHelperReadiness {
+    static func isRetryable(_ failure: SelectionAgentServiceFailure) -> Bool {
+        switch failure {
+        case .helperNotRunning, .connectionFailed, .timedOut: true
+        default: false
+        }
+    }
+
+    static func wait(
+        timeout: TimeInterval,
+        allowLaunch: Bool,
+        isRunning: () -> Bool,
+        launch: () -> Bool,
+        check: (TimeInterval) -> Result<SelectionHelperHealth, SelectionAgentServiceFailure>,
+        operationAllowed: () -> Bool = { true },
+        now: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+        sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
+    ) -> Result<SelectionHelperHealth, SelectionAgentServiceFailure> {
+        let budget = timeout.isFinite ? min(max(timeout, 0.01), 3) : 3
+        let deadline = now() + budget
+        guard operationAllowed() else { return .failure(.connectionFailed) }
+        let wasRunning = isRunning()
+        var result = check(min(0.3, budget))
+        guard operationAllowed() else { return .failure(.connectionFailed) }
+        guard case .failure(let firstFailure) = result, isRetryable(firstFailure) else { return result }
+        if !isRunning() {
+            guard !wasRunning, allowLaunch, operationAllowed(), launch() else { return .failure(.helperNotRunning) }
+        }
+        var delay: TimeInterval = 0.1
+        while now() < deadline {
+            guard operationAllowed() else { return .failure(.connectionFailed) }
+            sleep(min(delay, max(0, deadline - now())))
+            guard operationAllowed() else { return .failure(.connectionFailed) }
+            let remaining = deadline - now()
+            guard remaining > 0 else { break }
+            result = check(min(0.3, remaining))
+            guard case .failure(let failure) = result, isRetryable(failure) else { return result }
+            delay = min(delay * 1.7, 0.5)
+        }
+        return isRunning() ? result : .failure(.helperNotRunning)
+    }
+}
+
 enum SelectionHelperConnectionState: Equatable {
     case checking
     case notInstalled
@@ -1670,18 +1767,26 @@ final class SelectionHelperSettingsController:
     private var pendingDisconnectRecovery = false
     private var disconnectRecoveryExpired = false
     private var disconnectRecoveryDeadline: Date?
-    private let permissionAssistPresenter = PermissionAssistPanelPresenter()
+    private let permissionAssistPresenter: PermissionAssistPanelPresenter
+    private let permissionGuideOverride: ((URL) -> Void)?
     private var permissionMonitorTask: Task<Void, Never>?
     private var permissionHealthCheckInFlight = false
+    private var lifecycleObservations = Set<AnyCancellable>()
+    private var refreshInFlight = false
+    private var refreshAgainWithoutLaunch = false
     init(
         client: SelectionHelperClient =
             SelectionHelperClient(),
         disconnectRecoveryStore:
             any SelectionHelperDisconnectRecoveryStoring =
-                SelectionHelperDisconnectRecoveryStore()
+                SelectionHelperDisconnectRecoveryStore(),
+        permissionAssistPresenter: PermissionAssistPanelPresenter? = nil,
+        permissionGuideOverride: ((URL) -> Void)? = nil
     ) {
         self.client = client
         self.disconnectRecoveryStore = disconnectRecoveryStore
+        self.permissionAssistPresenter = permissionAssistPresenter ?? PermissionAssistPanelPresenter()
+        self.permissionGuideOverride = permissionGuideOverride
         if let deadline = disconnectRecoveryStore.loadDeadline() {
             if deadline > Date() {
                 pendingDisconnectRecovery = true
@@ -1690,6 +1795,17 @@ final class SelectionHelperSettingsController:
                 disconnectRecoveryExpired = true
                 disconnectRecoveryStore.clear()
             }
+        }
+        for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
+            NSWorkspace.shared.notificationCenter.publisher(for: name)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] notification in
+                    guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                          app.bundleIdentifier == BlocksRuntimeIdentity.selectionHelperBundleIdentifier else { return }
+                    // Observe external/login-item starts without restarting a
+                    // Helper that the user has just deliberately quit.
+                    self?.refresh(allowLaunch: false)
+                }.store(in: &lifecycleObservations)
         }
     }
 
@@ -1712,11 +1828,15 @@ final class SelectionHelperSettingsController:
         return url
     }
 
-    func refresh() {
+    func refresh(allowLaunch: Bool = true) {
+        guard !refreshInFlight else {
+            if !allowLaunch { refreshAgainWithoutLaunch = true }
+            return
+        }
         guard let lease = client.beginApplicationOperation() else { return }
         generation &+= 1
         let currentGeneration = generation
-        lastError = nil
+        if allowLaunch { lastError = nil }
         guard client.isInstalled else {
             state = .notInstalled
             return
@@ -1757,26 +1877,20 @@ final class SelectionHelperSettingsController:
             lastError = helperFailureMessage(.helperInstallationConflict)
             return
         }
-        #if !BLOCKS_LOCAL_DEVELOPMENT
-        guard client.isPaired else {
-            state = .notPaired
-            return
-        }
-        #endif
-        state = .checking
+        if allowLaunch { state = .checking }
+        refreshInFlight = true
         let client = client
         Task.detached(priority: .userInitiated) {
-            #if BLOCKS_LOCAL_DEVELOPMENT
-            client.associateLocallyIfNeeded(timeout: 0.6)
-            #else
-            client.health(timeout: 0.6)
-            #endif
+            client.recoverHealth(allowLaunch: allowLaunch)
         }.valueTask(holding: lease) { [weak self] result in
-            guard let self,
-                  generation == currentGeneration else {
-                return
-            }
+            guard let self else { return }
+            refreshInFlight = false
+            guard generation == currentGeneration else { return }
             applyHealthResult(result)
+            if refreshAgainWithoutLaunch {
+                refreshAgainWithoutLaunch = false
+                refresh(allowLaunch: false)
+            }
         }
     }
 
@@ -1840,24 +1954,18 @@ final class SelectionHelperSettingsController:
     }
 
     func requestAccessibilityPermission() {
-        guard let lease = client.beginApplicationOperation() else { return }
-        generation &+= 1
-        let currentGeneration = generation
-        let client = client
-        Task.detached(priority: .userInitiated) {
-            client.requestPermission(timeout: 1)
-        }.valueTask(holding: lease) { [weak self] _ in
-            guard let self,
-                  generation == currentGeneration else {
-                return
-            }
-            refresh()
-        }
+        // The primary action explains the exact Helper entry and opens the
+        // drag-to-Settings guide. It never sends a naked system prompt request.
+        openAccessibilitySettings()
     }
 
     func openAccessibilitySettings() {
         guard let helperURL = client.trustedApplicationURL else {
             lastError = helperFailureMessage(client.hasInstallationConflict ? .helperInstallationConflict : .helperNotInstalled)
+            return
+        }
+        if let permissionGuideOverride {
+            permissionGuideOverride(helperURL)
             return
         }
         permissionAssistPresenter.present(
@@ -1944,7 +2052,7 @@ final class SelectionHelperSettingsController:
                 state = client.isInstalled ? .notPaired : .notInstalled
                 pairingCode = ""
                 lastError = nil
-            case .failure:
+            case .failure(let failure):
                 // Never infer a remote deletion from a transport failure. A
                 // Recheck retries this exact authenticated disconnect while
                 // the Helper's short-lived acknowledgement is still valid.
@@ -1960,9 +2068,9 @@ final class SelectionHelperSettingsController:
                     )
                 } else {
                     state = .connectionFailed
-                    lastError = L10n.string(
-                        "translation.selectionHelper.error.disconnectFailed"
-                    )
+                    lastError = failure == .keychainUnavailable
+                        ? helperFailureMessage(failure)
+                        : L10n.string("translation.selectionHelper.error.disconnectFailed")
                 }
             }
         }
@@ -1976,6 +2084,7 @@ final class SelectionHelperSettingsController:
     ) {
         switch result {
         case let .success(health):
+            lastError = nil
             if health.protocolVersion <
                 BlocksSelectionHelperProtocol
                     .minimumCompatibleVersion
@@ -1991,9 +2100,10 @@ final class SelectionHelperSettingsController:
             switch failure {
             case .helperNotInstalled:
                 state = .notInstalled
-            case .helperNotRunning, .connectionFailed,
-                 .timedOut:
+            case .helperNotRunning:
                 state = .notRunning
+            case .connectionFailed, .timedOut:
+                state = client.isRunning ? .connectionFailed : .notRunning
             case .helperInstallationConflict:
                 state = .installationConflict
             case .notPaired, .invalidPairingCode:
@@ -2001,7 +2111,7 @@ final class SelectionHelperSettingsController:
             case .incompatibleVersion:
                 state = .versionOutdated
             case .invalidResponse, .disconnectNotConfirmed,
-                 .bootstrapUnavailable:
+                 .bootstrapUnavailable, .keychainUnavailable:
                 state = .connectionFailed
             }
             lastError = helperFailureMessage(failure)
@@ -2030,6 +2140,8 @@ final class SelectionHelperSettingsController:
             suffix = "connectionFailed"
         case .disconnectNotConfirmed:
             suffix = "disconnectFailed"
+        case .keychainUnavailable:
+            suffix = "keychainUnavailable"
         }
         return L10n.string(
             "translation.selectionHelper.error.\(suffix)"
@@ -2051,6 +2163,11 @@ private extension Task where Success: Sendable, Failure == Never {
 }
 
 protocol SelectionHelperCaptureTransport: Sendable {
+    var additionalReadinessBudget: TimeInterval { get }
+    func captureWhileCurrent(
+        target: AXSelectionTarget, requestID: String, timeout: TimeInterval,
+        maximumCharacters: Int, operationAllowed: @escaping @Sendable () -> Bool
+    ) -> AXSelectionElementReadResult
     func capture(
         target: AXSelectionTarget,
         requestID: String,
@@ -2066,6 +2183,17 @@ protocol SelectionHelperCaptureTransport: Sendable {
     func requestPermission(
         timeout: TimeInterval
     ) -> Result<Bool, SelectionAgentServiceFailure>
+}
+
+extension SelectionHelperCaptureTransport {
+    var additionalReadinessBudget: TimeInterval { 0 }
+    func captureWhileCurrent(
+        target: AXSelectionTarget, requestID: String, timeout: TimeInterval,
+        maximumCharacters: Int, operationAllowed: @escaping @Sendable () -> Bool
+    ) -> AXSelectionElementReadResult {
+        guard operationAllowed() else { return .failure(.cancelled) }
+        return capture(target: target, requestID: requestID, timeout: timeout, maximumCharacters: maximumCharacters)
+    }
 }
 
 extension SelectionHelperClient:
@@ -2173,7 +2301,7 @@ private final class SelectionHelperCaptureOperation:
         }
     }
 
-    private var isPending: Bool {
+    fileprivate var isPending: Bool {
         condition.withLock {
             guard case .pending = state else {
                 return false
@@ -2269,15 +2397,16 @@ struct SelectionHelperAXSelectionSystemClient:
     ) -> AXSelectionElementReadToken? {
         let operation = SelectionHelperCaptureOperation()
         operation.start(
-            timeout: captureTimeout,
+            timeout: captureTimeout + min(max(client.additionalReadinessBudget, 0), 3.3),
             capture: {
-                client.capture(
+                client.captureWhileCurrent(
                     target: target,
                     requestID: requestID,
                     timeout: captureTimeout,
                     maximumCharacters:
                         BlocksSelectionCaptureProtocol
-                            .maximumSelectionCharacters
+                            .maximumSelectionCharacters,
+                    operationAllowed: { operation.isPending }
                 )
             },
             onTimeout: {

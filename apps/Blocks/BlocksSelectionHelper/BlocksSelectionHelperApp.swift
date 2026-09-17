@@ -1418,7 +1418,7 @@ final class SelectionHelperBootstrapKeyStore:
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]) { _, new in new }
         var result: CFTypeRef?
-        guard SecItemCopyMatching(
+        guard BlocksKeychainAccess.helperCopyMatching(
             query as CFDictionary,
             &result
         ) == errSecSuccess,
@@ -1467,14 +1467,14 @@ final class SelectionHelperKeyStore: SelectionHelperKeyStoring {
         copyMatching: @escaping (
             CFDictionary,
             UnsafeMutablePointer<CFTypeRef?>?
-        ) -> OSStatus = SecItemCopyMatching,
+        ) -> OSStatus = BlocksKeychainAccess.helperCopyMatching,
         updateItem: @escaping (CFDictionary, CFDictionary) -> OSStatus =
-            SecItemUpdate,
+            BlocksKeychainAccess.helperUpdate,
         addItem: @escaping (
             CFDictionary,
             UnsafeMutablePointer<CFTypeRef?>?
-        ) -> OSStatus = SecItemAdd,
-        deleteItem: @escaping (CFDictionary) -> OSStatus = SecItemDelete
+        ) -> OSStatus = BlocksKeychainAccess.helperAdd,
+        deleteItem: @escaping (CFDictionary) -> OSStatus = BlocksKeychainAccess.helperDelete
     ) {
         self.accessGroupProvider = accessGroupProvider
         self.copyMatching = copyMatching

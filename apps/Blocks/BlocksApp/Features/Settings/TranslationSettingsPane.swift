@@ -1550,6 +1550,16 @@ struct TranslationSettingsPane: View {
                 .foregroundStyle(.secondary)
             }
 
+            SettingsRowDivider()
+            SettingsFormRow(
+                title: L10n.string("translation.selectionHelper.loginStartup"),
+                detail: L10n.string("translation.selectionHelper.loginStartup.detail")
+            ) {
+                Button(L10n.string("translation.selectionHelper.open")) {
+                    selectionHelperController.openHelper()
+                }
+            }
+
             if case .notPaired =
                 selectionHelperController.state {
                 SettingsRowDivider()
@@ -1615,6 +1625,13 @@ struct TranslationSettingsPane: View {
                 )
             }
 
+        }
+        .task {
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                guard !Task.isCancelled else { return }
+                selectionHelperController.refresh(allowLaunch: false)
+            }
         }
     }
 

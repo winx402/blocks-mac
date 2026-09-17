@@ -60,7 +60,7 @@ struct BlocksNativePluginSecretStore: BlocksNativePluginSecretStoring, Sendable 
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        let status = BlocksKeychainAccess.copyMatching(query as CFDictionary, &item)
         guard status != errSecItemNotFound else { return nil }
         guard status == errSecSuccess else {
             throw BlocksNativePluginSecretStoreError.keychain(status)
@@ -93,7 +93,7 @@ struct BlocksNativePluginSecretStore: BlocksNativePluginSecretStoring, Sendable 
             )
         }
         let query = baseQuery(account: account)
-        let updateStatus = SecItemUpdate(
+        let updateStatus = BlocksKeychainAccess.update(
             query as CFDictionary,
             [kSecValueData as String: data] as CFDictionary
         )
@@ -106,7 +106,7 @@ struct BlocksNativePluginSecretStore: BlocksNativePluginSecretStoring, Sendable 
         var item = query
         item[kSecValueData as String] = data
         item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        let addStatus = SecItemAdd(BlocksKeychainNamespace.queryForCurrentBuild(item) as CFDictionary, nil)
+        let addStatus = BlocksKeychainAccess.add(BlocksKeychainNamespace.queryForCurrentBuild(item) as CFDictionary, nil)
         guard addStatus == errSecSuccess else {
             throw BlocksNativePluginSecretStoreError.keychain(addStatus)
         }
@@ -114,7 +114,7 @@ struct BlocksNativePluginSecretStore: BlocksNativePluginSecretStoring, Sendable 
 
     func delete(pluginID: String, secretID: String) throws {
         let account = try account(pluginID: pluginID, secretID: secretID)
-        let status = SecItemDelete(baseQuery(account: account) as CFDictionary)
+        let status = BlocksKeychainAccess.delete(baseQuery(account: account) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw BlocksNativePluginSecretStoreError.keychain(status)
         }

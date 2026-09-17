@@ -1649,6 +1649,179 @@ final class TranslationEntryBridgeTests: XCTestCase {
         XCTAssertEqual(publishedTexts, ["hello"])
     }
 
+    func testSourceEditorDoesNotPublishMarkedTextButReportsItAsDisplayed()
+        async
+    {
+        var publishedTexts: [String] = []
+        var displayedTextStates: [Bool] = []
+        let coordinator = TranslationSourceTextEditor.Coordinator(
+            onTextChange: { publishedTexts.append($0) },
+            onDisplayedTextChange: { displayedTextStates.append($0) }
+        )
+        let textView = TranslationSourceNSTextView(
+            frame: NSRect(x: 0, y: 0, width: 240, height: 100)
+        )
+        coordinator.attach(textView)
+        defer { coordinator.detach() }
+
+        textView.setMarkedText(
+            "nihao",
+            selectedRange: NSRange(location: 5, length: 0),
+            replacementRange: NSRange(location: 0, length: 0)
+        )
+        NotificationCenter.default.post(
+            name: NSText.didChangeNotification,
+            object: textView
+        )
+        await waitUntil { displayedTextStates.last == true }
+
+        XCTAssertTrue(textView.hasMarkedText())
+        XCTAssertEqual(displayedTextStates.last, true)
+        XCTAssertTrue(publishedTexts.isEmpty)
+    }
+
+    func testSourceEditorRestoresDisplayedTextStateAfterMarkedTextEnds()
+        async
+    {
+        var displayedTextStates: [Bool] = []
+        let coordinator = TranslationSourceTextEditor.Coordinator(
+            onTextChange: { _ in },
+            onDisplayedTextChange: { displayedTextStates.append($0) }
+        )
+        let textView = TranslationSourceNSTextView(
+            frame: NSRect(x: 0, y: 0, width: 240, height: 100)
+        )
+        coordinator.attach(textView)
+        defer { coordinator.detach() }
+
+        textView.setMarkedText(
+            "nihao",
+            selectedRange: NSRange(location: 5, length: 0),
+            replacementRange: NSRange(location: 0, length: 0)
+        )
+        textView.unmarkText()
+        // The direct NSTextView fixture leaves its marked string behind after
+        // unmarkText. Model the text system's completed cancellation before
+        // checking the bridge's deferred presentation update.
+        textView.string = ""
+        coordinator.publishDisplayedTextState(for: textView)
+        await waitUntil { displayedTextStates.last == false }
+
+        XCTAssertFalse(textView.hasMarkedText())
+        XCTAssertEqual(displayedTextStates.last, false)
+
+        coordinator.detach()
+        let rebuiltTextView = TranslationSourceNSTextView(
+            frame: NSRect(x: 0, y: 0, width: 240, height: 100)
+        )
+        let stateCountBeforeRebuild = displayedTextStates.count
+        coordinator.attach(rebuiltTextView)
+        await waitUntil {
+            displayedTextStates.count > stateCountBeforeRebuild
+                && displayedTextStates.last == false
+        }
+
+        XCTAssertEqual(displayedTextStates.last, false)
+    }
+
+    func testSourceEditorPublishesCommittedTextOnlyAfterMarkedTextEnds()
+        async
+    {
+        var publishedTexts: [String] = []
+        let coordinator = TranslationSourceTextEditor.Coordinator(
+            onTextChange: { publishedTexts.append($0) }
+        )
+        let textView = TranslationSourceNSTextView(
+            frame: NSRect(x: 0, y: 0, width: 240, height: 100)
+        )
+        coordinator.attach(textView)
+        defer { coordinator.detach() }
+
+        textView.setMarkedText(
+            "nihao",
+            selectedRange: NSRange(location: 5, length: 0),
+            replacementRange: NSRange(location: 0, length: 0)
+        )
+        textView.insertText(
+            "你好",
+            replacementRange: NSRange(location: 0, length: 5)
+        )
+
+        await waitUntil { publishedTexts == ["你好"] }
+        XCTAssertEqual(publishedTexts, ["你好"])
+    }
+
+    func testSourceEditorReleasesModelSyncAfterCancellingMarkedTextOverExistingText()
+        async
+    {
+        let coordinator = TranslationSourceTextEditor.Coordinator(
+            onTextChange: { _ in }
+        )
+        let textView = TranslationSourceNSTextView(
+            frame: NSRect(x: 0, y: 0, width: 240, height: 100)
+        )
+        textView.string = "hello"
+        coordinator.attach(textView)
+        defer { coordinator.detach() }
+
+        textView.setMarkedText(
+            "nihao",
+            selectedRange: NSRange(location: 5, length: 0),
+            replacementRange: NSRange(location: 5, length: 0)
+        )
+        textView.unmarkText()
+        textView.string = "hello"
+        coordinator.publishDisplayedTextState(for: textView)
+
+        await waitUntil {
+            coordinator.shouldApplyModelText("", to: textView)
+        }
+        XCTAssertEqual(textView.string, "hello")
+    }
+
+    func testSourceEditorDefersModelSynchronizationDuringMarkedTextCommit()
+        async
+    {
+        let coordinator = TranslationSourceTextEditor.Coordinator(
+            onTextChange: { _ in }
+        )
+        let textView = TranslationSourceNSTextView(
+            frame: NSRect(x: 0, y: 0, width: 240, height: 100)
+        )
+        coordinator.attach(textView)
+        defer { coordinator.detach() }
+
+        textView.setMarkedText(
+            "nihao",
+            selectedRange: NSRange(location: 5, length: 0),
+            replacementRange: NSRange(location: 0, length: 0)
+        )
+
+        XCTAssertFalse(
+            coordinator.shouldApplyModelText("", to: textView),
+            "A SwiftUI update must not overwrite active marked text."
+        )
+
+        textView.insertText(
+            "你好",
+            replacementRange: NSRange(location: 0, length: 5)
+        )
+
+        XCTAssertFalse(
+            coordinator.shouldApplyModelText("", to: textView),
+            "Commit text must wait for the final AppKit change notification."
+        )
+
+        await waitUntil {
+            coordinator.shouldApplyModelText("", to: textView)
+        }
+
+        XCTAssertTrue(
+            coordinator.shouldApplyModelText("", to: textView),
+            "Once committed text is published, later explicit model changes may apply."
+        )
+    }
+
     func testSourceEditorPublishesSemanticFocusState() {
         var focusStates: [Bool] = []
         let coordinator = TranslationSourceTextEditor.Coordinator(
@@ -2684,6 +2857,228 @@ final class TranslationEntryBridgeTests: XCTestCase {
 
         XCTAssertNil(locator.resolvedApplicationURL)
         XCTAssertFalse(locator.hasConflictingRunningApplication)
+    }
+
+    func testSelectionHelperDisconnectDoesNotTreatInaccessibleKeyAsAbsent() {
+        for status in [errSecAuthFailed, errSecInteractionNotAllowed] {
+            var deletes = 0
+            let store = SelectionHelperSharedKeyStore(
+                accessGroupProvider: { "TESTTEAM01.fixture" },
+                itemCopyMatching: { _, _ in status },
+                itemDelete: { _ in deletes += 1; return errSecSuccess }
+            )
+            let connection = SelectionHelperAuthenticatedConnectionStub(
+                key: Data(repeating: 0xA5, count: 32), disconnectResult: .success(true)
+            )
+            let client = SelectionHelperClient(
+                keyStore: store, connection: connection,
+                applicationLocator: selectionHelperFixtureLocator(candidates: [])
+            )
+            switch client.disconnect(timeout: 0.01) {
+            case .failure(let error): XCTAssertEqual(error, .keychainUnavailable)
+            case .success: XCTFail("An unreadable key is not proof of disconnection")
+            }
+            XCTAssertEqual(deletes, 0)
+            XCTAssertEqual(connection.disconnectRequestCount, 0)
+            XCTAssertTrue(connection.helperStillHasKey)
+        }
+    }
+
+    func testHelperReadinessAllowsSlowColdStartWithoutRepeatedLaunch() throws {
+        var clock: TimeInterval = 0
+        var launches = 0
+        var running = false
+        var checks = 0
+        let result = SelectionHelperReadiness.wait(
+            timeout: 3, allowLaunch: true, isRunning: { running },
+            launch: { launches += 1; running = true; return true },
+            check: { _ in
+                checks += 1
+                return clock >= 1.8
+                    ? .success(.init(helperVersion: "fixture", accessibilityTrusted: true))
+                    : .failure(.connectionFailed)
+            }, now: { clock }, sleep: { clock += $0 }
+        )
+        XCTAssertEqual(try result.get().helperVersion, "fixture")
+        XCTAssertEqual(launches, 1)
+        XCTAssertGreaterThan(checks, 5)
+        XCTAssertGreaterThanOrEqual(clock, 1.8)
+        XCTAssertLessThanOrEqual(clock, 3)
+    }
+
+    func testHelperReadinessIsBoundedAndDoesNotRestartUnresponsiveProcess() {
+        var clock: TimeInterval = 0
+        var launches = 0
+        let result = SelectionHelperReadiness.wait(
+            timeout: 3, allowLaunch: true, isRunning: { true },
+            launch: { launches += 1; return true },
+            check: { _ in .failure(.timedOut) },
+            now: { clock }, sleep: { clock += $0 }
+        )
+        guard case .failure(.timedOut) = result else { return XCTFail("Expected running-but-unresponsive failure") }
+        XCTAssertEqual(launches, 0)
+        XCTAssertEqual(clock, 3, accuracy: 0.001)
+    }
+
+    func testHelperReadinessDoesNotUndoQuitDuringHealthCheck() {
+        var running = true
+        var launches = 0
+        let result = SelectionHelperReadiness.wait(
+            timeout: 3, allowLaunch: true, isRunning: { running },
+            launch: { launches += 1; return true },
+            check: { _ in running = false; return .failure(.connectionFailed) }
+        )
+        guard case .failure(.helperNotRunning) = result else { return XCTFail("Must preserve the quit") }
+        XCTAssertEqual(launches, 0)
+    }
+
+    func testHelperReadinessCancellationStopsBeforeLaunchOrFurtherChecks() {
+        var current = true
+        var checks = 0
+        _ = SelectionHelperReadiness.wait(
+            timeout: 3, allowLaunch: true, isRunning: { false },
+            launch: { XCTFail("Cancelled request must not launch"); return true },
+            check: { _ in checks += 1; current = false; return .failure(.connectionFailed) },
+            operationAllowed: { current }, sleep: { _ in XCTFail("Cancelled request must not wait") }
+        )
+        XCTAssertEqual(checks, 1)
+    }
+
+    func testHelperCaptureDoesNotRelaunchAfterExitDuringInitialHealth() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let helper = root.appendingPathComponent("Blocks Selection Helper.app")
+        try makeSelectionHelperBundle(at: helper)
+        var running = true
+        var launches = 0
+        let key = Data(repeating: 0x49, count: 32)
+        let locator = SelectionHelperApplicationLocator(
+            candidateURLsProvider: { [helper] },
+            runningApplicationURLsProvider: { running ? [helper] : [] },
+            openApplication: { _, _ in launches += 1 },
+            allowedApplicationURLsProvider: { [helper] },
+            identityVerifier: SelectionHelperBundleIdentityVerifierStub(teamID: "TESTTEAM01"),
+            trustedHostTeamIdentifierProvider: { "TESTTEAM01" }
+        )
+        let connection = SelectionHelperAuthenticatedConnectionStub(
+            key: key, disconnectResult: .success(true), authenticatedResponder: { _ in
+                running = false
+                return .failure(.connectionFailed)
+            }
+        )
+        let client = SelectionHelperClient(keyStore: SelectionHelperKeyStoreStub(key: key),
+                                           connection: connection, applicationLocator: locator)
+        XCTAssertEqual(client.capture(target: target(), requestID: UUID().uuidString), .failure(.agentUnavailable))
+        XCTAssertEqual(launches, 0)
+        XCTAssertFalse(connection.authenticatedCommands.contains { $0.kind == .capture })
+    }
+
+    func testHelperFreezeIncludesColdStartBudgetAndPreservesCaptureResult() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let helper = root.appendingPathComponent("Blocks Selection Helper.app")
+        try makeSelectionHelperBundle(at: helper)
+        let key = Data(repeating: 0x47, count: 32)
+        let readyAt = ProcessInfo.processInfo.systemUptime + 1.8
+        let connection = SelectionHelperAuthenticatedConnectionStub(
+            key: key, disconnectResult: .success(true), authenticatedResponder: { command in
+                if command.kind == .health {
+                    return ProcessInfo.processInfo.systemUptime < readyAt
+                        ? .failure(.connectionFailed)
+                        : .success(.init(health: .init(helperVersion: "fixture", accessibilityTrusted: true)))
+                }
+                guard let request = command.captureRequest else { return .failure(.invalidResponse) }
+                return .success(.init(captureResponse: .failure(requestID: request.requestID, code: .emptySelection)))
+            }
+        )
+        let helperClient = SelectionHelperClient(
+            keyStore: SelectionHelperKeyStoreStub(key: key), connection: connection,
+            applicationLocator: selectionHelperFixtureLocator(candidates: [helper], running: [helper])
+        )
+        let client = SelectionHelperAXSelectionSystemClient(client: helperClient, captureTimeout: 1.4)
+        let token = try XCTUnwrap(client.freezeSelection(from: target(), requestID: UUID().uuidString))
+        XCTAssertEqual(token.read(), .failure(.emptySelection), "The outer watchdog must not expire at 1.4s during cold start")
+        XCTAssertEqual(connection.authenticatedCommands.filter { $0.kind == .capture }.count, 1)
+    }
+
+    func testHelperFreezeCancellationDuringReadinessNeverSendsCapture() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let helper = root.appendingPathComponent("Blocks Selection Helper.app")
+        try makeSelectionHelperBundle(at: helper)
+        let key = Data(repeating: 0x48, count: 32)
+        let started = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        var captures = 0
+        let connection = SelectionHelperAuthenticatedConnectionStub(
+            key: key, disconnectResult: .success(true), authenticatedResponder: { command in
+                if command.kind == .health {
+                    started.signal()
+                    Thread.sleep(forTimeInterval: 0.1)
+                    return .success(.init(health: .init(helperVersion: "fixture", accessibilityTrusted: true)))
+                }
+                if command.kind == .capture { lock.withLock { captures += 1 } }
+                return .success(.init(booleanValue: true))
+            }
+        )
+        let helperClient = SelectionHelperClient(
+            keyStore: SelectionHelperKeyStoreStub(key: key), connection: connection,
+            applicationLocator: selectionHelperFixtureLocator(candidates: [helper], running: [helper])
+        )
+        let client = SelectionHelperAXSelectionSystemClient(client: helperClient)
+        let token = try XCTUnwrap(client.freezeSelection(from: target(), requestID: UUID().uuidString))
+        XCTAssertEqual(started.wait(timeout: .now() + 1), .success)
+        token.cancel()
+        XCTAssertEqual(token.read(), .failure(.cancelled))
+        try await Task.sleep(for: .milliseconds(350))
+        XCTAssertEqual(lock.withLock { captures }, 0)
+    }
+
+    func testHelperReadinessDoesNotLaunchForSecurityFailuresOrPassiveRefresh() {
+        for failure in [SelectionAgentServiceFailure.keychainUnavailable, .notPaired,
+                        .helperInstallationConflict, .incompatibleVersion] {
+            var launches = 0
+            var sleeps = 0
+            let result = SelectionHelperReadiness.wait(
+                timeout: 3, allowLaunch: true, isRunning: { false },
+                launch: { launches += 1; return true }, check: { _ in .failure(failure) },
+                now: { 0 }, sleep: { _ in sleeps += 1 }
+            )
+            guard case .failure(let actual) = result else { return XCTFail("Security failure must be preserved") }
+            XCTAssertEqual(actual, failure)
+            XCTAssertEqual(launches, 0)
+            XCTAssertEqual(sleeps, 0)
+        }
+        let passive = SelectionHelperReadiness.wait(
+            timeout: 3, allowLaunch: false, isRunning: { false },
+            launch: { XCTFail("Passive observer must not undo a deliberate quit"); return true },
+            check: { _ in .failure(.connectionFailed) }
+        )
+        guard case .failure(.helperNotRunning) = passive else { return XCTFail("Expected not running") }
+    }
+
+    func testHelperPermissionPrimaryActionOpensTargetedGuideWithoutSystemRequest() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let helper = root.appendingPathComponent("Blocks Selection Helper.app")
+        try makeSelectionHelperBundle(at: helper)
+        let connection = SelectionHelperAuthenticatedConnectionStub(
+            key: Data(repeating: 0xA5, count: 32), disconnectResult: .success(true)
+        )
+        let client = SelectionHelperClient(
+            keyStore: SelectionHelperKeyStoreStub(key: Data(repeating: 0xA5, count: 32)),
+            connection: connection,
+            applicationLocator: selectionHelperFixtureLocator(candidates: [helper])
+        )
+        var targets = [URL]()
+        let controller = SelectionHelperSettingsController(client: client, permissionGuideOverride: { targets.append($0) })
+        controller.requestAccessibilityPermission()
+        controller.requestAccessibilityPermission()
+        XCTAssertEqual(targets.map(\.path), [helper.path, helper.path])
+        XCTAssertEqual(connection.authenticatedRequestCount, 0)
+        let model = PermissionAssistPanelSessionModel(session: nil, appURL: helper)
+        XCTAssertTrue(model.isSeparateTarget)
+        XCTAssertFalse(model.appDisplayName.isEmpty)
     }
 
     func testSelectionHelperDisconnectFailureKeepsMainKeyAndReportsRetry()
@@ -6846,17 +7241,17 @@ final class TranslationEntryBridgeTests: XCTestCase {
 
     func testTranslationPanelSourceLayoutKeepsStableCompactGeometry() {
         let textHeaderHeight =
-            TranslationPanelMetrics.compactIconHitTarget
+            TranslationPanelSourceLayout.sourceTextHeaderHeight
 
-        XCTAssertEqual(
+        XCTAssertLessThan(
             textHeaderHeight,
             TranslationPanelMetrics.compactIconHitTarget
         )
-        for source in [
-            TranslationInputSource.manual,
-            .selection,
-            .clipboardRecord,
-        ] {
+        XCTAssertEqual(
+            TranslationPanelSourceLayout.sourceEditorSpacing,
+            BlocksVisualTokens.Spacing.xs
+        )
+        for source in TranslationInputSource.allCases {
             XCTAssertEqual(
                 TranslationPanelSourceLayout.sourceHeaderHeight(
                     for: source
@@ -6864,12 +7259,6 @@ final class TranslationEntryBridgeTests: XCTestCase {
                 textHeaderHeight
             )
         }
-        XCTAssertEqual(
-            TranslationPanelSourceLayout.sourceHeaderHeight(
-                for: .screenshotOCR
-            ),
-            TranslationPanelMetrics.compactIconHitTarget
-        )
 
         for source in [
             TranslationInputSource.manual,
@@ -6986,7 +7375,13 @@ final class TranslationEntryBridgeTests: XCTestCase {
                 for: .screenshotOCR,
                 scrollOffset: 0
             ),
-            220
+            TranslationPanelMetrics.contentInset
+                + textHeaderHeight
+                + TranslationPanelSourceLayout.sourceEditorSpacing
+                + TranslationPanelSourceLayout.screenshotEditorDefaultHeight
+                + TranslationPanelMetrics.sectionSpacing
+                + TranslationPanelSourceLayout.languageBarHeight
+                + TranslationPanelMetrics.sectionSpacing
         )
     }
 

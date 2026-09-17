@@ -176,7 +176,16 @@ enum PermissionStateService {
             return ("unknown", nil)
         }
         let teamID = info[kSecCodeInfoTeamIdentifier as String] as? String
-        return (teamID == nil ? "adhoc" : "signed", teamID)
+        let signingFlags = (info[kSecCodeInfoFlags as String] as? NSNumber)?.uint32Value
+        let certificateCount = (info[kSecCodeInfoCertificates as String] as? [Any])?.count
+        return (
+            PermissionCodeSigningClassifier.signatureKind(
+                signingFlags: signingFlags,
+                certificateCount: certificateCount,
+                teamID: teamID
+            ),
+            teamID
+        )
     }
 }
 

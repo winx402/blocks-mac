@@ -102,7 +102,39 @@ public enum BlocksLocalBuildTrust {
         #endif
     }
 
+    /// Only the two registered participants may create a shared login-Keychain
+    /// ACL. A same user, missing Team ID, or an arbitrary caller path is not trust.
+    static func withKeychainPeerExecutables<T>(_ create: ([URL]) -> T?) -> T? {
+        #if BLOCKS_LOCAL_DEVELOPMENT
+        guard accepts(processIdentifier: getpid(), userIdentifier: getuid(), role: "app")
+                || accepts(processIdentifier: getpid(), userIdentifier: getuid(), role: "helper"),
+              let manifest = loadManifest() else { return nil }
+        var result = [URL]()
+        var evidence = [Peer]()
+        for role in ["app", "helper"] {
+            guard let peer = manifest.peers.first(where: { $0.role == role }) else { return nil }
+            let url = URL(fileURLWithPath: manifest.appBundlePath).appendingPathComponent(peer.relativeExecutablePath)
+            guard validatesKeychainPeer(url, peer: peer, root: manifest.appBundlePath) else { return nil }
+            result.append(url)
+            evidence.append(peer)
+        }
+        guard let created = create(result), zip(result, evidence).allSatisfy({
+            validatesKeychainPeer($0.0, peer: $0.1, root: manifest.appBundlePath)
+        }) else { return nil }
+        return created
+        #else
+        return nil
+        #endif
+    }
+
     #if BLOCKS_LOCAL_DEVELOPMENT
+    private static func validatesKeychainPeer(_ url: URL, peer: Peer, root: String) -> Bool {
+        var code: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess, let code,
+              SecStaticCodeCheckValidity(code, SecCSFlags(rawValue: kSecCSStrictValidate), nil) == errSecSuccess else { return false }
+        return matches(staticCode: code, expected: peer, root: root)
+    }
+
     private static func loadManifest() -> Manifest? {
         guard let url = manifestURL,
               let home = getpwuid(getuid())?.pointee.pw_dir else { return nil }

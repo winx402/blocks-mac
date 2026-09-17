@@ -140,6 +140,16 @@ private struct SelectionHelperPermissionStatusRow: View {
         .onAppear {
             controller.refresh()
         }
+        .task {
+            // Workspace notifications can be coalesced or arrive without a
+            // usable terminated-app identity. Reconcile while this row exists;
+            // passive checks never restart a Helper deliberately quit by users.
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                guard !Task.isCancelled else { return }
+                controller.refresh(allowLaunch: false)
+            }
+        }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(L10n.string("translation.selectionHelper.title"))
         .accessibilityValue(stateDetail)
@@ -308,6 +318,8 @@ struct PermissionDiagnosticCard: View {
         switch diagnostic.signatureKind {
         case "adhoc":
             return L10n.string("settings.permissionDebugAdHoc")
+        case "signed-no-team":
+            return L10n.string("settings.permissionDebugCertificateWithoutTeam")
         case "signed":
             return L10n.format("settings.permissionDebugTeamID", diagnostic.teamID ?? "-")
         default:
@@ -347,6 +359,8 @@ struct PermissionDiagnosticCard: View {
 struct PermissionDiagnosticRow: View {
     let diagnostic: PermissionDiagnosticSnapshot
     let requestAction: () -> Void
+    @State private var recoveryConfirmationPresented = false
+    @State private var recoveryGuidancePresented = false
 
     var body: some View {
         SettingsRowShell(
@@ -363,8 +377,28 @@ struct PermissionDiagnosticRow: View {
                 .foregroundStyle(diagnostic.granted ? .green : .orange)
                 if !diagnostic.granted {
                     Button(requestButtonTitle, action: requestAction)
+                    if diagnostic.manualTCCResetCommand != nil {
+                        Button(L10n.string("settings.permissionAlreadyEnabled")) {
+                            recoveryConfirmationPresented = true
+                        }
+                    }
                 }
             }
+        }
+        .confirmationDialog(
+            L10n.string("settings.permissionRecovery.confirmationTitle"),
+            isPresented: $recoveryConfirmationPresented,
+            titleVisibility: .visible
+        ) {
+            Button(L10n.string("settings.permissionRecovery.confirm")) {
+                recoveryGuidancePresented = true
+            }
+            Button(L10n.string("common.cancel"), role: .cancel) {}
+        } message: {
+            Text(L10n.string("settings.permissionRecovery.confirmationDetail"))
+        }
+        .sheet(isPresented: $recoveryGuidancePresented) {
+            PermissionTCCRecoverySheet(diagnostic: diagnostic)
         }
     }
 
@@ -392,6 +426,54 @@ struct PermissionDiagnosticRow: View {
 
     private var recommendedActionText: String {
         diagnostic.recommendedAction.localizedPrimaryRowDetail
+    }
+}
+
+private struct PermissionTCCRecoverySheet: View {
+    let diagnostic: PermissionDiagnosticSnapshot
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        SettingsSheetScaffold(
+            title: L10n.string("settings.permissionRecovery.title"),
+            detail: L10n.string("settings.permissionRecovery.subtitle"),
+            systemImage: "exclamationmark.triangle",
+            preferredHeight: 440
+        ) {
+            VStack(alignment: .leading, spacing: BlocksVisualTokens.Spacing.md) {
+                Label(
+                    L10n.string("settings.permissionRecovery.unverifiedCause"),
+                    systemImage: "questionmark.circle"
+                )
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.secondary)
+
+                Text(L10n.string("settings.permissionRecovery.manualOnly"))
+                    .font(.subheadline)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if let command = diagnostic.manualTCCResetCommand {
+                    Text(command)
+                        .font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                        .padding(BlocksVisualTokens.Spacing.sm)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .blocksSurface(
+                            .section,
+                            cornerRadius: BlocksVisualTokens.CornerRadius.control
+                        )
+                        .accessibilityLabel(L10n.string("settings.permissionRecovery.commandAccessibility"))
+                }
+
+                Text(L10n.string("settings.permissionRecovery.consequence"))
+                    .font(.subheadline)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } actions: {
+            Button(L10n.string("common.close")) {
+                dismiss()
+            }
+        }
     }
 }
 

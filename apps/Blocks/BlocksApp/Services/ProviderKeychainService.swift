@@ -167,16 +167,16 @@ protocol ProviderKeychainSecurityAPI {
 }
 
 private struct SystemProviderKeychainSecurityAPI: ProviderKeychainSecurityAPI {
-    func add(_ query: CFDictionary) -> OSStatus { SecItemAdd(query, nil) }
+    func add(_ query: CFDictionary) -> OSStatus { BlocksKeychainAccess.add(query, nil) }
 
     func update(_ query: CFDictionary, attributes: CFDictionary) -> OSStatus {
-        SecItemUpdate(query, attributes)
+        BlocksKeychainAccess.update(query, attributes)
     }
 
-    func delete(_ query: CFDictionary) -> OSStatus { SecItemDelete(query) }
+    func delete(_ query: CFDictionary) -> OSStatus { BlocksKeychainAccess.delete(query) }
 
     func copyMatching(_ query: CFDictionary, result: UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus {
-        SecItemCopyMatching(query, result)
+        BlocksKeychainAccess.copyMatching(query, result)
     }
 }
 

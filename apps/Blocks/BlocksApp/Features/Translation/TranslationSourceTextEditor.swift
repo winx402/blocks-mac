@@ -11,11 +11,16 @@ struct TranslationSourceTextEditor:
     let focusRequest: Int
     let onTextChange: (String) -> Void
     var onFocusChange: (Bool) -> Void = { _ in }
+    /// Includes marked IME text, which is visually present before it becomes
+    /// committed model text. This controls presentation only; `onTextChange`
+    /// continues to publish committed edits alone.
+    var onDisplayedTextChange: (Bool) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             onTextChange: onTextChange,
-            onFocusChange: onFocusChange
+            onFocusChange: onFocusChange,
+            onDisplayedTextChange: onDisplayedTextChange
         )
     }
 
@@ -69,13 +74,16 @@ struct TranslationSourceTextEditor:
     ) {
         context.coordinator.onTextChange = onTextChange
         context.coordinator.onFocusChange = onFocusChange
+        context.coordinator.onDisplayedTextChange = onDisplayedTextChange
         guard let textView =
-            scrollView.documentView as? NSTextView else {
+            scrollView.documentView as? TranslationSourceNSTextView else {
             return
         }
         context.coordinator.attachIfNeeded(textView)
-        if !context.coordinator.isPublishingChange,
-           textView.string != text {
+        if context.coordinator.shouldApplyModelText(
+            text,
+            to: textView
+        ) {
             let previousSelection = textView.selectedRange()
             context.coordinator.isApplyingModelText = true
             textView.string = text
@@ -88,6 +96,7 @@ struct TranslationSourceTextEditor:
                 length: 0
             ))
             context.coordinator.isApplyingModelText = false
+            context.coordinator.publishDisplayedTextState(for: textView)
         }
 
         if focusRequest > 0 {
@@ -116,6 +125,7 @@ struct TranslationSourceTextEditor:
         weak var textView: NSTextView?
         var onTextChange: (String) -> Void
         var onFocusChange: (Bool) -> Void
+        var onDisplayedTextChange: (Bool) -> Void
         var isApplyingModelText = false
         var isPublishingChange = false
         var lastFocusRequest = 0
@@ -124,12 +134,19 @@ struct TranslationSourceTextEditor:
         private var textChangeObservation: NSObjectProtocol?
         private var retryCount = 0
         private var lastPublishedText: String?
+        private var lastDisplayedTextState: Bool?
+        private var awaitingMarkedTextCommit = false
+        private var markedTextCommitGeneration = 0
+        private var displayedTextStateGeneration = 0
+        private var scheduledDisplayedTextStateGeneration: Int?
+        private var pendingDisplayedTextState: Bool?
         private let isEligibleForFocus: (NSTextView) -> Bool
         private let performFocus: (NSTextView) -> Bool
 
         init(
             onTextChange: @escaping (String) -> Void,
             onFocusChange: @escaping (Bool) -> Void = { _ in },
+            onDisplayedTextChange: @escaping (Bool) -> Void = { _ in },
             isEligibleForFocus:
                 @escaping (NSTextView) -> Bool = {
                     $0.window?.isKeyWindow == true
@@ -145,6 +162,7 @@ struct TranslationSourceTextEditor:
         ) {
             self.onTextChange = onTextChange
             self.onFocusChange = onFocusChange
+            self.onDisplayedTextChange = onDisplayedTextChange
             self.isEligibleForFocus = isEligibleForFocus
             self.performFocus = performFocus
         }
@@ -159,6 +177,11 @@ struct TranslationSourceTextEditor:
             detachTextView()
             self.textView = textView
             textView.delegate = self
+            textView.onDisplayedTextChange = { [weak self, weak textView] in
+                guard let self, let textView else { return }
+                self.updateMarkedTextCommitState(for: textView)
+                self.publishDisplayedTextState(for: textView)
+            }
             installKeyWindowObservation(for: textView)
             textChangeObservation =
                 NotificationCenter.default.addObserver(
@@ -168,6 +191,8 @@ struct TranslationSourceTextEditor:
                 ) { [weak self] notification in
                     self?.publishTextChange(notification)
                 }
+            lastPublishedText = textView.string
+            publishDisplayedTextState(for: textView)
         }
 
         func attachIfNeeded(_ textView: NSTextView) {
@@ -190,6 +215,10 @@ struct TranslationSourceTextEditor:
         }
 
         private func detachTextView() {
+            displayedTextStateGeneration += 1
+            scheduledDisplayedTextStateGeneration = nil
+            pendingDisplayedTextState = nil
+            markedTextCommitGeneration += 1
             if let keyWindowObservation {
                 NotificationCenter.default.removeObserver(
                     keyWindowObservation
@@ -205,8 +234,11 @@ struct TranslationSourceTextEditor:
             if textView?.delegate === self {
                 textView?.delegate = nil
             }
+            (textView as? TranslationSourceNSTextView)?.onDisplayedTextChange = nil
             textView = nil
             lastPublishedText = nil
+            lastDisplayedTextState = nil
+            awaitingMarkedTextCommit = false
         }
 
         func requestFocus(generation: Int) {
@@ -279,15 +311,102 @@ struct TranslationSourceTextEditor:
         ) {
             guard !isApplyingModelText,
                   let textView =
-                    notification.object as? NSTextView else {
+                    notification.object as? TranslationSourceNSTextView,
+                  !textView.isUpdatingComposition,
+                  !textView.isComposingText else {
                 return
             }
+            awaitingMarkedTextCommit = false
+            publishCommittedTextIfNeeded(from: textView)
+        }
+
+        func shouldApplyModelText(
+            _ modelText: String,
+            to textView: NSTextView
+        ) -> Bool {
+            let translationTextView =
+                textView as? TranslationSourceNSTextView
+            return !isPublishingChange
+                && !isApplyingModelText
+                && !textView.hasMarkedText()
+                && translationTextView?.isUpdatingComposition != true
+                && translationTextView?.isComposingText != true
+                && !awaitingMarkedTextCommit
+                && textView.string != modelText
+        }
+
+        private func updateMarkedTextCommitState(
+            for textView: TranslationSourceNSTextView
+        ) {
+            if textView.isUpdatingComposition || textView.isComposingText {
+                markedTextCommitGeneration += 1
+                awaitingMarkedTextCommit = true
+            } else {
+                // Both cancellation and commit may finish through unmarkText
+                // without a later did-change notification. Fence one main
+                // queue turn, then publish the actual final string if it
+                // differs from the last committed value. This also releases
+                // cancellation with pre-existing text instead of leaving the
+                // model-to-editor gate permanently closed.
+                markedTextCommitGeneration += 1
+                let generation = markedTextCommitGeneration
+                DispatchQueue.main.async { [weak self, weak textView] in
+                    guard let self,
+                          let textView,
+                          self.markedTextCommitGeneration == generation,
+                          !textView.isUpdatingComposition,
+                          !textView.isComposingText else {
+                        return
+                    }
+                    self.publishCommittedTextIfNeeded(from: textView)
+                    self.awaitingMarkedTextCommit = false
+                }
+            }
+        }
+
+        private func publishCommittedTextIfNeeded(
+            from textView: NSTextView
+        ) {
+            publishDisplayedTextState(for: textView)
             let text = textView.string
             guard lastPublishedText != text else { return }
             lastPublishedText = text
             isPublishingChange = true
             onTextChange(text)
             isPublishingChange = false
+        }
+
+        func publishDisplayedTextState(for textView: NSTextView) {
+            publishDisplayedTextState(
+                textView.hasMarkedText()
+                    || (textView as? TranslationSourceNSTextView)?
+                        .isComposingText == true
+                    || !textView.string.isEmpty
+            )
+        }
+
+        private func publishDisplayedTextState(_ hasDisplayedText: Bool) {
+            guard lastDisplayedTextState != hasDisplayedText else {
+                return
+            }
+            lastDisplayedTextState = hasDisplayedText
+            pendingDisplayedTextState = hasDisplayedText
+            guard scheduledDisplayedTextStateGeneration == nil else {
+                return
+            }
+            let generation = displayedTextStateGeneration
+            scheduledDisplayedTextStateGeneration = generation
+            DispatchQueue.main.async { [weak self] in
+                guard let self,
+                      self.displayedTextStateGeneration == generation,
+                      self.scheduledDisplayedTextStateGeneration == generation,
+                      let state = self.pendingDisplayedTextState else {
+                    return
+                }
+                self.scheduledDisplayedTextStateGeneration = nil
+                self.pendingDisplayedTextState = nil
+                self.onDisplayedTextChange(state)
+            }
         }
     }
 }
@@ -296,9 +415,53 @@ final class TranslationSourceNSTextView:
     NSTextView
 {
     var onWindowChange: (() -> Void)?
+    var onDisplayedTextChange: (() -> Void)?
+    private(set) var isUpdatingComposition = false
+    private(set) var isComposingText = false
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         onWindowChange?()
+    }
+
+    override func setMarkedText(
+        _ string: Any,
+        selectedRange: NSRange,
+        replacementRange: NSRange
+    ) {
+        isUpdatingComposition = true
+        isComposingText = true
+        super.setMarkedText(
+            string,
+            selectedRange: selectedRange,
+            replacementRange: replacementRange
+        )
+        isUpdatingComposition = false
+        onDisplayedTextChange?()
+    }
+
+    override func unmarkText() {
+        isUpdatingComposition = true
+        super.unmarkText()
+        isUpdatingComposition = false
+        isComposingText = false
+        onDisplayedTextChange?()
+    }
+
+    override func insertText(
+        _ string: Any,
+        replacementRange: NSRange
+    ) {
+        let completesComposition = isComposingText || hasMarkedText()
+        guard completesComposition else {
+            super.insertText(string, replacementRange: replacementRange)
+            return
+        }
+
+        isUpdatingComposition = true
+        super.insertText(string, replacementRange: replacementRange)
+        isUpdatingComposition = false
+        isComposingText = false
+        onDisplayedTextChange?()
     }
 }

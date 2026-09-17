@@ -80,6 +80,72 @@ final class FloatingPanelGeometryTests: XCTestCase {
         )
     }
 
+    func testTargetScreenGeometryConvertsQuartzTopLeftToAppKitBottomLeftAtMixedScale() {
+        let coordinateSpace = FloatingPanelTargetScreenGeometry.CoordinateSpace(
+            quartzFrame: CGRect(x: -2_880, y: 0, width: 2_880, height: 1_800),
+            appKitFrame: CGRect(x: -1_440, y: -900, width: 1_440, height: 900)
+        )
+
+        let converted = FloatingPanelTargetScreenGeometry.appKitFrame(
+            forQuartzFrame: CGRect(x: -2_680, y: 200, width: 800, height: 400),
+            in: coordinateSpace
+        )
+
+        XCTAssertEqual(converted, CGRect(x: -1_340, y: -300, width: 400, height: 200))
+    }
+
+    func testTargetScreenGeometryUsesLargestLogicalOverlapAcrossMixedScaleDisplays() {
+        let coordinateSpaces = [
+            FloatingPanelTargetScreenGeometry.CoordinateSpace(
+                quartzFrame: CGRect(x: 0, y: 0, width: 1_920, height: 1_080),
+                appKitFrame: CGRect(x: 0, y: 0, width: 1_920, height: 1_080)
+            ),
+            FloatingPanelTargetScreenGeometry.CoordinateSpace(
+                quartzFrame: CGRect(x: -2_880, y: 0, width: 2_880, height: 1_800),
+                appKitFrame: CGRect(x: -1_440, y: 0, width: 1_440, height: 900)
+            ),
+        ]
+
+        XCTAssertEqual(
+            FloatingPanelTargetScreenGeometry.screenIndex(
+                containingMostOfQuartzWindow: CGRect(x: -1_000, y: 100, width: 1_400, height: 700),
+                coordinateSpaces: coordinateSpaces
+            ),
+            0,
+            "Screen choice must compare converted logical area, not raw backing pixels."
+        )
+    }
+
+    func testTargetScreenGeometryFallsBackAfterCapturedScreenDisconnects() {
+        let disconnectedScreen = FloatingPanelTargetScreenGeometry.CoordinateSpace(
+            quartzFrame: CGRect(x: -2_880, y: 0, width: 2_880, height: 1_800),
+            appKitFrame: CGRect(x: -1_440, y: 0, width: 0, height: 900)
+        )
+        let connectedScreen = FloatingPanelTargetScreenGeometry.CoordinateSpace(
+            quartzFrame: CGRect(x: 0, y: 0, width: 1_920, height: 1_080),
+            appKitFrame: CGRect(x: 0, y: 0, width: 1_920, height: 1_080)
+        )
+
+        XCTAssertEqual(
+            FloatingPanelTargetScreenGeometry.resolvedScreenIndex(
+                forQuartzWindow: CGRect(x: -2_000, y: 120, width: 900, height: 600),
+                coordinateSpaces: [disconnectedScreen, connectedScreen],
+                pointerScreenIndex: 1,
+                mainScreenIndex: nil
+            ),
+            1
+        )
+        XCTAssertEqual(
+            FloatingPanelTargetScreenGeometry.resolvedScreenIndex(
+                forQuartzWindow: CGRect(x: CGFloat.infinity, y: 0, width: 900, height: 600),
+                coordinateSpaces: [disconnectedScreen, connectedScreen],
+                pointerScreenIndex: nil,
+                mainScreenIndex: 1
+            ),
+            1
+        )
+    }
+
     func testVisibleFrameObserverForwardsScreenParameterChangesAndStops() async {
         let center = NotificationCenter()
         let observer = FloatingPanelVisibleFrameObserver(notificationCenter: center)

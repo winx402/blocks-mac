@@ -1899,6 +1899,147 @@ final class ScreenshotAppStateTests: XCTestCase {
         XCTAssertEqual(liveSnapshotCount, 1)
     }
 
+    func testPermissionCodeSigningClassificationUsesFlagsAndCertificateStructure() {
+        XCTAssertEqual(
+            PermissionCodeSigningClassifier.signatureKind(
+                signingFlags: 0x0000_0002,
+                certificateCount: 0,
+                teamID: nil
+            ),
+            "adhoc"
+        )
+        XCTAssertEqual(
+            PermissionCodeSigningClassifier.signatureKind(
+                signingFlags: 0,
+                certificateCount: 0,
+                teamID: nil
+            ),
+            "unknown"
+        )
+        XCTAssertEqual(
+            PermissionCodeSigningClassifier.signatureKind(
+                signingFlags: 0,
+                certificateCount: 1,
+                teamID: nil
+            ),
+            "signed-no-team"
+        )
+        XCTAssertEqual(
+            PermissionCodeSigningClassifier.signatureKind(
+                signingFlags: 0,
+                certificateCount: 3,
+                teamID: "TEAMID"
+            ),
+            "signed"
+        )
+        XCTAssertEqual(
+            PermissionCodeSigningClassifier.signatureKind(
+                signingFlags: nil,
+                certificateCount: nil,
+                teamID: nil
+            ),
+            "unknown"
+        )
+    }
+
+    func testPermissionRecoveryCommandsAreLimitedToSupportedServicesAndCurrentBundleID() {
+        let screenRecording = permissionDiagnosticFixture(kind: .screenRecording)
+        let accessibility = permissionDiagnosticFixture(kind: .accessibility)
+        let inputMonitoring = permissionDiagnosticFixture(kind: .inputMonitoring)
+        let unsafeBundleID = permissionDiagnosticFixture(
+            kind: .screenRecording,
+            bundleID: "app.blocks.dev; unsafe"
+        )
+
+        XCTAssertEqual(
+            screenRecording.manualTCCResetCommand,
+            "tccutil reset ScreenCapture app.blocks.permission-refresh-tests"
+        )
+        XCTAssertEqual(
+            accessibility.manualTCCResetCommand,
+            "tccutil reset Accessibility app.blocks.permission-refresh-tests"
+        )
+        XCTAssertNil(inputMonitoring.manualTCCResetCommand)
+        XCTAssertNil(unsafeBundleID.manualTCCResetCommand)
+    }
+
+    func testPermissionStorePromptsEachPermissionOnlyOnceButPresentsGuidanceForEveryRequest() async throws {
+        let initial = permissionRefreshTestSnapshot(
+            granted: false,
+            capturedAt: Date(timeIntervalSinceReferenceDate: 0)
+        )
+        let provider = ControlledPermissionSnapshotProvider(initialSnapshot: initial)
+        let accessRequester = RecordingPermissionAccessRequester()
+        let assistPresenter = ManualPermissionAssistPresenter()
+        let store = PermissionStore(
+            snapshotProvider: provider,
+            accessRequester: accessRequester,
+            assistPresenter: assistPresenter,
+            systemActions: RecordingPermissionSystemActions(),
+            systemPromptGate: PermissionSystemPromptGate()
+        )
+        defer { provider.releaseAll(with: initial) }
+
+        try await provider.waitUntilStarted(ordinal: 0)
+        store.requestAccessibilityPermissionAssist()
+        store.requestAccessibilityPermissionAssist()
+        store.requestScreenRecordingPermissionAssist()
+        store.requestScreenRecordingPermissionAssist()
+        store.requestInputMonitoringPermissionAssist()
+        store.requestInputMonitoringPermissionAssist()
+
+        XCTAssertEqual(
+            accessRequester.requestedKinds,
+            [.accessibility, .screenRecording, .inputMonitoring]
+        )
+        XCTAssertEqual(
+            assistPresenter.presentedKinds,
+            [.accessibility, .accessibility, .screenRecording, .screenRecording, .inputMonitoring, .inputMonitoring]
+        )
+    }
+
+    func testPermissionStoreSharedGateThrottlesSystemPromptAcrossStores() async throws {
+        let initial = permissionRefreshTestSnapshot(
+            granted: false,
+            capturedAt: Date(timeIntervalSinceReferenceDate: 0)
+        )
+        let sharedGate = PermissionSystemPromptGate()
+        let firstProvider = ControlledPermissionSnapshotProvider(initialSnapshot: initial)
+        let secondProvider = ControlledPermissionSnapshotProvider(initialSnapshot: initial)
+        let firstRequester = RecordingPermissionAccessRequester()
+        let secondRequester = RecordingPermissionAccessRequester()
+        let firstPresenter = ManualPermissionAssistPresenter()
+        let secondPresenter = ManualPermissionAssistPresenter()
+        let firstStore = PermissionStore(
+            snapshotProvider: firstProvider,
+            accessRequester: firstRequester,
+            assistPresenter: firstPresenter,
+            systemActions: RecordingPermissionSystemActions(),
+            systemPromptGate: sharedGate
+        )
+        let secondStore = PermissionStore(
+            snapshotProvider: secondProvider,
+            accessRequester: secondRequester,
+            assistPresenter: secondPresenter,
+            systemActions: RecordingPermissionSystemActions(),
+            systemPromptGate: sharedGate
+        )
+        defer {
+            firstProvider.releaseAll(with: initial)
+            secondProvider.releaseAll(with: initial)
+        }
+
+        try await firstProvider.waitUntilStarted(ordinal: 0)
+        try await secondProvider.waitUntilStarted(ordinal: 0)
+        firstStore.requestAccessibilityPermissionAssist()
+        secondStore.requestAccessibilityPermissionAssist()
+
+        XCTAssertEqual(firstRequester.requestedKinds, [.accessibility])
+        XCTAssertTrue(secondRequester.requestedKinds.isEmpty)
+        XCTAssertEqual(firstPresenter.presentedKinds, [.accessibility])
+        XCTAssertEqual(secondPresenter.presentedKinds, [.accessibility])
+    }
+
     func testPermissionStoreSupersededAccessibilityAssistRefreshPublishesBeforeRetainedCompletion() async throws {
         let initial = permissionRefreshTestSnapshot(
             granted: false,
@@ -1920,7 +2061,8 @@ final class ScreenshotAppStateTests: XCTestCase {
             snapshotProvider: provider,
             accessRequester: accessRequester,
             assistPresenter: assistPresenter,
-            systemActions: systemActions
+            systemActions: systemActions,
+            systemPromptGate: PermissionSystemPromptGate()
         )
         defer { provider.releaseAll(with: granted) }
 
@@ -1977,7 +2119,8 @@ final class ScreenshotAppStateTests: XCTestCase {
             snapshotProvider: provider,
             accessRequester: RecordingPermissionAccessRequester(),
             assistPresenter: assistPresenter,
-            systemActions: RecordingPermissionSystemActions()
+            systemActions: RecordingPermissionSystemActions(),
+            systemPromptGate: PermissionSystemPromptGate()
         )
         defer { provider.releaseAll(with: current) }
 
@@ -2035,7 +2178,8 @@ final class ScreenshotAppStateTests: XCTestCase {
             snapshotProvider: provider,
             accessRequester: RecordingPermissionAccessRequester(),
             assistPresenter: assistPresenter,
-            systemActions: RecordingPermissionSystemActions()
+            systemActions: RecordingPermissionSystemActions(),
+            systemPromptGate: PermissionSystemPromptGate()
         )
         let coordinator = PermissionFeatureCoordinator(
             store: store,
@@ -2090,7 +2234,8 @@ final class ScreenshotAppStateTests: XCTestCase {
             snapshotProvider: provider,
             accessRequester: RecordingPermissionAccessRequester(),
             assistPresenter: assistPresenter,
-            systemActions: RecordingPermissionSystemActions()
+            systemActions: RecordingPermissionSystemActions(),
+            systemPromptGate: PermissionSystemPromptGate()
         )
         weakStore = store
         defer { provider.releaseAll(with: granted) }
@@ -29630,8 +29775,10 @@ private final class RecordingPermissionAccessRequester: PermissionAccessRequesti
 @MainActor
 private final class ManualPermissionAssistPresenter: PermissionAssistPresenting {
     private var refreshes: [PermissionAssistKind: [() -> Void]] = [:]
+    private(set) var presentedKinds: [PermissionAssistKind] = []
 
     func present(kind: PermissionAssistKind, onRefresh: @escaping () -> Void) {
+        presentedKinds.append(kind)
         refreshes[kind, default: []].append(onRefresh)
     }
 
@@ -29716,5 +29863,24 @@ private func permissionRefreshTestSnapshot(
             identityIssue: .none
         ),
         capturedAt: capturedAt
+    )
+}
+
+private func permissionDiagnosticFixture(
+    kind: PermissionDiagnosticKind,
+    bundleID: String = "app.blocks.permission-refresh-tests"
+) -> PermissionDiagnosticSnapshot {
+    PermissionDiagnosticSnapshot(
+        kind: kind,
+        granted: false,
+        bundleID: bundleID,
+        appPath: "/Applications/Blocks.app",
+        signatureKind: "signed",
+        teamID: "TEAMID",
+        hasUsageDescription: true,
+        lastCheckedAt: Date(timeIntervalSinceReferenceDate: 0),
+        recommendedAction: .requestInSystemSettings,
+        matchingRunningAppPaths: [],
+        identityIssue: .none
     )
 }

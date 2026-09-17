@@ -12,6 +12,9 @@ final class PermissionAssistPanelSessionModel: ObservableObject {
             ?? (bundle?.object(forInfoDictionaryKey: "CFBundleName") as? String)
             ?? appURL.deletingPathExtension().lastPathComponent
     }
+    var isSeparateTarget: Bool {
+        appURL.standardizedFileURL != Bundle.main.bundleURL.standardizedFileURL
+    }
 
     init(session: PermissionAssistSession?, appURL: URL) {
         self.session = session
@@ -142,6 +145,12 @@ struct PermissionAssistPanelView: View {
             Text(L10n.format("permission.assist.targetDetail", sessionModel.appDisplayName))
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if session.kind == .accessibility && sessionModel.isSeparateTarget {
+                Text(L10n.format("permission.assist.separateHelperEntry", sessionModel.appDisplayName))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 

@@ -152,6 +152,31 @@ final class SelectionHelperLocalAssociationTests: XCTestCase {
     }
 
     #if !SELECTION_HELPER_ASSOCIATION_FIXTURE
+    func testUnavailableKeyIsNotReportedAsAnUnpairedInstallation() throws {
+        for status in [errSecAuthFailed, errSecInteractionNotAllowed, errSecDecode] {
+            let store = SelectionHelperSharedKeyStore(itemCopyMatching: { _, _ in status })
+            XCTAssertEqual(store.loadForAssociation(), .failure(.keychainUnavailable))
+            XCTAssertNil(store.load())
+            XCTAssertFalse(store.permitsLocalAssociation())
+        }
+        let absent = SelectionHelperSharedKeyStore(itemCopyMatching: { _, _ in errSecItemNotFound })
+        XCTAssertNil(try absent.loadForAssociation().get())
+    }
+
+    func testExistingReadablePairingIsPreserved() throws {
+        let key = Data(repeating: 0x37, count: 32)
+        var writes = 0
+        let store = SelectionHelperSharedKeyStore(itemCopyMatching: { _, result in
+            result?.pointee = key as CFData
+            return errSecSuccess
+        }, itemUpdate: { _, _ in writes += 1; return errSecSuccess },
+           itemAdd: { _, _ in writes += 1; return errSecSuccess },
+           itemDelete: { _ in writes += 1; return errSecSuccess })
+        XCTAssertEqual(try store.loadForAssociation().get(), key)
+        XCTAssertFalse(store.permitsLocalAssociation())
+        XCTAssertEqual(writes, 0)
+    }
+
     func testKeychainErrorsAreNotTreatedAsAbsence() {
         for status in [errSecSuccess, errSecAuthFailed, errSecInteractionNotAllowed] {
             let store = SelectionHelperSharedKeyStore(itemCopyMatching: { _, _ in status })
