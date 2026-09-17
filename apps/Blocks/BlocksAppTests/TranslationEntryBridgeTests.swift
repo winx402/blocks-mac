@@ -1680,6 +1680,41 @@ final class TranslationEntryBridgeTests: XCTestCase {
         XCTAssertTrue(publishedTexts.isEmpty)
     }
 
+    func testSourceEditorClearsCompositionWhenMarkedTextBecomesEmpty()
+        async
+    {
+        var displayedTextStates: [Bool] = []
+        let coordinator = TranslationSourceTextEditor.Coordinator(
+            onTextChange: { _ in },
+            onDisplayedTextChange: { displayedTextStates.append($0) }
+        )
+        let textView = TranslationSourceNSTextView(
+            frame: NSRect(x: 0, y: 0, width: 240, height: 100)
+        )
+        coordinator.attach(textView)
+        defer { coordinator.detach() }
+
+        textView.setMarkedText(
+            "ni",
+            selectedRange: NSRange(location: 2, length: 0),
+            replacementRange: NSRange(location: 0, length: 0)
+        )
+        textView.setMarkedText(
+            "",
+            selectedRange: NSRange(location: 0, length: 0),
+            replacementRange: NSRange(location: 0, length: 2)
+        )
+
+        guard !textView.hasMarkedText() else {
+            XCTAssertTrue(textView.isComposingText)
+            return
+        }
+
+        await waitUntil { displayedTextStates.last == false }
+        XCTAssertFalse(textView.isComposingText)
+        XCTAssertTrue(coordinator.shouldApplyModelText("next", to: textView))
+    }
+
     func testSourceEditorRestoresDisplayedTextStateAfterMarkedTextEnds()
         async
     {

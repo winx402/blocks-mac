@@ -35,6 +35,7 @@ jobs:
         run: |
           python3 tools/verification/install_entry_self_test.py
           python3 tools/verification/release_pipeline_self_test.py
+          python3 tools/verification/release_xcconfig_self_test.py
           python3 tools/verification/application_update_safety_self_test.py
           python3 tools/verification/quit_watchdog_self_test.py
           python3 tools/verification/feedback_cli_self_test.py

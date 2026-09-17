@@ -416,7 +416,10 @@ final class TranslationSourceNSTextView:
 {
     var onWindowChange: (() -> Void)?
     var onDisplayedTextChange: (() -> Void)?
-    private(set) var isUpdatingComposition = false
+    private var compositionMutationDepth = 0
+    var isUpdatingComposition: Bool {
+        compositionMutationDepth > 0
+    }
     private(set) var isComposingText = false
 
     override func viewDidMoveToWindow() {
@@ -429,21 +432,22 @@ final class TranslationSourceNSTextView:
         selectedRange: NSRange,
         replacementRange: NSRange
     ) {
-        isUpdatingComposition = true
-        isComposingText = true
+        compositionMutationDepth += 1
         super.setMarkedText(
             string,
             selectedRange: selectedRange,
             replacementRange: replacementRange
         )
-        isUpdatingComposition = false
+        compositionMutationDepth -= 1
+        isComposingText = Self.isNonEmptyMarkedPayload(string)
+            && hasMarkedText()
         onDisplayedTextChange?()
     }
 
     override func unmarkText() {
-        isUpdatingComposition = true
+        compositionMutationDepth += 1
         super.unmarkText()
-        isUpdatingComposition = false
+        compositionMutationDepth -= 1
         isComposingText = false
         onDisplayedTextChange?()
     }
@@ -458,10 +462,20 @@ final class TranslationSourceNSTextView:
             return
         }
 
-        isUpdatingComposition = true
+        compositionMutationDepth += 1
         super.insertText(string, replacementRange: replacementRange)
-        isUpdatingComposition = false
+        compositionMutationDepth -= 1
         isComposingText = false
         onDisplayedTextChange?()
+    }
+
+    private static func isNonEmptyMarkedPayload(_ value: Any) -> Bool {
+        if let value = value as? String {
+            return !value.isEmpty
+        }
+        if let value = value as? NSAttributedString {
+            return value.length > 0
+        }
+        return true
     }
 }

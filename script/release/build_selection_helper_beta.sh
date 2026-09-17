@@ -13,6 +13,14 @@ release_name=""
 channel="direct-beta"
 update_feed_url=""
 provisioning_profile=""
+release_overlay=""
+resolved_helper_entitlements=""
+
+cleanup_release_artifacts() {
+  [[ -z "${release_overlay:-}" ]] || /bin/rm -f -- "$release_overlay"
+  [[ -z "${resolved_helper_entitlements:-}" ]] || /bin/rm -f -- "$resolved_helper_entitlements"
+}
+trap cleanup_release_artifacts EXIT
 
 while (($#)); do
   case "$1" in
@@ -39,6 +47,22 @@ parsed = validate_bundle_version("v" + sys.argv[2], sys.argv[2], sys.argv[3], sy
 print("direct-beta" if parsed.is_prerelease else "direct-stable")
 PY
   )" || { echo "error: release name and version/build identity do not form a consistent SemVer release." >&2; exit 2; }
+fi
+
+active_profile="$profile"
+if [[ -n "$version" ]]; then
+  previous_umask="$(umask)"
+  umask 077
+  release_overlay="$(mktemp "${TMPDIR:-/tmp}/blocks-release-overlay.XXXXXX")"
+  umask "$previous_umask"
+  chmod 600 "$release_overlay"
+  /usr/bin/python3 "$repo_root/script/release/release_xcconfig.py" \
+    --base-profile "$profile" \
+    --version "$version" \
+    --build-number "$build_number" \
+    --release-name "$release_name" \
+    --update-feed-url "$update_feed_url" > "$release_overlay"
+  active_profile="$release_overlay"
 fi
 
 if ((!unsigned)); then
@@ -75,16 +99,12 @@ build_args=(
   -project "$project"
   -scheme BlocksSelectionHelper
   -configuration Release
-  -xcconfig "$profile"
+  -xcconfig "$active_profile"
   -derivedDataPath "$derived_data"
   ARCHS=arm64
   ONLY_ACTIVE_ARCH=NO
-  BLOCKS_DISTRIBUTION_CHANNEL="$channel"
 )
 if ((!unsigned)); then build_args+=(PROVISIONING_PROFILE_SPECIFIER="$provisioning_profile"); fi
-if [[ -n "$version" ]]; then
-  build_args+=(MARKETING_VERSION="$version" CURRENT_PROJECT_VERSION="$build_number" BLOCKS_RELEASE_NAME="$release_name" BLOCKS_UPDATE_FEED_URL="$update_feed_url")
-fi
 if ((unsigned)); then
   build_args+=(CODE_SIGNING_ALLOWED=NO)
 fi
@@ -100,7 +120,7 @@ fi
 "$repo_root/script/release/audit_selection_helper_bundle.sh" "${helper_audit_args[@]}"
 if ((!unsigned)); then
   resolved_helper_entitlements="$(mktemp "${TMPDIR:-/tmp}/blocks-helper-entitlements.plist.XXXXXX")"
-  trap '/bin/rm -f -- "${resolved_helper_entitlements:-}"' EXIT
+  chmod 600 "$resolved_helper_entitlements"
   /bin/cp "$repo_root/apps/Blocks/BlocksSelectionHelper/BlocksSelectionHelper.entitlements" "$resolved_helper_entitlements"
   plutil -replace keychain-access-groups -xml "<array><string>${development_team}.app.blocks.selection-helper.shared</string></array>" "$resolved_helper_entitlements"
   [[ "$(plutil -extract 'keychain-access-groups.0' raw "$resolved_helper_entitlements")" == "$development_team.app.blocks.selection-helper.shared" ]] \

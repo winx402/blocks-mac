@@ -14,6 +14,12 @@ release_name=""
 channel="direct-beta"
 update_feed_url=""
 provisioning_profile=""
+release_overlay=""
+
+cleanup_release_overlay() {
+  [[ -z "${release_overlay:-}" ]] || /bin/rm -f -- "$release_overlay"
+}
+trap cleanup_release_overlay EXIT
 
 while (($#)); do
   case "$1" in
@@ -44,6 +50,22 @@ PY
   )" || { echo "error: release name and version/build identity do not form a consistent SemVer release." >&2; exit 2; }
 fi
 
+active_profile="$profile"
+if [[ -n "$version" ]]; then
+  previous_umask="$(umask)"
+  umask 077
+  release_overlay="$(mktemp "${TMPDIR:-/tmp}/blocks-release-overlay.XXXXXX")"
+  umask "$previous_umask"
+  chmod 600 "$release_overlay"
+  /usr/bin/python3 "$repo_root/script/release/release_xcconfig.py" \
+    --base-profile "$profile" \
+    --version "$version" \
+    --build-number "$build_number" \
+    --release-name "$release_name" \
+    --update-feed-url "$update_feed_url" > "$release_overlay"
+  active_profile="$release_overlay"
+fi
+
 if ((unsigned)); then
   echo "warning: building an unsigned audit artifact; it is not publishable." >&2
 else
@@ -58,16 +80,12 @@ build_args=(
   -project "$project"
   -scheme Blocks
   -configuration Release
-  -xcconfig "$profile"
+  -xcconfig "$active_profile"
   -derivedDataPath "$derived_data"
   ARCHS=arm64
   ONLY_ACTIVE_ARCH=NO
-  BLOCKS_DISTRIBUTION_CHANNEL="$channel"
 )
 if ((!unsigned)); then build_args+=(BLOCKS_MAIN_APP_DISTRIBUTION_PROFILE="$provisioning_profile"); fi
-if [[ -n "$version" ]]; then
-  build_args+=(MARKETING_VERSION="$version" CURRENT_PROJECT_VERSION="$build_number" BLOCKS_RELEASE_NAME="$release_name" BLOCKS_UPDATE_FEED_URL="$update_feed_url")
-fi
 if ((unsigned)); then
   build_args+=(CODE_SIGNING_ALLOWED=NO)
 fi
