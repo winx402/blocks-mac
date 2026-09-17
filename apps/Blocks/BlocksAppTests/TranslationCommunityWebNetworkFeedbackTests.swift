@@ -5,6 +5,66 @@ import XCTest
 
 @MainActor
 final class TranslationCommunityWebNetworkFeedbackTests: XCTestCase {
+    /// Explicit local probe only: sends the fixed non-personal text "Hello".
+    /// Normal CI and offline tests must never depend on a community endpoint.
+    func testLiveCommunityConnectionTestsWhenExplicitlyEnabled() async throws {
+        guard ProcessInfo.processInfo.environment["BLOCKS_LIVE_COMMUNITY_PROBE"] == "1" else {
+            throw XCTSkip("Live community requests require explicit opt-in.")
+        }
+        let suite = "LiveCommunityProbe.\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let disclosures = TranslationCommunityWebDisclosureStore(defaults: defaults)
+        let store = TranslationStore(defaults: defaults)
+        let service = TranslationSourceManagementService(
+            pluginManager: BlocksNativePluginManager(storageUnavailableBecause: NSError(domain: "fixture", code: 1)),
+            translationStore: store,
+            communityDisclosureStore: disclosures
+        )
+        for source in TranslationCommunityWebSource.productionAvailable {
+            disclosures.acknowledge(source: source)
+            try await service.setSourceEnabled(true, sourceID: source.rawValue)
+            let result = await service.testSource(sourceID: source.rawValue, testText: "Hello")
+            print("LIVE_COMMUNITY \(source.rawValue) succeeded=\(result.succeeded) code=\(result.errorCode ?? "none")")
+            XCTAssertTrue(result.succeeded, "\(source.rawValue): \(result.errorCode ?? "unknown")")
+        }
+    }
+
+    func testManagementConnectionTestPreservesNetworkCategoriesAndPresentation() async {
+        let cases: [(NetworkFeedbackTransport, String, String)] = [
+            (.init(urlErrorCode: URLError.Code.networkConnectionLost.rawValue), "network_connection_lost", "-1005"),
+            (.init(urlErrorCode: URLError.Code.timedOut.rawValue), "network_timed_out", "-1001"),
+            (.init(statusCode: 429), "network_rate_limited", "429")
+        ]
+        for (transport, code, marker) in cases {
+            let suite = "CommunityManagementFeedback.\(UUID())"
+            let defaults = UserDefaults(suiteName: suite)!
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let disclosures = TranslationCommunityWebDisclosureStore(defaults: defaults)
+            disclosures.acknowledge(source: .googleWeb)
+            let store = TranslationStore(communityWebTransport: transport, defaults: defaults)
+            let service = TranslationSourceManagementService(
+                pluginManager: BlocksNativePluginManager(storageUnavailableBecause: NSError(domain: "fixture", code: 1)),
+                translationStore: store,
+                communityDisclosureStore: disclosures
+            )
+            let result = await service.testSource(sourceID: "community:google-web")
+            XCTAssertFalse(result.succeeded)
+            XCTAssertEqual(result.errorCode, code)
+            XCTAssertEqual(result.errorMessage, TranslationErrorPresentation.message(code: code, fallback: nil))
+            XCTAssertTrue(result.errorMessage?.contains(marker) == true)
+            do {
+                _ = try await service.execute(.init(operation: .test, sourceID: "community:google-web"))
+                XCTFail("A failed test must not become a successful CLI action.")
+            } catch let error as TranslationSourceManagementServiceError {
+                XCTAssertEqual(error.code, code)
+                XCTAssertTrue(error.localizedDescription.contains(marker))
+            } catch {
+                XCTFail("Unexpected error category: \(error)")
+            }
+        }
+    }
+
     func testNetworkConnectionLostHasStableCodeAndRecoveryMessage()
         async
     {

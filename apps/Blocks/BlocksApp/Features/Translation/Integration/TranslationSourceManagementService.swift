@@ -649,15 +649,19 @@ final class TranslationSourceManagementService {
         } catch {
             let managementError =
                 error as? TranslationSourceManagementServiceError
+            let adapterError = error as? TranslationServiceAdapterError
             return TranslationSourceConnectionTestSummary(
                 sourceID: sourceID,
                 capability: capability,
                 succeeded: false,
                 errorCode:
                     managementError?.code
+                        ?? adapterError?.errorCode
                         ?? "connection_test_failed",
                 errorMessage: String(
-                    error.localizedDescription.prefix(512)
+                    (adapterError == nil
+                        ? error.localizedDescription
+                        : TranslationErrorPresentation.message(for: error)).prefix(512)
                 )
             )
         }
