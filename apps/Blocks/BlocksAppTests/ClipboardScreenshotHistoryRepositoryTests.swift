@@ -7,6 +7,286 @@ import XCTest
 @testable import BlocksCore
 
 final class ClipboardScreenshotHistoryRepositoryTests: XCTestCase {
+    func testImageCustomTitleIsSearchableAndReplacingItRemovesTheOldTitleFromFTS() throws {
+        let fixture = try makeFixture()
+        defer { fixture.close() }
+        let record = makeImageRecord(
+            id: "image-custom-title",
+            png: pngData(seed: 71),
+            customTitle: "Initial image title"
+        )
+
+        _ = try fixture.repository.insert(
+            record: record,
+            payload: makePayload(recordID: record.id, png: pngData(seed: 71))
+        )
+        XCTAssertEqual(
+            try fixture.repository.search("Initial image title", limit: 10).map(\.id),
+            [record.id]
+        )
+
+        try fixture.repository.updateCustomTitle(recordID: record.id, title: "Replacement image title")
+
+        XCTAssertTrue(
+            try fixture.repository.search("Initial image title", limit: 10).isEmpty
+        )
+        XCTAssertEqual(
+            try fixture.repository.search("Replacement image title", limit: 10).map(\.id),
+            [record.id]
+        )
+    }
+
+    func testLegacySearchDocumentReindexAddsTitleAndPreservesOCRTagsAndRecordIdentity() throws {
+        let fixture = try makeFixture()
+        defer { fixture.close() }
+        let record = makeImageRecord(
+            id: "legacy-title-reindex",
+            png: pngData(seed: 72),
+            customTitle: "Legacy searchable title"
+        )
+        _ = try fixture.repository.insert(
+            record: record,
+            payload: makePayload(recordID: record.id, png: pngData(seed: 72))
+        )
+        let initialDocument = try XCTUnwrap(fixture.repository.loadSearchDocument(recordID: record.id))
+        XCTAssertTrue(try fixture.repository.updateOCRResult(
+            recordID: record.id,
+            revision: initialDocument.revision,
+            text: "OCR text that must survive reindex",
+            state: .succeeded
+        ))
+        let tags = ClipboardTagRepository(database: fixture.database)
+        let tagID = try createdTagID(tags.createTag(displayName: "Keep reindex tag"))
+        _ = try tags.addTag(recordID: record.id, tagID: tagID)
+        let beforeReindex = try XCTUnwrap(fixture.repository.loadSearchDocument(recordID: record.id))
+        let legacyProjection = [
+            beforeReindex.ocrText,
+            beforeReindex.tagTokens.joined(separator: " ")
+        ]
+        .compactMap { $0 }
+        .joined(separator: " ")
+
+        try fixture.database.connection.transaction {
+            try fixture.database.connection.withStatement(
+                "UPDATE clipboard_search_documents SET revision = ? WHERE record_id = ?",
+                bindings: [
+                    .string("v2:\(record.changeCount):\(record.signatureSHA256_12)"),
+                    .string(record.id)
+                ]
+            ) { statement in
+                _ = try statement.step()
+            }
+            try fixture.database.connection.withStatement(
+                "UPDATE clipboard_items SET search_text = ? WHERE id = ?",
+                bindings: [.string(legacyProjection), .string(record.id)]
+            ) { statement in
+                _ = try statement.step()
+            }
+            if try fixture.database.tableExists("clipboard_fts") {
+                try fixture.database.connection.withStatement(
+                    "DELETE FROM clipboard_fts WHERE record_id = ?",
+                    bindings: [.string(record.id)]
+                ) { statement in
+                    _ = try statement.step()
+                }
+                try fixture.database.connection.withStatement(
+                    "INSERT INTO clipboard_fts (record_id, search_text) VALUES (?, ?)",
+                    bindings: [.string(record.id), .string(legacyProjection)]
+                ) { statement in
+                    _ = try statement.step()
+                }
+            }
+        }
+        XCTAssertTrue(
+            try fixture.repository.search("Legacy searchable title", limit: 10).isEmpty
+        )
+
+        XCTAssertEqual(try fixture.repository.rebuildPendingSearchDocuments(limit: 10), 1)
+
+        let rebuilt = try XCTUnwrap(fixture.repository.loadSearchDocument(recordID: record.id))
+        XCTAssertEqual(rebuilt.revision, ClipboardSearchDocumentBuilder.revision(for: record))
+        XCTAssertEqual(rebuilt.ocrText, beforeReindex.ocrText)
+        XCTAssertEqual(rebuilt.ocrState, .succeeded)
+        XCTAssertEqual(rebuilt.ocrTextSource, .vision)
+        XCTAssertEqual(rebuilt.tagTokens, beforeReindex.tagTokens)
+        XCTAssertEqual(try fixture.repository.loadRecord(recordID: record.id)?.id, record.id)
+        XCTAssertEqual(
+            try fixture.repository.search("Legacy searchable title", limit: 10).map(\.id),
+            [record.id]
+        )
+    }
+
+    func testCurrentRedactedDocumentsDoNotStarveLegacyTitleReindexBatch() throws {
+        let fixture = try makeFixture()
+        defer { fixture.close() }
+        let now = Date()
+        let legacy = makeImageRecord(
+            id: "legacy-title-after-redacted-batch",
+            png: pngData(seed: 75),
+            createdAt: now.addingTimeInterval(-1_000),
+            customTitle: "Legacy title after redacted batch"
+        )
+        _ = try fixture.repository.insert(
+            record: legacy,
+            payload: makePayload(recordID: legacy.id, png: pngData(seed: 75))
+        )
+        try fixture.database.connection.transaction {
+            try fixture.database.connection.withStatement(
+                "UPDATE clipboard_search_documents SET revision = ? WHERE record_id = ?",
+                bindings: [
+                    .string("v2:\(legacy.changeCount):\(legacy.signatureSHA256_12)"),
+                    .string(legacy.id)
+                ]
+            ) { statement in
+                _ = try statement.step()
+            }
+            try fixture.database.connection.withStatement(
+                "UPDATE clipboard_items SET search_text = ? WHERE id = ?",
+                bindings: [.string("legacy pre-title projection"), .string(legacy.id)]
+            ) { statement in
+                _ = try statement.step()
+            }
+            if try fixture.database.tableExists("clipboard_fts") {
+                try fixture.database.connection.withStatement(
+                    "DELETE FROM clipboard_fts WHERE record_id = ?",
+                    bindings: [.string(legacy.id)]
+                ) { statement in
+                    _ = try statement.step()
+                }
+                try fixture.database.connection.withStatement(
+                    "INSERT INTO clipboard_fts (record_id, search_text) VALUES (?, ?)",
+                    bindings: [.string(legacy.id), .string("legacy pre-title projection")]
+                ) { statement in
+                    _ = try statement.step()
+                }
+            }
+        }
+
+        for index in 0..<96 {
+            let record = makeImageRecord(
+                id: "current-redacted-\(index)",
+                png: pngData(seed: UInt8(index)),
+                createdAt: now.addingTimeInterval(Double(index + 1)),
+                restorable: false,
+                excluded: true,
+                snapshotSkipped: true,
+                customTitle: "Private redacted title \(index)"
+            )
+            _ = try fixture.repository.insert(
+                record: record,
+                payload: makePayload(recordID: record.id, png: pngData(seed: UInt8(index)))
+            )
+        }
+
+        XCTAssertEqual(
+            try fixture.repository.loadPendingIndexBatch(limit: 96),
+            [legacy.id]
+        )
+        XCTAssertEqual(try fixture.repository.rebuildPendingSearchDocuments(limit: 96), 1)
+        XCTAssertEqual(
+            try fixture.repository.search("Legacy title after redacted batch", limit: 10).map(\.id),
+            [legacy.id]
+        )
+        XCTAssertEqual(try fixture.repository.rebuildPendingSearchDocuments(limit: 96), 0)
+    }
+
+    func testLegacyRunningOCRIsRequeuedWhenTitleIndexRebuildChangesRevision() throws {
+        let fixture = try makeFixture()
+        defer { fixture.close() }
+        let record = makeImageRecord(
+            id: "legacy-running-ocr",
+            png: pngData(seed: 76),
+            customTitle: "Legacy running OCR title"
+        )
+        _ = try fixture.repository.insert(
+            record: record,
+            payload: makePayload(recordID: record.id, png: pngData(seed: 76))
+        )
+        let legacyRevision = "v2:\(record.changeCount):\(record.signatureSHA256_12)"
+        try fixture.database.connection.withStatement(
+            "UPDATE clipboard_search_documents SET revision = ? WHERE record_id = ?",
+            bindings: [.string(legacyRevision), .string(record.id)]
+        ) { statement in
+            _ = try statement.step()
+        }
+        XCTAssertTrue(try fixture.repository.updateOCRResult(
+            recordID: record.id,
+            revision: legacyRevision,
+            text: nil,
+            state: .running
+        ))
+
+        XCTAssertEqual(try fixture.repository.rebuildPendingSearchDocuments(limit: 10), 1)
+        let rebuilt = try XCTUnwrap(fixture.repository.loadSearchDocument(recordID: record.id))
+        XCTAssertEqual(rebuilt.revision, ClipboardSearchDocumentBuilder.revision(for: record))
+        XCTAssertEqual(rebuilt.ocrState, .pending)
+        XCTAssertEqual(rebuilt.ocrTextSource, .none)
+        XCTAssertFalse(try fixture.repository.updateOCRResult(
+            recordID: record.id,
+            revision: legacyRevision,
+            text: "late legacy OCR result",
+            state: .succeeded
+        ))
+        XCTAssertEqual(
+            try fixture.repository.loadPendingOCRDocuments(limit: 10).map(\.recordID),
+            [record.id]
+        )
+    }
+
+    func testTitleIndexDoesNotLeakExcludedOrSkippedRecords() throws {
+        let fixture = try makeFixture()
+        defer { fixture.close() }
+        let excluded = makeImageRecord(
+            id: "excluded-title",
+            png: pngData(seed: 73),
+            restorable: false,
+            excluded: true,
+            snapshotSkipped: true,
+            customTitle: "Excluded title must not be indexed"
+        )
+        let skipped = makeImageRecord(
+            id: "skipped-title",
+            png: pngData(seed: 74),
+            restorable: false,
+            snapshotSkipped: true,
+            customTitle: "Skipped title must not be indexed"
+        )
+
+        for record in [excluded, skipped] {
+            _ = try fixture.repository.insert(
+                record: record,
+                payload: makePayload(recordID: record.id, png: record.id == excluded.id ? pngData(seed: 73) : pngData(seed: 74))
+            )
+            try fixture.repository.updateCustomTitle(recordID: record.id, title: "Updated \(record.id) private title")
+            let document = try XCTUnwrap(fixture.repository.loadSearchDocument(recordID: record.id))
+            XCTAssertEqual(document.payloadDerivationState, .redacted)
+            XCTAssertTrue(document.ftsProjectionText.isEmpty)
+        }
+        if try fixture.database.tableExists("clipboard_fts") {
+            try fixture.database.connection.withStatement(
+                "INSERT INTO clipboard_fts (record_id, search_text) VALUES (?, ?)",
+                bindings: [.string(excluded.id), .string("residual private FTS text")]
+            ) { statement in
+                _ = try statement.step()
+            }
+            XCTAssertEqual(try fixture.repository.rebuildPendingSearchDocuments(limit: 10), 1)
+            XCTAssertEqual(
+                try fixture.database.connection.firstInt(
+                    "SELECT COUNT(*) FROM clipboard_fts WHERE record_id = ?",
+                    bindings: [.string(excluded.id)]
+                ),
+                0
+            )
+        }
+
+        XCTAssertTrue(
+            try fixture.repository.search("Updated excluded-title private title", limit: 10).isEmpty
+        )
+        XCTAssertTrue(
+            try fixture.repository.search("Updated skipped-title private title", limit: 10).isEmpty
+        )
+    }
+
     func testDeletingMissingClipboardRecordDoesNotReportCommittedDeletion() throws {
         let fixture = try makeFixture()
         defer { fixture.close() }
@@ -2704,7 +2984,11 @@ private extension ClipboardScreenshotHistoryRepositoryTests {
         signatureOverride: String? = nil,
         createdAt: Date = Date(),
         changeCount: Int? = nil,
-        lastCopiedAt: Date? = nil
+        lastCopiedAt: Date? = nil,
+        restorable: Bool = true,
+        excluded: Bool = false,
+        snapshotSkipped: Bool = false,
+        customTitle: String? = nil
     ) -> ClipboardRecorderRecord {
         let signature = signatureOverride ?? sha256(png)
         return ClipboardRecorderRecord(
@@ -2725,7 +3009,10 @@ private extension ClipboardScreenshotHistoryRepositoryTests {
             signatureSHA256: signature,
             signatureSHA256_12: String(signature.prefix(12)),
             fixtureOwned: false,
-            restorable: true,
+            restorable: restorable,
+            excluded: excluded,
+            snapshotSkipped: snapshotSkipped,
+            customTitle: customTitle,
             lastCopiedAt: lastCopiedAt,
             summary: "Screenshot"
         )

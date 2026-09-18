@@ -191,6 +191,7 @@ public struct ClipboardSearchDocument: Codable, Equatable {
             return ""
         }
         return [
+            preview.title,
             contentText,
             richTextPlainText,
             tokenText(urlTokens),

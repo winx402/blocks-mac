@@ -37,9 +37,11 @@ def read_configuration(path: Path) -> dict:
     if not isinstance(data, dict) or data.get('schemaVersion') != 1 or data.get('mode') not in ('adhoc', 'certificate'):
         raise RuntimeError('Unsupported signing configuration.')
     if data['mode'] == 'certificate':
-        fingerprint, team = data.get('identity'), data.get('teamIdentifier')
-        if not isinstance(fingerprint, str) or not isinstance(team, str) or not re.fullmatch(r'[0-9A-F]{40}', fingerprint) or not re.fullmatch(r'[A-Z0-9]{10}', team):
-            raise RuntimeError('Certificate signing requires an exact SHA-1 identity and Team ID.')
+        fingerprint, team = data.get('identity'), data.get('teamIdentifier', '')
+        if not isinstance(fingerprint, str) or not re.fullmatch(r'[0-9A-F]{40}', fingerprint):
+            raise RuntimeError('Certificate signing requires an exact 40-character uppercase SHA-1 identity.')
+        if not isinstance(team, str) or (team and not re.fullmatch(r'[A-Z0-9]{10}', team)):
+            raise RuntimeError('Team ID must be 10 uppercase letters/digits, or omitted/empty for a certificate without a subject OU.')
     return data
 
 
@@ -60,15 +62,32 @@ def identity() -> str:
     return data['identity'] if data['mode'] == 'certificate' else '-'
 
 
-def validate_metadata(values: dict[str, str]) -> None:
+def verify_pinned_certificate(path: Path) -> None:
+    """Authenticate the actual signer, never a display name or missing Team ID."""
+    data = configuration()
+    if data['mode'] != 'certificate':
+        return
+    requirement = 'certificate leaf = H"' + data['identity'] + '"'
+    subprocess.run(['/usr/bin/codesign', '--verify', '--strict', '-R', '=' + requirement, str(path)],
+                   check=True, capture_output=True, text=True)
+
+
+def validate_metadata(values: dict[str, str], path: Path) -> None:
     data = configuration()
     if not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', values.get('CDHash', '')):
         raise RuntimeError('Invalid local build code hash.')
     if data['mode'] == 'adhoc':
         if values.get('Signature') != 'adhoc':
             raise RuntimeError('Expected an ad-hoc signature for this machine configuration.')
-    elif values.get('Signature') == 'adhoc' or values.get('TeamIdentifier') != data['teamIdentifier']:
-        raise RuntimeError('Installed components must use the pinned certificate Team ID.')
+    else:
+        team = data.get('teamIdentifier', '')
+        actual_team = values.get('TeamIdentifier')
+        if values.get('Signature') == 'adhoc':
+            raise RuntimeError('Expected the pinned certificate, not an ad-hoc signature.')
+        if (team and actual_team != team) or (not team and actual_team not in (None, 'not set')):
+            raise RuntimeError('Installed component Team ID differs from the signing configuration.')
+        # A matching (or absent) Team ID alone does not prove the certificate.
+        verify_pinned_certificate(path)
 
 
 def designated_requirement(path: Path) -> str:
@@ -92,7 +111,10 @@ def verify_stable_upgrade(previous: Path, staged: Path) -> None:
     new = designated_requirement(staged)
     if is_adhoc(previous):
         # Explicit one-time migration away from the old certificate-free build.
+        verify_pinned_certificate(staged)
         return
     if configuration()['mode'] != 'certificate' or old != new:
         raise RuntimeError('Upgrade would change the existing signing identity; refusing replacement.')
+    verify_pinned_certificate(staged)
+    verify_pinned_certificate(previous)
     subprocess.run(['/usr/bin/codesign', '--verify', '--strict', '-R', '=' + old, str(staged)], check=True)

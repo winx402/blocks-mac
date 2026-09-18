@@ -515,7 +515,15 @@ public extension ClipboardRepository {
             ? "LEFT JOIN clipboard_fts ON clipboard_fts.record_id = clipboard_items.id"
             : ""
         let ftsRepairConditions = database.ftsEnabled
-            ? "OR clipboard_fts.record_id IS NULL OR COALESCE(clipboard_fts.search_text, '') != COALESCE(clipboard_items.search_text, '')"
+            ? """
+            OR (
+                (clipboard_search_documents.payload_derivation_state = 'redacted'
+                    AND clipboard_fts.record_id IS NOT NULL)
+                OR (clipboard_search_documents.payload_derivation_state != 'redacted'
+                    AND (clipboard_fts.record_id IS NULL
+                        OR COALESCE(clipboard_fts.search_text, '') != COALESCE(clipboard_items.search_text, '')))
+            )
+            """
             : ""
         return try database.connection.withStatement(
             """
@@ -526,7 +534,7 @@ public extension ClipboardRepository {
             \(ftsJoin)
             WHERE clipboard_search_documents.record_id IS NULL
                 OR clipboard_search_documents.payload_derivation_state = ?
-                OR clipboard_search_documents.revision != ('v2:' || CAST(clipboard_items.change_count AS TEXT) || ':' || clipboard_items.signature_sha256_12)
+                OR clipboard_search_documents.revision != (? || ':' || CAST(clipboard_items.change_count AS TEXT) || ':' || clipboard_items.signature_sha256_12)
                 OR (clipboard_items.search_text IS NULL AND clipboard_search_documents.payload_derivation_state = 'available')
                 \(ftsRepairConditions)
             ORDER BY COALESCE(clipboard_items.last_copied_at, clipboard_items.created_at) DESC,
@@ -535,7 +543,11 @@ public extension ClipboardRepository {
                 clipboard_items.id DESC
             LIMIT ?
             """,
-            bindings: [.string(ClipboardPayloadDerivationState.pendingIndex.rawValue), .int(max(1, limit))]
+            bindings: [
+                .string(ClipboardPayloadDerivationState.pendingIndex.rawValue),
+                .string(ClipboardSearchDocumentBuilder.revisionPrefix),
+                .int(max(1, limit))
+            ]
         ) { statement in
             var ids: [String] = []
             while try statement.step() {
@@ -677,7 +689,7 @@ public extension ClipboardRepository {
         guard let existingDocument else {
             return rebuiltDocument
         }
-        return rebuiltDocument.replacingOCR(
+        let preservedDocument = rebuiltDocument.replacingOCR(
             text: existingDocument.ocrText,
             state: existingDocument.ocrState,
             errorCode: existingDocument.ocrErrorCode,
@@ -685,6 +697,27 @@ public extension ClipboardRepository {
             lastAttemptAt: existingDocument.ocrLastAttemptAt,
             nextRetryAfter: existingDocument.ocrNextRetryAfter,
             source: existingDocument.ocrTextSource,
+            userEditedAt: existingDocument.ocrUserEditedAt,
+            lockedContentRevision: existingDocument.ocrLockedContentRevision,
+            contentRevision: contentRevision
+        )
+        guard existingDocument.revision != rebuiltDocument.revision,
+              existingDocument.ocrState == .running,
+              existingDocument.ocrTextSource != .userEdited,
+              existingDocument.ocrLockedContentRevision == nil else {
+            return preservedDocument
+        }
+        // A completion for the old document revision will be rejected. Make
+        // the interrupted work visible to the normal OCR scheduler instead of
+        // leaving this record permanently marked as running until restart.
+        return preservedDocument.replacingOCR(
+            text: nil,
+            state: .pending,
+            errorCode: nil,
+            attemptCount: existingDocument.ocrAttemptCount,
+            lastAttemptAt: existingDocument.ocrLastAttemptAt,
+            nextRetryAfter: nil,
+            source: .none,
             userEditedAt: existingDocument.ocrUserEditedAt,
             lockedContentRevision: existingDocument.ocrLockedContentRevision,
             contentRevision: contentRevision

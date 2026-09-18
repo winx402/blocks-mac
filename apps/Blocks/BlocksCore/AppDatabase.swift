@@ -1103,7 +1103,7 @@ struct MigrationRunner {
                     reason: record.reason
                 )
                 let signature12 = String(signature.prefix(12))
-                let revision = "v2:\(record.changeCount):\(signature12)"
+                let revision = "\(ClipboardSearchDocumentBuilder.revisionPrefix):\(record.changeCount):\(signature12)"
                 let excluded = record.reason == .excludedSource || record.excluded
 
                 try connection.withStatement(

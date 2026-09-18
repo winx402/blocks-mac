@@ -1377,7 +1377,7 @@ public final class ClipboardRepository: @unchecked Sendable {
         }
         try markSearchDocumentRedacted(
             recordID: record.id,
-            revision: "v2:\(record.changeCount):\(signature12)",
+            revision: "\(ClipboardSearchDocumentBuilder.revisionPrefix):\(record.changeCount):\(signature12)",
             summaryCode: reason.summaryCode
         )
     }

@@ -117,7 +117,7 @@ def sign(path: Path, identifier: str, entitlements: Path | None = None) -> None:
 def signature(path: Path) -> dict[str, str]:
     result = subprocess.run(["/usr/bin/codesign", "-dvvv", str(path)], capture_output=True, text=True, check=True)
     values = dict(line.split("=", 1) for line in result.stderr.splitlines() if "=" in line)
-    signing.validate_metadata(values)
+    signing.validate_metadata(values, path)
     return values
 
 

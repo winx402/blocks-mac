@@ -131,8 +131,10 @@ public struct ClipboardSearchDocumentBuilder {
         )
     }
 
+    public static let revisionPrefix = "v3"
+
     public static func revision(for record: ClipboardRecorderRecord) -> String {
-        "v2:\(record.changeCount):\(record.signatureSHA256_12)"
+        "\(revisionPrefix):\(record.changeCount):\(record.signatureSHA256_12)"
     }
 
     private func primaryText(for record: ClipboardRecorderRecord, payload: ClipboardRecorderPayload?) -> String? {
