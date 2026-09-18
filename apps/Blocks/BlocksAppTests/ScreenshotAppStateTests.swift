@@ -3931,11 +3931,12 @@ final class ScreenshotAppStateTests: XCTestCase {
 
     func testClipboardPanelReentryBeforeInsertionCompletionRestoresDismissMonitoring() async {
         var completions: [@MainActor () -> Void] = []
-        let dismissalRequested = expectation(description: "dismiss monitor requests close")
+        var removalAnimations = 0
+        let dismissalRequested = expectation(description: "dismiss monitor completes close")
         let presentationCoordinator = BlocksFloatingPanelPresentationCoordinator {
             _, _, _, _, phase, completion in
             if phase == .removal {
-                dismissalRequested.fulfill()
+                removalAnimations += 1
             }
             completions.append(completion)
         }
@@ -3956,7 +3957,7 @@ final class ScreenshotAppStateTests: XCTestCase {
             invocationContext: makeClipboardPanelInvocation(),
             openMainWindow: {},
             openSettings: {},
-            onClosed: { _ in }
+            onClosed: { _ in dismissalRequested.fulfill() }
         ) else {
             return XCTFail("The initial clipboard panel presentation must be shown.")
         }
@@ -3988,13 +3989,12 @@ final class ScreenshotAppStateTests: XCTestCase {
             object: NSApp
         )
         await fulfillment(of: [dismissalRequested], timeout: 1)
-        XCTAssertEqual(presentationCoordinator.phase, .dismissing)
-
-        guard completions.count == 2 else {
-            return XCTFail("Dismissal must enqueue exactly two completions total.")
-        }
-        completions[1]()
+        XCTAssertEqual(presentationCoordinator.phase, .hidden)
+        XCTAssertEqual(removalAnimations, 0, "External dismissal must hide without a removal animation.")
+        XCTAssertEqual(completions.count, 1, "Only the stale insertion completion remains queued.")
         XCTAssertFalse(presenter.isVisible)
+        completions[0]()
+        XCTAssertFalse(presenter.isVisible, "Stale insertion must not reopen the closed panel.")
 
         var pinnedCompletions: [@MainActor () -> Void] = []
         let pinnedPresenter = ClipboardHistoryPanelPresenter(
