@@ -219,7 +219,9 @@ struct ClipboardFlatTagFilterChips: View {
         } label: {
             tagChipSurface(tag: tag, selected: selected)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(BlocksChipFeedbackStyle())
+        .background(ClipboardFilterPointingHand())
+        .modifier(ClipboardFilterWindowActivationModifier())
         .accessibilityLabel(tag.localizedDisplayName)
         .accessibilityAddTraits(selected ? .isSelected : [])
         .help(tag.localizedDisplayName)
@@ -231,7 +233,9 @@ struct ClipboardFlatTagFilterChips: View {
         } label: {
             tagChipSurface(tag: tag, selected: selected)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(BlocksChipFeedbackStyle())
+        .background(ClipboardFilterPointingHand())
+        .modifier(ClipboardFilterWindowActivationModifier())
         .simultaneousGesture(localTagDragGesture(tag: tag))
         .accessibilityLabel(tag.localizedDisplayName)
         .accessibilityAddTraits(selected ? .isSelected : [])

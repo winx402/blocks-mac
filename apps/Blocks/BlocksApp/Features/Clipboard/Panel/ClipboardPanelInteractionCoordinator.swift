@@ -12,7 +12,6 @@ enum ClipboardPanelActivationSource: String {
 
 enum ClipboardPanelActionKind: String, Equatable {
     case paste
-    case detailOpen
     case copyPlainText
     case ocrRetry
     case remove
@@ -50,17 +49,15 @@ enum ClipboardPanelPagination {
 }
 
 enum ClipboardPanelActivationDecision: Equatable {
-    case selectAndOpenDetail
+    case select
     case perform(ClipboardPanelActionKind)
 
     static func resolve(_ trigger: ClipboardPanelActivationTrigger) -> Self {
         switch trigger {
-        case .singleClick:
-            return .selectAndOpenDetail
+        case .singleClick, .keyboard, .contextMenu, .button:
+            return .select
         case .doubleClick:
             return .perform(.paste)
-        case .keyboard, .contextMenu, .button:
-            return .perform(.detailOpen)
         }
     }
 }
@@ -132,11 +129,8 @@ final class ClipboardPanelInteractionCoordinator: ObservableObject {
         onPerform: @escaping @MainActor (ClipboardPanelActivationTrigger, ClipboardPanelActionKind) -> Void
     ) {
         switch ClipboardPanelActivationDecision.resolve(trigger) {
-        case .selectAndOpenDetail:
-            guard onSelect() else {
-                return
-            }
-            onPerform(.singleClick, .detailOpen)
+        case .select:
+            _ = onSelect()
         case let .perform(action):
             onPerform(trigger, action)
         }

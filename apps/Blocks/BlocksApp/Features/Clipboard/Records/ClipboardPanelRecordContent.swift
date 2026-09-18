@@ -9,7 +9,6 @@ struct ClipboardPanelRecordContent {
     let pluginRuntime: BlocksPluginRuntimeCoordinator?
     let selectedRecordID: String?
     let focusedRecordID: String?
-    let detailRecordID: String?
     let itemFontSize: CGFloat
     let bottomCardWidth: CGFloat
     let quickPasteIndex: (String) -> Int?
@@ -62,7 +61,6 @@ struct ClipboardPanelRecordContent {
             tagStore: clipboardStore.tagStore,
             isSelected: selectedRecordID == record.id,
             isFocused: focusedRecordID == record.id,
-            isDetailPresented: detailRecordID == record.id,
             itemFontSize: itemFontSize,
             quickPasteIndex: quickPasteIndex(record.id),
             accessibilitySortPriority: ClipboardPanelVisualPolicy.recordAccessibilitySortPriority(

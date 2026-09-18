@@ -114,6 +114,9 @@
 		B00100000000000000000017 /* ClipboardRepository+DetailEdit.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10100000000000000000012 /* ClipboardRepository+DetailEdit.swift */; };
 		B04300000000000000000001 /* ClipboardManagement.swift in Sources */ = {isa = PBXBuildFile; fileRef = F04300000000000000000001 /* ClipboardManagement.swift */; };
 		B04700000000000000000001 = {isa = PBXBuildFile; fileRef = F04700000000000000000001; };
+		B04800000000000000000001 = {isa = PBXBuildFile; fileRef = F04800000000000000000001; };
+		B04900000000000000000001 = {isa = PBXBuildFile; fileRef = F04900000000000000000001; };
+		B04900000000000000000002 = {isa = PBXBuildFile; fileRef = F04900000000000000000002; };
 		B04700000000000000000002 = {isa = PBXBuildFile; fileRef = F04700000000000000000002; };
 		B04700000000000000000003 = {isa = PBXBuildFile; fileRef = F04700000000000000000003; };
 		B04700000000000000000004 = {isa = PBXBuildFile; fileRef = F04700000000000000000004; };
@@ -708,6 +711,9 @@
 		F10100000000000000000012 /* ClipboardRepository+DetailEdit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ClipboardRepository+DetailEdit.swift"; sourceTree = "<group>"; };
 		F04300000000000000000001 /* ClipboardManagement.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardManagement.swift; sourceTree = "<group>"; };
 		F04700000000000000000001 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIModuleAccess.swift; sourceTree = "<group>"; };
+		F04800000000000000000001 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardPanelDismissalTests.swift; sourceTree = "<group>"; };
+		F04900000000000000000001 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Clipboard/Filters/ClipboardFilterInteractionSupport.swift; sourceTree = "<group>"; };
+		F04900000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardFilterInteractionTests.swift; sourceTree = "<group>"; };
 		F04700000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Settings/BlocksCLIManagedInstallation.swift; sourceTree = "<group>"; };
 		F04700000000000000000003 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIModuleAccessTests.swift; sourceTree = "<group>"; };
 		F04700000000000000000004 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlocksCLIManagedInstallationTests.swift; sourceTree = "<group>"; };
@@ -1119,6 +1125,8 @@
 				F15R00000000000000000001 /* ClipboardScreenshotHistoryRepositoryTests.swift */,
 				F04300000000000000000003 /* ClipboardManagementTests.swift */,
 				F04700000000000000000003 /* CLIModuleAccessTests.swift */,
+				F04800000000000000000001 /* ClipboardPanelDismissalTests.swift */,
+				F04900000000000000000002 /* ClipboardFilterInteractionTests.swift */,
 				F04700000000000000000004 /* BlocksCLIManagedInstallationTests.swift */,
 				F04300000000000000000004 /* ClipboardManagementHostTests.swift */,
 				F04300000000000000000006 /* ClipboardManagementConsentTests.swift */,
@@ -1294,6 +1302,7 @@
 				F30100000000000000000034 /* ClipboardController.swift */,
 				F30100000000000000000039 /* ClipboardStore.swift */,
 				F04700000000000000000002 /* BlocksCLIManagedInstallation.swift */,
+				F04900000000000000000001 /* ClipboardFilterInteractionSupport.swift */,
 				F04300000000000000000005 /* ClipboardManagementAccessController.swift */,
 				F20C00000000000000000001 /* ClipboardHistoryReadPipeline.swift */,
 				F20C00000000000000000004 /* ClipboardPanelSessionModel.swift */,
@@ -1984,6 +1993,7 @@
 				B00300000000000000000035 /* ClipboardController.swift in Sources */,
 				B0030000000000000000003A /* ClipboardStore.swift in Sources */,
 				B04700000000000000000002 /* BlocksCLIManagedInstallation.swift in Sources */,
+				B04900000000000000000001 /* ClipboardFilterInteractionSupport.swift in Sources */,
 				B04300000000000000000005 /* ClipboardManagementAccessController.swift in Sources */,
 				B20C00000000000000000001 /* ClipboardHistoryReadPipeline.swift in Sources */,
 				B20C00000000000000000004 /* ClipboardPanelSessionModel.swift in Sources */,
@@ -2252,6 +2262,8 @@
 				B15R00000000000000000001 /* ClipboardScreenshotHistoryRepositoryTests.swift in Sources */,
 				B04300000000000000000003 /* ClipboardManagementTests.swift in Sources */,
 				B04700000000000000000003 /* CLIModuleAccessTests.swift in Sources */,
+				B04800000000000000000001 /* ClipboardPanelDismissalTests.swift in Sources */,
+				B04900000000000000000002 /* ClipboardFilterInteractionTests.swift in Sources */,
 				B04700000000000000000004 /* BlocksCLIManagedInstallationTests.swift in Sources */,
 				B04300000000000000000004 /* ClipboardManagementHostTests.swift in Sources */,
 				B04300000000000000000006 /* ClipboardManagementConsentTests.swift in Sources */,

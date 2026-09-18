@@ -6411,19 +6411,6 @@ final class ScreenshotAppStateTests: XCTestCase {
         )
     }
 
-    func testClipboardPublishesGeometryOnlyForPresentedDetailRecord() {
-        XCTAssertFalse(
-            ClipboardRecordFramePublicationPolicy.shouldPublishFrame(
-                isDetailPresented: false
-            )
-        )
-        XCTAssertTrue(
-            ClipboardRecordFramePublicationPolicy.shouldPublishFrame(
-                isDetailPresented: true
-            )
-        )
-    }
-
     func testClipboardDetailRevealMotionPreservesStablePanelGeometry() {
         let target = CGRect(x: 420, y: 260, width: 380, height: 300)
         let source = CGRect(x: 40, y: 40, width: 180, height: 120)
@@ -25884,7 +25871,7 @@ final class ScreenshotAppStateTests: XCTestCase {
         XCTAssertEqual(doubleClicks, 1)
     }
 
-    func testClipboardSingleClickSelectsAndOpensDetailSynchronously() {
+    func testClipboardSingleClickSelectsWithoutOpeningDetail() {
         let coordinator = ClipboardPanelInteractionCoordinator()
         var selections = 0
         var actions: [ClipboardPanelActionKind] = []
@@ -25898,7 +25885,31 @@ final class ScreenshotAppStateTests: XCTestCase {
         )
 
         XCTAssertEqual(selections, 1)
-        XCTAssertEqual(actions, [.detailOpen])
+        XCTAssertTrue(actions.isEmpty)
+    }
+
+    func testClipboardNonPasteActivationsSelectWithoutPerformingDetailAction() {
+        let coordinator = ClipboardPanelInteractionCoordinator()
+        var selections = 0
+        var actions: [ClipboardPanelActionKind] = []
+
+        for trigger in [
+            ClipboardPanelActivationTrigger.singleClick,
+            .keyboard,
+            .contextMenu,
+            .button
+        ] {
+            coordinator.routeActivation(
+                recordID: "non-paste-\(trigger.rawValue)",
+                source: .bottomCard,
+                trigger: trigger,
+                onSelect: { selections += 1; return true },
+                onPerform: { _, action in actions.append(action) }
+            )
+        }
+
+        XCTAssertEqual(selections, 4)
+        XCTAssertTrue(actions.isEmpty)
     }
 
     func testClipboardNativeDoubleClickPastesWithoutOpeningDetail() {
@@ -25933,10 +25944,10 @@ final class ScreenshotAppStateTests: XCTestCase {
         XCTAssertEqual(applied, ["latest"])
     }
 
-    func testClipboardRapidSelectionOpensEachExplicitlySelectedRecord() {
+    func testClipboardRapidSelectionDoesNotOpenDetail() {
         let coordinator = ClipboardPanelInteractionCoordinator()
         var selectedRecordIDs: [String] = []
-        var detailRecordIDs: [String] = []
+        var actions: [ClipboardPanelActionKind] = []
 
         coordinator.routeActivation(
             recordID: "record-a",
@@ -25944,7 +25955,7 @@ final class ScreenshotAppStateTests: XCTestCase {
             trigger: .singleClick,
             onSelect: { selectedRecordIDs.append("record-a"); return true },
             onPerform: { _, action in
-                if action == .detailOpen { detailRecordIDs.append("record-a") }
+                actions.append(action)
             }
         )
         coordinator.routeActivation(
@@ -25953,15 +25964,15 @@ final class ScreenshotAppStateTests: XCTestCase {
             trigger: .singleClick,
             onSelect: { selectedRecordIDs.append("record-b"); return true },
             onPerform: { _, action in
-                if action == .detailOpen { detailRecordIDs.append("record-b") }
+                actions.append(action)
             }
         )
 
         XCTAssertEqual(selectedRecordIDs, ["record-a", "record-b"])
-        XCTAssertEqual(detailRecordIDs, ["record-a", "record-b"])
+        XCTAssertTrue(actions.isEmpty)
     }
 
-    func testClipboardRejectedSelectionDoesNotOpenDetail() {
+    func testClipboardRejectedSelectionDoesNotPerformAnAction() {
         let coordinator = ClipboardPanelInteractionCoordinator()
         var actions: [ClipboardPanelActionKind] = []
 
@@ -25991,22 +26002,6 @@ final class ScreenshotAppStateTests: XCTestCase {
                 presentedRecordID: "record-a",
                 targetRecordID: "record-b",
                 action: .paste
-            )
-        )
-        XCTAssertFalse(
-            ClipboardPanelDirtyActionPolicy.requiresConfirmation(
-                isDirty: true,
-                presentedRecordID: "record-a",
-                targetRecordID: "record-a",
-                action: .detailOpen
-            )
-        )
-        XCTAssertTrue(
-            ClipboardPanelDirtyActionPolicy.requiresConfirmation(
-                isDirty: true,
-                presentedRecordID: "record-a",
-                targetRecordID: "record-b",
-                action: .detailOpen
             )
         )
         XCTAssertFalse(
@@ -26042,8 +26037,7 @@ final class ScreenshotAppStateTests: XCTestCase {
             ClipboardRecordInteractionState.resolve(
                 isSelected: true,
                 isFocused: false,
-                isHovered: true,
-                isDetailPresented: false
+                isHovered: true
             ),
             .selected
         )
@@ -26051,8 +26045,7 @@ final class ScreenshotAppStateTests: XCTestCase {
             ClipboardRecordInteractionState.resolve(
                 isSelected: false,
                 isFocused: true,
-                isHovered: true,
-                isDetailPresented: false
+                isHovered: true
             ),
             .focused
         )

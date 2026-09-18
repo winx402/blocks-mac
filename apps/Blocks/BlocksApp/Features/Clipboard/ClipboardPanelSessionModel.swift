@@ -4,7 +4,6 @@ import Foundation
 final class ClipboardPanelSessionModel: ObservableObject {
     @Published var query = ""
     @Published var selectedRecordID: String?
-    @Published var detailRecordID: String?
     @Published private(set) var visibleRecordLimit = ClipboardPanelPagination.initialVisibleLimit
     @Published private(set) var paginationRequestInFlight = false
 
@@ -39,7 +38,6 @@ final class ClipboardPanelSessionModel: ObservableObject {
 
     func shutdown() {
         paginationRequestInFlight = false
-        detailRecordID = nil
     }
 
 }

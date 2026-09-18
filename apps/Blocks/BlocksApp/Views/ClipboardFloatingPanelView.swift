@@ -1,12 +1,7 @@
 import BlocksCore
-import OSLog
 import SwiftUI
 
 struct ClipboardFloatingPanelView: View {
-    private static let logger = Logger(
-        subsystem: Bundle.main.bundleIdentifier ?? "app.blocks",
-        category: "clipboard-panel-detail"
-    )
     @EnvironmentObject private var clipboardStore: ClipboardStore
     let position: FloatingPanelPosition
     let actions: ClipboardPanelActions
@@ -57,24 +52,6 @@ struct ClipboardFloatingPanelView: View {
 
     var body: some View {
         panelLayout
-            .overlayPreferenceValue(ClipboardRecordFramePreferenceKey.self) { recordFrames in
-                GeometryReader { proxy in
-                    ClipboardPanelDetailPresentationLayer(
-                        records: filteredRecords,
-                        recordFrames: recordFrames,
-                        proxy: proxy,
-                        presentedRecordID: session.detailRecordID,
-                        panelPosition: position,
-                        clipboardStore: clipboardStore,
-                        itemFontSize: clipboardItemFontSize,
-                        focusCoordinator: focusCoordinator,
-                        keyboardRouter: keyboardRouter,
-                        pluginManager: pluginManager,
-                        pluginRuntime: pluginRuntime,
-                        onOutsideInteraction: { _ = dismissFloatingDetail() }
-                    )
-                }
-            }
             .overlay(alignment: .topLeading) {
                 ClipboardPanelRecordFocusAnchor(focusCoordinator: focusCoordinator)
                     .frame(width: 1, height: 1)
@@ -107,20 +84,11 @@ struct ClipboardFloatingPanelView: View {
                     applyRequestedFocus()
                 }
             }
-            .onChange(of: session.query) { oldValue, newValue in
-                interactionCoordinator.routeSearchChange(
-                    oldValue: oldValue,
-                    newValue: newValue,
-                    isDetailDirty: clipboardStore.detailStore.isDirty,
-                    restoreQuery: { session.query = $0 },
-                    requestDirtyAction: { clipboardStore.detailStore.requestAction(after: $0) },
-                    apply: { value in
-                        if rememberSearch { rememberedSearchQuery = value }
-                        resetPagination()
-                        refreshSearchResult()
-                        normalizeSelection()
-                    }
-                )
+            .onChange(of: session.query) { _, newValue in
+                if rememberSearch { rememberedSearchQuery = newValue }
+                resetPagination()
+                refreshSearchResult()
+                normalizeSelection()
             }
             .onChange(of: rememberSearch) { _, newValue in
                 if !newValue {
@@ -143,16 +111,9 @@ struct ClipboardFloatingPanelView: View {
             .onChange(of: focusCoordinator.generation) { _, _ in
                 applyRequestedFocus()
             }
-            .onChange(of: clipboardStore.detailStore.navigationResolution) { _, resolution in
-                synchronizeFloatingDetail(recordID: resolution.recordID)
-            }
             .onChange(of: searchFocused) { _, isFocused in
                 guard isFocused,
                       focusCoordinator.target != .search else {
-                    return
-                }
-                guard dismissFloatingDetail() else {
-                    searchFocused = false
                     return
                 }
                 focusCoordinator.focusSearch()
@@ -212,14 +173,8 @@ struct ClipboardFloatingPanelView: View {
             onSubmitSearch: pasteSelectedRecordFromKeyboard,
             onFocusSearch: handleSearchFocusRequest,
             onClearAllFilters: clearAllFiltersFromToolbar,
-            onOpenSettings: {
-                guard dismissFloatingDetail() else { return }
-                onOpenSettings()
-            },
-            onTogglePin: {
-                guard dismissFloatingDetail() else { return }
-                onTogglePin()
-            },
+            onOpenSettings: onOpenSettings,
+            onTogglePin: onTogglePin,
             onSelectFormat: toggleFormatFilter,
             onSelectTime: toggleTimeFilter,
             onSelectSource: toggleSourceFilter,
@@ -277,7 +232,6 @@ struct ClipboardFloatingPanelView: View {
             focusedRecordID: focusCoordinator.target.recordID.flatMap {
                 focusCoordinator.isRecordFocused($0) ? $0 : nil
             },
-            detailRecordID: session.detailRecordID,
             itemFontSize: clipboardItemFontSize,
             bottomCardWidth: bottomRecordCardWidth,
             quickPasteIndex: quickPasteHintState.quickPasteIndex(for:),
@@ -340,13 +294,8 @@ struct ClipboardFloatingPanelView: View {
         resetSideRowHeightResizeIfIdentityMissing()
         guard !filteredRecords.isEmpty else {
             session.clearSelection()
-            _ = dismissFloatingDetail()
             clipboardStore.floatingSelectedRecordID = nil
             return
-        }
-        if let detailRecordID = session.detailRecordID,
-           !filteredRecords.contains(where: { $0.id == detailRecordID }) {
-            _ = dismissFloatingDetail()
         }
         if let selectedRecordID = session.selectedRecordID,
            filteredRecords.contains(where: { $0.id == selectedRecordID }) {
@@ -421,10 +370,6 @@ struct ClipboardFloatingPanelView: View {
         }
         let nextIndex = min(max(currentIndex + delta, 0), filteredRecords.count - 1)
         let recordID = filteredRecords[nextIndex].id
-        if shouldDeferRecordTransition(to: recordID) {
-            presentFloatingDetail(recordID: recordID)
-            return
-        }
         selectAndFocusRecord(recordID, reason: .keyboardNavigation)
     }
     private func pasteSelectedRecordFromKeyboard() {
@@ -454,10 +399,6 @@ struct ClipboardFloatingPanelView: View {
             source: source,
             trigger: trigger,
             onSelect: {
-                guard !shouldDeferRecordTransition(to: recordID) else {
-                    presentFloatingDetail(recordID: recordID)
-                    return false
-                }
                 selectAndFocusRecord(recordID)
                 return true
             },
@@ -471,14 +412,6 @@ struct ClipboardFloatingPanelView: View {
         recordID: String,
         source: ClipboardPanelActivationSource
     ) {
-        guard !ClipboardPanelDirtyActionPolicy.requiresConfirmation(
-            isDirty: clipboardStore.detailStore.isDirty,
-            presentedRecordID: session.detailRecordID,
-            targetRecordID: recordID,
-            action: .detailOpen
-        ) else {
-            return
-        }
         selectAndFocusRecord(recordID)
     }
 
@@ -494,22 +427,6 @@ struct ClipboardFloatingPanelView: View {
             trigger: trigger,
             action: action
         )
-        if ClipboardPanelDirtyActionPolicy.requiresConfirmation(
-            isDirty: clipboardStore.detailStore.isDirty,
-            presentedRecordID: session.detailRecordID,
-            targetRecordID: recordID,
-            action: action
-        ) {
-            clipboardStore.detailStore.requestAction {
-                handleRecordAction(
-                    recordID,
-                    source: source,
-                    trigger: trigger,
-                    action: action
-                )
-            }
-            return
-        }
         selectAndFocusRecord(recordID)
         guard interactionCoordinator.isLatestInteraction(
             token: token,
@@ -521,13 +438,7 @@ struct ClipboardFloatingPanelView: View {
 
         switch action {
         case .paste:
-            if session.detailRecordID != nil,
-               !clipboardStore.detailStore.isDirty {
-                _ = dismissFloatingDetail()
-            }
             actions.pasteRecord(recordID)
-        case .detailOpen:
-            presentFloatingDetail(recordID: recordID)
         case .copyPlainText:
             actions.copyRecordAsPlainText(recordID)
         case .ocrRetry:
@@ -537,13 +448,6 @@ struct ClipboardFloatingPanelView: View {
         }
     }
 
-    private func shouldDeferRecordTransition(to recordID: String) -> Bool {
-        guard clipboardStore.detailStore.isDirty,
-              let presentedRecordID = session.detailRecordID else {
-            return false
-        }
-        return presentedRecordID != recordID
-    }
     private func requestRecordRemoval(_ recordID: String) {
         interactionCoordinator.requestRemoval(
             recordID: recordID,
@@ -554,11 +458,9 @@ struct ClipboardFloatingPanelView: View {
         guard let recordID = interactionCoordinator.takePendingRemovalRecordID() else {
             return
         }
-        clipboardStore.detailStore.requestAction {
-            Task { @MainActor in
-                guard await actions.deleteHistoryItem(recordID) else { return }
-                normalizeSelection()
-            }
+        Task { @MainActor in
+            guard await actions.deleteHistoryItem(recordID) else { return }
+            normalizeSelection()
         }
     }
     private func clampBottomCardWidth(_ width: CGFloat) -> CGFloat {
@@ -626,11 +528,9 @@ struct ClipboardFloatingPanelView: View {
         }
     }
     private func clearAllFiltersFromToolbar() {
-        guard dismissFloatingDetail() else { return }
         clipboardStore.clearFilters()
     }
     private func clearFilterGroup(_ group: ClipboardFilterGroup) {
-        guard dismissFloatingDetail() else { return }
         switch group {
         case .format:
             clipboardStore.setFormatFilter(.all)
@@ -642,86 +542,23 @@ struct ClipboardFloatingPanelView: View {
     }
 
     private func toggleFormatFilter(_ option: ClipboardFormatFilter) {
-        guard dismissFloatingDetail() else { return }
         let nextFilter: ClipboardFormatFilter = clipboardStore.filterState.format == option ? .all : option
         clipboardStore.setFormatFilter(nextFilter)
     }
 
     private func toggleTimeFilter(_ option: ClipboardTimeFilter) {
-        guard dismissFloatingDetail() else { return }
         let nextFilter: ClipboardTimeFilter = clipboardStore.filterState.time == option ? .all : option
         clipboardStore.setTimeFilter(nextFilter)
     }
 
     private func toggleTagFilter(_ tagID: String?) {
-        guard dismissFloatingDetail() else { return }
         let nextTagID = clipboardStore.tagStore.selectedTagID == tagID ? nil : tagID
         actions.setTagFilter(nextTagID)
     }
 
     private func toggleSourceFilter(_ sourceKey: ClipboardSourceFilterKey?) {
-        guard dismissFloatingDetail() else { return }
         let nextSourceKey = clipboardStore.filterState.sourceFilterKey == sourceKey ? nil : sourceKey
         clipboardStore.setSourceFilter(nextSourceKey)
-    }
-
-    @discardableResult
-    private func dismissFloatingDetail() -> Bool {
-        guard session.detailRecordID != nil else {
-            return true
-        }
-        let recordID = session.detailRecordID
-        Self.logger.info(
-            "stage=dismiss-request record=\(recordID.map { String($0.suffix(8)) } ?? "none", privacy: .public) dirty=\(clipboardStore.detailStore.isDirty, privacy: .public) busy=\(clipboardStore.detailStore.isBusy, privacy: .public)"
-        )
-        clipboardStore.detailStore.requestClose()
-        guard !clipboardStore.detailStore.dirtyNavigation else {
-            Self.logger.info(
-                "stage=dismiss-deferred record=\(recordID.map { String($0.suffix(8)) } ?? "none", privacy: .public) reason=dirty-navigation"
-            )
-            return false
-        }
-        session.detailRecordID = nil
-        focusCoordinator.dismissDetail(recordID: recordID)
-        Self.logger.info(
-            "stage=dismissed record=\(recordID.map { String($0.suffix(8)) } ?? "none", privacy: .public)"
-        )
-        return true
-    }
-
-    private func presentFloatingDetail(recordID: String) {
-        Self.logger.info(
-            "stage=open-request record=\(String(recordID.suffix(8)), privacy: .public) current=\(session.detailRecordID.map { String($0.suffix(8)) } ?? "none", privacy: .public) dirty=\(clipboardStore.detailStore.isDirty, privacy: .public) busy=\(clipboardStore.detailStore.isBusy, privacy: .public)"
-        )
-        if clipboardStore.detailStore.readModel?.recordID != recordID {
-            clipboardStore.detailStore.requestOpen(recordID: recordID)
-        }
-        guard !clipboardStore.detailStore.dirtyNavigation else {
-            Self.logger.info(
-                "stage=open-deferred record=\(String(recordID.suffix(8)), privacy: .public) reason=dirty-navigation"
-            )
-            return
-        }
-        // The detail model loads asynchronously. Keep the panel bound to the
-        // requested record instead of reusing the previous model while the new
-        // request is in flight.
-        session.detailRecordID = recordID
-        focusCoordinator.presentDetail(recordID: recordID)
-        Self.logger.info(
-            "stage=open-presented record=\(String(recordID.suffix(8)), privacy: .public) sessionRecord=\(session.detailRecordID.map { String($0.suffix(8)) } ?? "none", privacy: .public)"
-        )
-    }
-
-    private func synchronizeFloatingDetail(recordID: String?) {
-        session.detailRecordID = recordID
-        if let recordID {
-            focusCoordinator.presentDetail(recordID: recordID)
-        } else {
-            focusCoordinator.dismissDetail(recordID: selectedRecord?.id)
-        }
-        Self.logger.info(
-            "stage=navigation-resolved record=\(recordID.map { String($0.suffix(8)) } ?? "none", privacy: .public)"
-        )
     }
 
     private func applyRequestedFocus() {
@@ -748,10 +585,6 @@ struct ClipboardFloatingPanelView: View {
     }
 
     private func handleSearchFocusRequest() {
-        guard dismissFloatingDetail() else {
-            applyRequestedFocus()
-            return
-        }
         focusCoordinator.focusSearch()
     }
 
@@ -766,35 +599,20 @@ struct ClipboardFloatingPanelView: View {
         case .escape:
             handleEscapeCommand()
         case let .quickPaste(index):
-            clipboardStore.detailStore.requestAction {
-                actions.pasteQuickRecord(index)
-            }
+            actions.pasteQuickRecord(index)
         case .saveDetail:
-            clipboardStore.detailStore.save()
+            break
         }
     }
 
     private func handleEscapeCommand() {
-        let step = ClipboardPanelEscapeResolver.step(
-            for: ClipboardPanelEscapeContext(
-                focusTarget: focusCoordinator.target,
-                hasPresentedDetail: session.detailRecordID != nil,
-                hasSearchQuery: !session.query.isEmpty,
-                hasActiveFilters: displayFilterState.hasActiveFilters
-            )
-        )
-        switch step {
-        case .exitDetailEdit:
-            clipboardStore.detailStore.cancel()
-        case .closeDetail:
-            _ = dismissFloatingDetail()
-        case .clearSearch:
+        if !session.query.isEmpty {
             session.query = ""
             focusCoordinator.focusSearch()
-        case .clearFilters:
+        } else if displayFilterState.hasActiveFilters {
             clipboardStore.clearFilters()
             focusCoordinator.focusSearch()
-        case .releasePanel:
+        } else {
             onRootEscape()
         }
     }

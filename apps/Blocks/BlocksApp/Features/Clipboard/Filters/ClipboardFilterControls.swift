@@ -172,7 +172,9 @@ struct ClipboardFilterMenuGroup: View {
                 .frame(width: fixedWidth - ClipboardFilterBarLayout.clearSlotWidth, alignment: .leading)
             }
             .menuStyle(.borderlessButton)
+            .modifier(ClipboardFilterWindowActivationModifier())
             .frame(width: fixedWidth - ClipboardFilterBarLayout.clearSlotWidth)
+            .background(ClipboardFilterPointerProbe(group: group))
             .accessibilityLabel(accessibilityPresentation.label)
             .accessibilityValue(accessibilityPresentation.value)
             .help(accessibilityPresentation.help)
@@ -199,7 +201,10 @@ struct ClipboardFilterMenuGroup: View {
         selected: Bool,
         action: @escaping () -> Void
     ) -> some View {
-        Button(action: action) {
+        Button {
+            ClipboardFilterInteractionDiagnostics.selection(group: group)
+            action()
+        } label: {
             ClipboardFilterOptionMenuLabel(
                 title: title,
                 systemImage: systemImage,
@@ -214,7 +219,10 @@ struct ClipboardFilterMenuGroup: View {
         selected: Bool,
         action: @escaping () -> Void
     ) -> some View {
-        Button(action: action) {
+        Button {
+            ClipboardFilterInteractionDiagnostics.selection(group: group)
+            action()
+        } label: {
             ClipboardFilterOptionMenuLabel(
                 title: title,
                 systemImage: nil,

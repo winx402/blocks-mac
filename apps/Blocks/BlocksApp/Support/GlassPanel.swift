@@ -333,6 +333,7 @@ struct BlocksCompactIconButton: View {
     var isSelected = false
     var isLoading = false
     var emphasis: BlocksCompactIconButtonEmphasis = .standard
+    var tint: Color? = nil
     var density: BlocksCompactIconButtonDensity = .compact
     var focusRequestID: UUID? = nil
     var showsHelp = true
@@ -375,6 +376,7 @@ struct BlocksCompactIconButton: View {
                 isEnabled: isEnabled,
                 isSelected: isSelected,
                 emphasis: emphasis,
+                tint: tint,
                 density: density,
                 increasesContrast:
                     colorSchemeContrast == .increased,
@@ -428,6 +430,7 @@ struct BlocksIconButtonStyle: ButtonStyle {
     let isEnabled: Bool
     let isSelected: Bool
     let emphasis: BlocksCompactIconButtonEmphasis
+    var tint: Color? = nil
     let density: BlocksCompactIconButtonDensity
     let increasesContrast: Bool
     let isWindowActive: Bool
@@ -446,9 +449,9 @@ struct BlocksIconButtonStyle: ButtonStyle {
         )
         configuration.label
             .foregroundStyle(
-                foregroundStyle(
+                (tint ?? foregroundStyle(
                     role: appearance.foregroundRole
-                )
+                ))
                 .opacity(appearance.foregroundOpacity)
             )
             .background {
@@ -457,10 +460,10 @@ struct BlocksIconButtonStyle: ButtonStyle {
                     style: .continuous
                 )
                 .fill(
-                    backgroundColor(
+                    (tint ?? backgroundColor(
                         emphasis: emphasis,
                         isSelected: isSelected
-                    )
+                    ))
                     .opacity(appearance.backgroundOpacity)
                 )
                 .frame(
@@ -474,10 +477,10 @@ struct BlocksIconButtonStyle: ButtonStyle {
                     style: .continuous
                 )
                     .stroke(
-                        strokeColor(
+                        (tint ?? strokeColor(
                             isFocused: isFocused,
                             isSelected: isSelected
-                        )
+                        ))
                         .opacity(appearance.strokeOpacity),
                         lineWidth: BlocksVisualTokens.Stroke.width
                     )

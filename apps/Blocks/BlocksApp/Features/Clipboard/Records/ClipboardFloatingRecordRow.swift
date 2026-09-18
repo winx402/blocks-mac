@@ -11,7 +11,6 @@ struct ClipboardFloatingRecordRow: View {
     let tagStore: ClipboardTagStore
     let isSelected: Bool
     let isFocused: Bool
-    let isDetailPresented: Bool
     let rowHeight: CGFloat
     let bodyLineLimit: Int
     let itemFontSize: CGFloat
@@ -70,11 +69,6 @@ struct ClipboardFloatingRecordRow: View {
             }
         }
         .contentShape(Rectangle())
-        .anchorPreference(key: ClipboardRecordFramePreferenceKey.self, value: .bounds) { anchor in
-            ClipboardRecordFramePublicationPolicy.shouldPublishFrame(
-                isDetailPresented: isDetailPresented
-            ) ? [record.id: anchor] : [:]
-        }
         .accessibilityElement(children: .ignore)
         .accessibilitySortPriority(accessibilitySortPriority)
         .accessibilityLabel(clipboardRecordAccessibilityLabel(preview: preview))
@@ -82,16 +76,12 @@ struct ClipboardFloatingRecordRow: View {
             clipboardRecordAccessibilityValue(
                 record: record,
                 preview: preview,
-                isDetailPresented: isDetailPresented,
                 quickPasteIndex: quickPasteIndex
             )
         )
         .accessibilityAddTraits(isSelected ? .isSelected : [])
         .accessibilityAddTraits(.isButton)
         .accessibilityAction(.default) {
-            onSingleClick()
-        }
-        .accessibilityAction(named: Text(L10n.string("clipboard.panel.detailTitle"))) {
             onSingleClick()
         }
         .accessibilityAction(named: Text(L10n.string("clipboard.context.paste"))) {
@@ -248,8 +238,7 @@ struct ClipboardFloatingRecordRow: View {
         ClipboardRecordInteractionState.resolve(
             isSelected: isSelected,
             isFocused: isFocused,
-            isHovered: isHovered,
-            isDetailPresented: isDetailPresented
+            isHovered: isHovered
         )
     }
 

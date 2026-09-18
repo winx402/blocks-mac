@@ -26,7 +26,6 @@ func clipboardRecordAccessibilityLabel(preview: ClipboardRecordPreview) -> Strin
 func clipboardRecordAccessibilityValue(
     record: ClipboardRecorderRecord,
     preview: ClipboardRecordPreview,
-    isDetailPresented: Bool,
     quickPasteIndex: Int?
 ) -> String {
     var components: [String] = []
@@ -44,10 +43,6 @@ func clipboardRecordAccessibilityValue(
         components.append(L10n.format("clipboard.quickPaste.numberHint", quickPasteIndex))
     }
 
-    if isDetailPresented {
-        components.append(L10n.string("clipboard.panel.detailTitle"))
-    }
-
     return components.joined(separator: ", ")
 }
 
@@ -55,10 +50,9 @@ enum ClipboardRecordInteractionState {
     static func resolve(
         isSelected: Bool,
         isFocused: Bool,
-        isHovered: Bool,
-        isDetailPresented: Bool
+        isHovered: Bool
     ) -> BlocksInteractionState {
-        if isDetailPresented || isSelected {
+        if isSelected {
             return .selected
         }
         if isFocused {
@@ -80,7 +74,6 @@ struct ClipboardFloatingRecordCard: View {
     let tagStore: ClipboardTagStore
     let isSelected: Bool
     let isFocused: Bool
-    let isDetailPresented: Bool
     let cardWidth: CGFloat
     let cardHeight: CGFloat
     let bodyLineLimit: Int
@@ -108,8 +101,7 @@ struct ClipboardFloatingRecordCard: View {
         ClipboardRecordInteractionState.resolve(
             isSelected: isSelected,
             isFocused: isFocused,
-            isHovered: isHovered,
-            isDetailPresented: isDetailPresented
+            isHovered: isHovered
         )
     }
 
@@ -148,24 +140,27 @@ struct ClipboardFloatingRecordCard: View {
             )
             .accessibilityHidden(true)
         }
-        .onHover { isHovered = $0 }
         .overlay(alignment: .topTrailing) {
-            if isHovered || tagStore.isFavorite(recordID: record.id) {
-                BlocksCompactIconButton(
-                    systemImage: tagStore.isFavorite(recordID: record.id) ? "star.fill" : "star",
-                    label: tagStore.isFavorite(recordID: record.id)
-                        ? L10n.string("clipboard.tags.unfavorite")
-                        : L10n.string("clipboard.tags.favorite"),
-                    isSelected: tagStore.isFavorite(recordID: record.id),
-                    emphasis: .accent,
-                    density: .micro,
-                    showsHelp: true,
-                    action: onToggleFavorite
-                )
-                .accessibilityHidden(true)
-                .padding(.top, 5)
-                .padding(.trailing, 5)
-            }
+            let isFavorite = tagStore.isFavorite(recordID: record.id)
+            let isFavoriteActionVisible = isHovered || isFavorite
+            BlocksCompactIconButton(
+                systemImage: isFavorite ? "star.fill" : "star",
+                label: isFavorite
+                    ? L10n.string("clipboard.tags.unfavorite")
+                    : L10n.string("clipboard.tags.favorite"),
+                isEnabled: isFavoriteActionVisible,
+                isSelected: isFavorite,
+                emphasis: .accent,
+                tint: Color.yellow.opacity(0.95),
+                density: .micro,
+                showsHelp: true,
+                action: onToggleFavorite
+            )
+            .accessibilityHidden(true)
+            .opacity(isFavoriteActionVisible ? 1 : 0)
+            .allowsHitTesting(isFavoriteActionVisible)
+            .padding(.top, 5)
+            .padding(.trailing, 5)
         }
         .overlay(alignment: .bottomTrailing) {
             if let quickPasteIndex {
@@ -174,12 +169,8 @@ struct ClipboardFloatingRecordCard: View {
                     .padding(.bottom, 9)
             }
         }
+        .onHover { isHovered = $0 }
         .contentShape(Rectangle())
-        .anchorPreference(key: ClipboardRecordFramePreferenceKey.self, value: .bounds) { anchor in
-            ClipboardRecordFramePublicationPolicy.shouldPublishFrame(
-                isDetailPresented: isDetailPresented
-            ) ? [record.id: anchor] : [:]
-        }
         .accessibilityElement(children: .ignore)
         .accessibilitySortPriority(accessibilitySortPriority)
         .accessibilityLabel(clipboardRecordAccessibilityLabel(preview: preview))
@@ -187,16 +178,12 @@ struct ClipboardFloatingRecordCard: View {
             clipboardRecordAccessibilityValue(
                 record: record,
                 preview: preview,
-                isDetailPresented: isDetailPresented,
                 quickPasteIndex: quickPasteIndex
             )
         )
         .accessibilityAddTraits(isSelected ? .isSelected : [])
         .accessibilityAddTraits(.isButton)
         .accessibilityAction(.default) {
-            onSingleClick()
-        }
-        .accessibilityAction(named: Text(L10n.string("clipboard.panel.detailTitle"))) {
             onSingleClick()
         }
         .accessibilityAction(named: Text(L10n.string("clipboard.context.paste"))) {

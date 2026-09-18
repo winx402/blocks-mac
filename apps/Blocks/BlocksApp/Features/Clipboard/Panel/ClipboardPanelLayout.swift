@@ -25,7 +25,6 @@ struct ClipboardPanelRecordValues {
     let tagStore: ClipboardTagStore
     let isSelected: Bool
     let isFocused: Bool
-    let isDetailPresented: Bool
     let itemFontSize: CGFloat
     let quickPasteIndex: Int?
     let accessibilitySortPriority: Double
@@ -63,7 +62,6 @@ struct ClipboardPanelBottomRecord: View {
             tagStore: values.tagStore,
             isSelected: values.isSelected,
             isFocused: values.isFocused,
-            isDetailPresented: values.isDetailPresented,
             cardWidth: cardWidth,
             cardHeight: cardHeight,
             bodyLineLimit: bodyLineLimit,
@@ -102,7 +100,6 @@ struct ClipboardPanelSideRecord: View {
             tagStore: values.tagStore,
             isSelected: values.isSelected,
             isFocused: values.isFocused,
-            isDetailPresented: values.isDetailPresented,
             rowHeight: rowHeight,
             bodyLineLimit: bodyLineLimit,
             itemFontSize: values.itemFontSize,

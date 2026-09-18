@@ -587,14 +587,18 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
         detailStore.requestAction(after: guardedAction)
     }
 
-    private func requestClosePanel(afterClose: (() -> Void)? = nil) {
+    private func requestClosePanel(animated: Bool = true, afterClose: (() -> Void)? = nil) {
         guard !pinState.isPinned else {
             return
         }
         if let detailStore, detailStore.isDirty {
             detailStore.requestPanelClose { [weak self] in
-                self?.closePanel(animated: true, afterClose: afterClose)
+                self?.closePanel(animated: animated, afterClose: afterClose)
             }
+            return
+        }
+        if !animated {
+            closePanel(animated: false, afterClose: afterClose)
             return
         }
         detailStore?.requestClose()
@@ -622,6 +626,12 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
         }
         pasteInitiatedCloseSessionID = pasteInitiatedSessionID
         isClosePending = true
+        if !animated {
+            // Hide before selection/focus teardown can repaint a glass surface.
+            // Resetting alpha during closeImmediately is then never visible.
+            panel.orderOut(nil)
+            detailStore?.requestClose()
+        }
         notifyCloseStartedIfNeeded()
         lifecycleGeneration &+= 1
         let closeGeneration = lifecycleGeneration
@@ -719,8 +729,13 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
             return
         }
         dismissMonitor.start(panel: panel) { [weak self] in
-            self?.requestClosePanel()
+            self?.dismissForExternalInteraction()
         }
+    }
+
+    func dismissForExternalInteraction() {
+        Self.pasteLogger.debug("stage=panel-dismiss reason=external-event animated=false")
+        requestClosePanel(animated: false)
     }
 
     func targetContextForPaste() -> ClipboardPasteTargetContext? {

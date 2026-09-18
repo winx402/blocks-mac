@@ -342,6 +342,46 @@ struct BlocksSelectableControlStyle: ButtonStyle {
   }
 }
 
+/// Transient capsule feedback preserves the label's semantic selection color.
+struct BlocksChipFeedbackStyle: ButtonStyle {
+  func makeBody(configuration: Configuration) -> some View {
+    BlocksChipFeedbackBody(label: configuration.label, isPressed: configuration.isPressed)
+  }
+}
+
+private struct BlocksChipFeedbackBody<Label: View>: View {
+  let label: Label
+  let isPressed: Bool
+  @State private var isHovered = false
+  @Environment(\.isEnabled) private var isEnabled
+  @Environment(\.colorSchemeContrast) private var contrast
+
+  var body: some View {
+    let appearance = BlocksInteractionAppearance.resolve(
+      BlocksChipInteraction.state(isEnabled: isEnabled, isHovered: isHovered, isPressed: isPressed),
+      increasesContrast: contrast == .increased
+    )
+    label
+      .overlay {
+        Capsule(style: .continuous)
+          .fill(Color.primary.opacity(appearance.fillOpacity))
+          .allowsHitTesting(false)
+      }
+      .opacity(appearance.contentOpacity)
+      .onHover { isHovered = $0 }
+      .blocksAnimation(.hoverFocus, value: isHovered)
+      .blocksAnimation(.press, value: isPressed)
+  }
+}
+
+enum BlocksChipInteraction {
+  static func state(isEnabled: Bool, isHovered: Bool, isPressed: Bool) -> BlocksInteractionState {
+    if !isEnabled { return .disabled }
+    if isPressed { return .pressed }
+    return isHovered ? .hovered : .idle
+  }
+}
+
 struct BlocksInteractionChromeModifier: ViewModifier {
   let state: BlocksInteractionState
   let cornerStyle: BlocksInteractiveRowHighlightCornerStyle
