@@ -28,6 +28,10 @@ final class ClipboardPanelDismissalTests: XCTestCase {
         XCTAssertEqual(closeCount, 1)
         XCTAssertEqual(phases, [.insertion])
         XCTAssertEqual(coordinator.phase, .hidden)
+        let events = ClipboardInteractionTrace.shared.snapshot().events
+        let tail = events.filter { [.externalDismiss, .closeRequested, .closeStarted, .orderedOut, .closeCompleted].contains($0.stage) }.suffix(5)
+        XCTAssertEqual(tail.map(\.stage), [.externalDismiss, .closeRequested, .closeStarted, .orderedOut, .closeCompleted])
+        XCTAssertEqual(tail.first(where: { $0.stage == .orderedOut })?.visible, false)
     }
 
     func testExternalDismissDoesNotClosePinnedPanel() {

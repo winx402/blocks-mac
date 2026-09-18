@@ -5,6 +5,35 @@ import XCTest
 
 @MainActor
 final class ClipboardFilterInteractionTests: XCTestCase {
+    func testDiagnosticTraceIsBoundedOrderedAndRotatesSession() throws {
+        let trace = ClipboardInteractionTrace()
+        trace.record(.openRequested)
+        let firstSession = try XCTUnwrap(trace.snapshot().events.first?.session)
+        for _ in 0..<300 { trace.record(.rowHover, hovered: true, favorite: false) }
+        let snapshot = trace.snapshot()
+        XCTAssertEqual(snapshot.events.count, 256)
+        XCTAssertEqual(snapshot.dropped, 45)
+        XCTAssertEqual(snapshot.events.first?.sequence, 46)
+        XCTAssertEqual(snapshot.events.last?.sequence, 301)
+        trace.record(.openRequested)
+        XCTAssertNotEqual(trace.snapshot().events.last?.session, firstSession)
+        let encoded = try JSONEncoder().encode(snapshot)
+        let decoded = try JSONDecoder().decode(ClipboardInteractionTrace.Snapshot.self, from: encoded)
+        XCTAssertEqual(decoded.events.count, 256)
+        XCTAssertTrue(decoded.events.allSatisfy { $0.control == nil && $0.group == nil })
+    }
+
+    func testFilterCallbacksProduceContentFreeDiagnosticSequence() {
+        let before = ClipboardInteractionTrace.shared.snapshot().events.last?.sequence ?? 0
+        ClipboardFilterInteractionDiagnostics.pointer(group: .format, windowNumber: 123, isKeyWindow: false)
+        ClipboardFilterInteractionDiagnostics.selection(group: .format)
+        let events = ClipboardInteractionTrace.shared.snapshot().events.filter { $0.sequence > before }
+        XCTAssertEqual(events.map(\.stage), [.filterPointer, .filterSelection])
+        XCTAssertEqual(events.first?.window, 123)
+        XCTAssertEqual(events.first?.key, false)
+        XCTAssertEqual(events.first?.session, events.last?.session)
+    }
+
     func testProbeDoesNotInterceptAndOnlyObservesPressesInsideItsOwnVisibleBounds() throws {
         let window = makeWindow()
         let probe = ClipboardFilterPointerProbeView(frame: NSRect(x: 20, y: 30, width: 100, height: 28))

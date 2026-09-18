@@ -67,6 +67,7 @@ enum ClipboardRecordInteractionState {
 
 struct ClipboardFloatingRecordCard: View {
     @State private var isHovered = false
+    @State private var diagnosticControlID = UUID()
 
     let record: ClipboardRecorderRecord
     let preview: ClipboardRecordPreview
@@ -96,6 +97,11 @@ struct ClipboardFloatingRecordCard: View {
     let onRemove: () -> Void
 
     private let cardFavoriteActionReservedTrailingSpace: CGFloat = 22
+
+    private func traceFavorite(_ stage: ClipboardInteractionTrace.Stage) {
+        ClipboardInteractionTrace.shared.record(stage, control: diagnosticControlID,
+            hovered: isHovered, favorite: tagStore.isFavorite(recordID: record.id))
+    }
 
     private var interactionState: BlocksInteractionState {
         ClipboardRecordInteractionState.resolve(
@@ -154,11 +160,18 @@ struct ClipboardFloatingRecordCard: View {
                 tint: Color.yellow.opacity(0.95),
                 density: .micro,
                 showsHelp: true,
-                action: onToggleFavorite
+                action: {
+                    traceFavorite(.favoriteAction)
+                    onToggleFavorite()
+                }
             )
             .accessibilityHidden(true)
             .opacity(isFavoriteActionVisible ? 1 : 0)
             .allowsHitTesting(isFavoriteActionVisible)
+            .onHover { hovering in
+                ClipboardInteractionTrace.shared.record(.favoriteHover, control: diagnosticControlID,
+                    hovered: hovering, favorite: isFavorite)
+            }
             .padding(.top, 5)
             .padding(.trailing, 5)
         }
@@ -169,7 +182,12 @@ struct ClipboardFloatingRecordCard: View {
                     .padding(.bottom, 9)
             }
         }
-        .onHover { isHovered = $0 }
+        .onHover { hovering in
+            guard isHovered != hovering else { return }
+            isHovered = hovering
+            traceFavorite(.rowHover)
+        }
+        .onDisappear { traceFavorite(.rowDisappeared) }
         .contentShape(Rectangle())
         .accessibilityElement(children: .ignore)
         .accessibilitySortPriority(accessibilitySortPriority)
@@ -194,6 +212,7 @@ struct ClipboardFloatingRecordCard: View {
                 ? L10n.string("clipboard.tags.unfavorite")
                 : L10n.string("clipboard.tags.favorite")
         )) {
+            traceFavorite(.favoriteAction)
             onToggleFavorite()
         }
         .contextMenu {

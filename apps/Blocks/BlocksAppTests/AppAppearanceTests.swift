@@ -2360,11 +2360,15 @@ final class AppAppearanceTests: XCTestCase {
             warnings: ["SENSITIVE_WARNING"]
         )
 
+        ClipboardInteractionTrace.shared.record(.filterPointer, group: .format, window: 123, key: false)
         let report = DiagnosticsExportService.makeReport(
             permissionSnapshot: snapshot,
             providerAuditEvents: [event],
             now: Date(timeIntervalSince1970: 30)
         )
+        XCTAssertEqual(report.schemaVersion, 2)
+        XCTAssertNotNil(report.clipboardInteractionTrace)
+        XCTAssertLessThanOrEqual(report.clipboardInteractionTrace?.events.count ?? 0, 256)
         let directoryURL = try makeDiagnosticsExportFixtureDirectory()
         defer { try? FileManager.default.removeItem(at: directoryURL) }
         let destinationURL = directoryURL.appendingPathComponent("diagnostics.json")
@@ -2375,6 +2379,8 @@ final class AppAppearanceTests: XCTestCase {
         let text = try XCTUnwrap(String(data: data, encoding: .utf8))
 
         XCTAssertTrue(text.contains("translation_runtime"))
+        XCTAssertTrue(text.contains("filterPointer"))
+        XCTAssertTrue(text.contains("clipboardInteractionTrace"))
         XCTAssertTrue(text.contains("\"warningCount\" : 1"))
         for sensitiveValue in [
             "SENSITIVE_AUDIT_ID",
@@ -3432,7 +3438,8 @@ private func diagnosticsExportTestReport() -> BlocksDiagnosticReport {
             inputMonitoringAction: "none"
         ),
         redactedAuditEvents: [],
-        excludedData: []
+        excludedData: [],
+        clipboardInteractionTrace: nil
     )
 }
 

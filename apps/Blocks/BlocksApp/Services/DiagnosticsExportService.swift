@@ -1,5 +1,84 @@
 import Foundation
 import Darwin
+import OSLog
+
+/// Content-free, bounded breadcrumbs. Memory-only: export before restarting.
+/// No arbitrary strings/record IDs are accepted at the instrumentation boundary.
+final class ClipboardInteractionTrace: @unchecked Sendable {
+    enum Stage: String, Codable, Sendable {
+        case openRequested, openSuppressed, presentationStarted, presented, reused, monitorStarted
+        case externalDismiss, closeRequested, closeIgnoredPinned, closeIgnoredPending
+        case closeStarted, orderedOut, closeCompleted, staleCloseCompletion
+        case filterPointer, filterSelection, probeAttached, probeDetached
+        case rowHover, favoriteHover, favoriteAction, rowDisappeared
+    }
+    struct Event: Codable, Sendable {
+        let sequence: UInt64
+        let time: Date
+        let uptime: TimeInterval
+        let session: UUID
+        let stage: Stage
+        let group: String?
+        let control: UUID?
+        let window: Int?
+        let key: Bool?
+        let visible: Bool?
+        let pinned: Bool?
+        let pending: Bool?
+        let animated: Bool?
+        let hovered: Bool?
+        let favorite: Bool?
+        let alpha: Double?
+        let screenCount: Int?
+    }
+    struct Snapshot: Codable, Sendable {
+        let capacity: Int
+        let dropped: UInt64
+        let events: [Event]
+    }
+    static let shared = ClipboardInteractionTrace()
+    private let lock = NSLock()
+    private let capacity = 256
+    private var events: [Event] = []
+    private var sequence: UInt64 = 0
+    private var session = UUID()
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "app.blocks", category: "clipboard-interaction")
+
+    func record(_ stage: Stage, group: ClipboardFilterGroup? = nil, control: UUID? = nil,
+                window: Int? = nil, key: Bool? = nil, visible: Bool? = nil,
+                pinned: Bool? = nil, pending: Bool? = nil, animated: Bool? = nil,
+                hovered: Bool? = nil, favorite: Bool? = nil, alpha: Double? = nil,
+                screenCount: Int? = nil) {
+        lock.lock()
+        if stage == .openRequested { session = UUID() }
+        sequence &+= 1
+        let event = Event(sequence: sequence, time: Date(), uptime: ProcessInfo.processInfo.systemUptime,
+                          session: session, stage: stage, group: group?.rawValue, control: control,
+                          window: window, key: key, visible: visible, pinned: pinned, pending: pending,
+                          animated: animated, hovered: hovered, favorite: favorite, alpha: alpha,
+                          screenCount: screenCount)
+        if events.count == capacity { events.removeFirst() }
+        events.append(event)
+        lock.unlock()
+        // Unified logging is supplementary; export does not depend on debug retention.
+        let line = "seq=\(event.sequence) session=\(event.session) stage=\(stage.rawValue)"
+            + " group=\(event.group ?? "none") control=\(control?.uuidString ?? "none") window=\(window ?? -1)"
+            + " key=\(String(describing: key)) visible=\(String(describing: visible)) pinned=\(String(describing: pinned))"
+            + " pending=\(String(describing: pending)) animated=\(String(describing: animated)) alpha=\(String(describing: alpha))"
+            + " hover=\(String(describing: hovered)) favorite=\(String(describing: favorite)) screens=\(screenCount ?? -1)"
+        if stage == .rowHover || stage == .favoriteHover {
+            logger.debug("\(line, privacy: .public)")
+        } else {
+            logger.info("\(line, privacy: .public)")
+        }
+    }
+
+    func snapshot() -> Snapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return Snapshot(capacity: capacity, dropped: sequence - UInt64(events.count), events: events)
+    }
+}
 
 struct BlocksDiagnosticReport: Codable, Sendable {
     struct Application: Codable, Sendable {
@@ -38,6 +117,7 @@ struct BlocksDiagnosticReport: Codable, Sendable {
     let permissions: PermissionSummary
     let redactedAuditEvents: [RedactedAuditEvent]
     let excludedData: [String]
+    let clipboardInteractionTrace: ClipboardInteractionTrace.Snapshot?
 }
 
 enum DiagnosticsExportService {
@@ -60,7 +140,7 @@ enum DiagnosticsExportService {
         now: Date = Date()
     ) -> BlocksDiagnosticReport {
         BlocksDiagnosticReport(
-            schemaVersion: 1,
+            schemaVersion: 2,
             generatedAt: now,
             application: .init(
                 releaseName: BlocksReleaseMetadata.releaseName,
@@ -100,7 +180,8 @@ enum DiagnosticsExportService {
                 "file_paths",
                 "team_identifier",
                 "raw_application_logs",
-            ]
+            ],
+            clipboardInteractionTrace: ClipboardInteractionTrace.shared.snapshot()
         )
     }
 

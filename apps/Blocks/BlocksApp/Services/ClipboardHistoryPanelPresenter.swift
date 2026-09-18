@@ -380,11 +380,14 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
         onCloseStarted: @escaping (UUID?, UUID?) -> Void = { _, _ in },
         onClosed: @escaping (UUID?) -> Void
     ) -> PresentationResult {
+        traceInteraction(.openRequested)
         if shouldSuppressOpen() {
+            traceInteraction(.openSuppressed)
             return .suppressed
         }
         let replacedPendingClose = replacePendingCloseForNewInvocation()
         if let panel, panel.isVisible, !replacedPendingClose {
+            traceInteraction(.reused)
             startApplicationObservationIfNeeded()
             recentCloseGuard.clear()
             focus()
@@ -481,6 +484,7 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
         anchorPanel(panel)
         dismissMonitor.stop()
         self.panel = panel
+        traceInteraction(.presentationStarted)
         startVisibleFrameObservation()
         regularWindowVisibilitySession.hideRegularWindows(excluding: panel)
         presentationCoordinator.present(
@@ -493,6 +497,7 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
                   self.panel === panel else {
                 return
             }
+            self.traceInteraction(.presented)
             self.startDismissMonitor(for: panel)
             let notificationPresenter = self.notificationPresenter
                 ?? BlocksAnchoredNotificationPanelPresenter(
@@ -588,7 +593,9 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
     }
 
     private func requestClosePanel(animated: Bool = true, afterClose: (() -> Void)? = nil) {
+        traceInteraction(.closeRequested, animated: animated)
         guard !pinState.isPinned else {
+            traceInteraction(.closeIgnoredPinned, animated: animated)
             return
         }
         if let detailStore, detailStore.isDirty {
@@ -619,17 +626,22 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
         if let afterClose {
             afterCloseActions.append(afterClose)
         }
-        guard !isClosePending || interruptingPendingClose else { return }
+        guard !isClosePending || interruptingPendingClose else {
+            traceInteraction(.closeIgnoredPending, animated: animated)
+            return
+        }
         guard let panel else {
             finishCloseLifecycle(panel: nil)
             return
         }
         pasteInitiatedCloseSessionID = pasteInitiatedSessionID
         isClosePending = true
+        traceInteraction(.closeStarted, animated: animated)
         if !animated {
             // Hide before selection/focus teardown can repaint a glass surface.
             // Resetting alpha during closeImmediately is then never visible.
             panel.orderOut(nil)
+            traceInteraction(.orderedOut, animated: animated)
             detailStore?.requestClose()
         }
         notifyCloseStartedIfNeeded()
@@ -646,9 +658,11 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
             guard self.lifecycleGeneration == closeGeneration,
                   self.isClosePending,
                   self.panel === panel else {
+                self.traceInteraction(.staleCloseCompletion, animated: animated)
                 return
             }
             panel.close()
+            self.traceInteraction(.closeCompleted, animated: animated)
             if self.isClosePending {
                 self.finishCloseWithoutWindowNotification(panel: panel)
             }
@@ -731,11 +745,20 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
         dismissMonitor.start(panel: panel) { [weak self] in
             self?.dismissForExternalInteraction()
         }
+        traceInteraction(.monitorStarted)
     }
 
     func dismissForExternalInteraction() {
+        traceInteraction(.externalDismiss, animated: false)
         Self.pasteLogger.debug("stage=panel-dismiss reason=external-event animated=false")
         requestClosePanel(animated: false)
+    }
+
+    private func traceInteraction(_ stage: ClipboardInteractionTrace.Stage, animated: Bool? = nil) {
+        ClipboardInteractionTrace.shared.record(stage, window: panel?.windowNumber,
+            key: panel?.isKeyWindow, visible: panel?.isVisible, pinned: pinState.isPinned,
+            pending: isClosePending, animated: animated, alpha: panel.map { Double($0.alphaValue) },
+            screenCount: NSScreen.screens.count)
     }
 
     func targetContextForPaste() -> ClipboardPasteTargetContext? {

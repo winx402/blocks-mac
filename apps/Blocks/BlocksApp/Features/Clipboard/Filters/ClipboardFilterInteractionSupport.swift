@@ -23,10 +23,12 @@ enum ClipboardFilterInteractionDiagnostics {
     )
 
     static func pointer(group: ClipboardFilterGroup, windowNumber: Int, isKeyWindow: Bool) {
+        ClipboardInteractionTrace.shared.record(.filterPointer, group: group, window: windowNumber, key: isKeyWindow)
         logger.debug("stage=pointer-observed group=\(group.rawValue, privacy: .public) window=\(windowNumber) key=\(isKeyWindow)")
     }
 
     static func selection(group: ClipboardFilterGroup) {
+        ClipboardInteractionTrace.shared.record(.filterSelection, group: group)
         logger.debug("stage=selection-dispatched group=\(group.rawValue, privacy: .public)")
     }
 }
@@ -73,6 +75,7 @@ final class ClipboardFilterPointerProbeView: NSView {
         super.viewDidMoveToWindow()
         stopMonitoring()
         guard window != nil else { return }
+        ClipboardInteractionTrace.shared.record(.probeAttached, group: group, window: window?.windowNumber)
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] event in
             self?.processLocalEvent(event) ?? event
         }
@@ -80,6 +83,7 @@ final class ClipboardFilterPointerProbeView: NSView {
 
     func stopMonitoring() {
         guard let localMonitor else { return }
+        ClipboardInteractionTrace.shared.record(.probeDetached, group: group, window: window?.windowNumber)
         NSEvent.removeMonitor(localMonitor)
         self.localMonitor = nil
     }
