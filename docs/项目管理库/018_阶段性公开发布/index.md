@@ -1,10 +1,14 @@
 # 积木工具阶段性公开发布
 
-状态：0.1.0-beta.4 已签名、公证并公开发布；部分原场景验收待复验
+状态：0.1.0-beta.5 已签名、公证并公开发布；部分原场景验收待复验
 最后更新：2026-09-18
 负责人：项目负责人
 
 ## 当前工作（2026-09-18）
+
+[Beta 5](https://github.com/winx402/blocks-mac/releases/tag/v0.1.0-beta.5)（build5）增加四模块CLI授权、动态动作列表及命令自动管理，已签名、公证、公开下载复核并更新Beta源，源提交的云端CI通过。官方沙盒首次目录授权/跨版本更新的完整实机闭环仍待验收，见 [Issue #47 与 Beta 5](Issue-47与Beta5-2026-09-18.md)。
+
+## 此前发布：Beta 4（2026-09-18）
 
 [Beta 4](https://github.com/winx402/blocks-mac/releases/tag/v0.1.0-beta.4)（build4）提供 #46 CLI 优化器崩溃的结构规避补丁，保留优化并通过本机CLI回归、签名、公证和下载/更新源验证。Xcode27原环境仍未复验，见 [Issue #46 与 Beta 4](Issue-46与Beta4-2026-09-18.md)。
 
