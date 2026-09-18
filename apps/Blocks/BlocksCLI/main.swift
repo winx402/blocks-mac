@@ -52,18 +52,41 @@ private func brokerConnectionRequirement() -> String? {
     #endif
 }
 
-func emit<T: Encodable>(_ value: T, exitCode: Int32 = 0) -> Never {
+// Keep encoding, generic action execution, and process termination in separate
+// optimized functions. Issue #46 reports an Xcode 27 beta SimplifyCFG crash in
+// an executeAction specialization. These no-inline boundaries reduce coupling
+// to Never-returning tails; they are a workaround pending Xcode 27 validation.
+struct CLIExecutionOutput {
+    let data: Data?
+    let exitCode: Int32
+}
+
+@inline(never)
+func encodeCLIOutput<T: Encodable>(_ value: T, exitCode: Int32 = 0) -> CLIExecutionOutput {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     do {
         let data = try encoder.encode(value)
+        return CLIExecutionOutput(data: data, exitCode: exitCode)
+    } catch {
+        return CLIExecutionOutput(data: nil, exitCode: 1)
+    }
+}
+
+@inline(never)
+func emit(_ output: CLIExecutionOutput) -> Never {
+    if let data = output.data {
         FileHandle.standardOutput.write(data)
         FileHandle.standardOutput.write(Data("\n".utf8))
-        exit(exitCode)
-    } catch {
+    } else {
         fputs("{\"ok\":false,\"error\":{\"code\":\"json_encode_failed\",\"message\":\"Unable to encode output.\"}}\n", stderr)
-        exit(1)
     }
+    exit(output.exitCode)
+}
+
+@inline(never)
+func emit<T: Encodable>(_ value: T, exitCode: Int32 = 0) -> Never {
+    emit(encodeCLIOutput(value, exitCode: exitCode))
 }
 
 struct ActionListOutput: Codable {
@@ -773,6 +796,7 @@ func emitArgumentFailure<Result: Codable>(
     )
 }
 
+@inline(never)
 func submitToBroker<Payload: Codable, Result: Codable>(
     _ request: ActionBrokerRequest<Payload>,
     outputFile: FileHandle?,
@@ -933,30 +957,80 @@ enum BlocksCLITransportError: Error {
     }
 }
 
+// This non-generic owner keeps output setup/finalization and fallback cleanup
+// outside every Payload/Result specialization. Finalization still precedes JSON
+// encoding, and a failed action never publishes its temporary output file.
+private final class ActionOutputDestination {
+    private var destination: PreparedOutputDestination?
+
+    @inline(never)
+    init(path: String?, allowOverwrite: Bool) throws {
+        if let path {
+            destination = try prepareOutputDestination(path: path, allowOverwrite: allowOverwrite)
+        }
+    }
+
+    var file: FileHandle? { destination?.file }
+
+    @inline(never)
+    func finish(success: Bool) throws {
+        try destination?.finish(success: success)
+    }
+
+    deinit {
+        try? destination?.finish(success: false)
+    }
+}
+
+private struct CLIActionFailure {
+    let error: ActionBrokerError
+    let exitCode: Int32
+}
+
+@inline(never)
+private func classifyActionFailure(_ error: Error) -> CLIActionFailure {
+    if let error = error as? ScreenshotCLIParseError {
+        return CLIActionFailure(error: ActionBrokerError(
+            category: .invalidRequest,
+            code: error.code,
+            message: error.message,
+            retryable: false
+        ), exitCode: 2)
+    }
+    if let error = error as? BlocksCLITransportError {
+        return CLIActionFailure(error: error.brokerError, exitCode: error.exitCode)
+    }
+    return CLIActionFailure(error: ActionBrokerError(
+        category: .availability,
+        code: "broker_unavailable",
+        message: "BlocksActionBroker is unavailable. Enable CLI integration in Blocks settings.",
+        retryable: false,
+        details: ["explicit_enable_required": .bool(true)]
+    ), exitCode: 1)
+}
+
+@inline(never)
 func executeAction<Payload: Codable, Result: Codable>(
     action: BlocksAction,
     requestID: ActionRequestID,
     arguments: ActionCLIArguments<Payload>,
     timeout: TimeInterval,
     resultType: Result.Type
-) -> Never {
+) -> CLIExecutionOutput {
     let actionID = action.actionID
     if arguments.dryRun {
-        emit(ActionBrokerTerminalResponse.completed(
+        return encodeCLIOutput(ActionBrokerTerminalResponse.completed(
             requestID: requestID,
             actionID: actionID,
             result: ActionCLIDryRunResult(dryRun: true, request: arguments.request)
         ))
     }
 
-    var destination: PreparedOutputDestination?
     do {
-        if let outputPath = arguments.outputPath {
-            destination = try prepareOutputDestination(
-                path: outputPath,
-                allowOverwrite: arguments.allowOverwrite
-            )
-        }
+        let destination = try ActionOutputDestination(
+            path: arguments.outputPath,
+            allowOverwrite: arguments.allowOverwrite
+        )
         let request = ActionBrokerRequest(
             requestID: requestID,
             actionID: actionID,
@@ -964,49 +1038,21 @@ func executeAction<Payload: Codable, Result: Codable>(
         )
         let response = try submitToBroker(
             request,
-            outputFile: destination?.file,
+            outputFile: destination.file,
             timeout: timeout,
             resultType: resultType
         )
-        try destination?.finish(success: response.status == .completed)
-        emit(response, exitCode: response.status == .completed ? 0 : 1)
-    } catch let error as ScreenshotCLIParseError {
-        try? destination?.finish(success: false)
-        emitActionFailure(
-            actionID: actionID,
-            requestID: requestID,
-            error: ActionBrokerError(
-                category: .invalidRequest,
-                code: error.code,
-                message: error.message,
-                retryable: false
-            ),
-            resultType: resultType,
-            exitCode: 2
-        )
-    } catch let error as BlocksCLITransportError {
-        try? destination?.finish(success: false)
-        emitActionFailure(
-            actionID: actionID,
-            requestID: requestID,
-            error: error.brokerError,
-            resultType: resultType,
-            exitCode: error.exitCode
-        )
+        try destination.finish(success: response.status == .completed)
+        return encodeCLIOutput(response, exitCode: response.status == .completed ? 0 : 1)
     } catch {
-        try? destination?.finish(success: false)
-        emitActionFailure(
-            actionID: actionID,
-            requestID: requestID,
-            error: ActionBrokerError(
-                category: .availability,
-                code: "broker_unavailable",
-                message: "BlocksActionBroker is unavailable. Enable CLI integration in Blocks settings.",
-                retryable: false,
-                details: ["explicit_enable_required": .bool(true)]
+        let failure = classifyActionFailure(error)
+        return encodeCLIOutput(
+            ActionBrokerTerminalResponse<Result>.failed(
+                requestID: requestID,
+                actionID: actionID,
+                error: failure.error
             ),
-            resultType: resultType,
-            exitCode: 1
+            exitCode: failure.exitCode
         )
     }
 }
@@ -1572,13 +1618,13 @@ case "run":
         do {
             let parsed = try parseScreenshotArguments(actionArguments)
             let timeout: TimeInterval = parsed.request.interaction == .interactive ? 600 : 90
-            executeAction(
+            emit(executeAction(
                 action: action,
                 requestID: requestID,
                 arguments: parsed,
                 timeout: timeout,
                 resultType: ScreenshotCaptureActionResult.self
-            )
+            ))
         } catch {
             emitArgumentFailure(
                 actionID: action.actionID,
@@ -1589,13 +1635,13 @@ case "run":
         }
     case .screenshotHistoryQuery:
         do {
-            executeAction(
+            emit(executeAction(
                 action: action,
                 requestID: requestID,
                 arguments: try parseHistoryQueryArguments(actionArguments),
                 timeout: 90,
                 resultType: ScreenshotHistoryPageActionResult.self
-            )
+            ))
         } catch {
             emitArgumentFailure(
                 actionID: action.actionID,
@@ -1606,13 +1652,13 @@ case "run":
         }
     case .screenshotHistorySearch:
         do {
-            executeAction(
+            emit(executeAction(
                 action: action,
                 requestID: requestID,
                 arguments: try parseHistorySearchArguments(actionArguments),
                 timeout: 90,
                 resultType: ScreenshotHistoryPageActionResult.self
-            )
+            ))
         } catch {
             emitArgumentFailure(
                 actionID: action.actionID,
@@ -1623,13 +1669,13 @@ case "run":
         }
     case .screenshotOCRStatus:
         do {
-            executeAction(
+            emit(executeAction(
                 action: action,
                 requestID: requestID,
                 arguments: try parseOCRStatusArguments(actionArguments),
                 timeout: 90,
                 resultType: ScreenshotOCRStatusActionResult.self
-            )
+            ))
         } catch {
             emitArgumentFailure(
                 actionID: action.actionID,
@@ -1640,13 +1686,13 @@ case "run":
         }
     case .screenshotOCRRetry:
         do {
-            executeAction(
+            emit(executeAction(
                 action: action,
                 requestID: requestID,
                 arguments: try parseOCRRetryArguments(actionArguments),
                 timeout: 90,
                 resultType: ScreenshotOCRRetryActionResult.self
-            )
+            ))
         } catch {
             emitArgumentFailure(
                 actionID: action.actionID,
@@ -1657,13 +1703,13 @@ case "run":
         }
     case .screenshotHistoryExport:
         do {
-            executeAction(
+            emit(executeAction(
                 action: action,
                 requestID: requestID,
                 arguments: try parseHistoryExportArguments(actionArguments),
                 timeout: 90,
                 resultType: ScreenshotHistoryExportActionResult.self
-            )
+            ))
         } catch {
             emitArgumentFailure(
                 actionID: action.actionID,
@@ -1674,13 +1720,13 @@ case "run":
         }
     case .screenshotScrollingStatus:
         do {
-            executeAction(
+            emit(executeAction(
                 action: action,
                 requestID: requestID,
                 arguments: try parseScrollingStatusArguments(actionArguments),
                 timeout: 30,
                 resultType: ScreenshotScrollingStatusActionResult.self
-            )
+            ))
         } catch {
             emitArgumentFailure(
                 actionID: action.actionID,
@@ -1691,13 +1737,13 @@ case "run":
         }
     case .screenshotScrollingFinish:
         do {
-            executeAction(
+            emit(executeAction(
                 action: action,
                 requestID: requestID,
                 arguments: try parseScrollingFinishArguments(actionArguments),
                 timeout: 90,
                 resultType: ScreenshotScrollingFinishActionResult.self
-            )
+            ))
         } catch {
             emitArgumentFailure(
                 actionID: action.actionID,
@@ -1708,13 +1754,13 @@ case "run":
         }
     case .screenshotScrollingCancel:
         do {
-            executeAction(
+            emit(executeAction(
                 action: action,
                 requestID: requestID,
                 arguments: try parseScrollingCancelArguments(actionArguments),
                 timeout: 30,
                 resultType: ScreenshotScrollingCancelActionResult.self
-            )
+            ))
         } catch {
             emitArgumentFailure(
                 actionID: action.actionID,
