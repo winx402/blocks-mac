@@ -145,6 +145,8 @@ public final class ActionBrokerUpdateRecoveryJournal {
 }
 
 @objc public protocol BlocksActionBrokerClientXPCProtocol {
+    /// Optional for rolling upgrades: an older peer must fail closed.
+    @objc optional func listActions(withReply reply: @escaping (Data) -> Void)
     /// A non-sensitive handshake used before local-development clients send
     /// request data. Optional preserves compatibility with older signed peers.
     @objc optional func probe(withReply reply: @escaping () -> Void)
@@ -162,6 +164,7 @@ public final class ActionBrokerUpdateRecoveryJournal {
 }
 
 @objc public protocol BlocksActionHostXPCProtocol {
+    @objc optional func listActions(withReply reply: @escaping (Data) -> Void)
     func execute(
         _ requestData: Data,
         outputFile: FileHandle?,

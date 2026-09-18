@@ -53,6 +53,14 @@ struct ContractFixture {
         let actionID = ActionID(rawValue: "blocks.screenshot.capture")!
         let requestID = ActionRequestID(rawValue: "req_contract_fixture")!
 
+        let descriptor = ActionRegistry.actions.first { $0.actionID == actionID }
+        try require(descriptor?.protocolVersion == 1, "broker descriptor version")
+        try require(descriptor?.requestType == "ScreenshotCaptureActionInput", "broker request DTO")
+        try require(descriptor?.resultType == "ScreenshotCaptureActionResult", "broker result DTO")
+        let descriptorJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(descriptor)) as? [String: Any]
+        try require(descriptorJSON?["inputSchema"] == nil && descriptorJSON?["outputSchema"] == nil
+            && descriptorJSON?["input_schema"] == nil && descriptorJSON?["output_schema"] == nil, "no legacy schema descriptors")
+
         let interactive = try ScreenshotCaptureActionInput(
             kind: .smart,
             interaction: .interactive
@@ -301,18 +309,10 @@ def run_cli_checks(failures: list[dict[str, str]], executable: Path) -> None:
         add_failure(failures, "cli_help_schema_wrong", "CLI help still exposes the old screenshot schema", CLI)
 
     code, list_payload = run_cli(executable, ["list"])
-    actions = list_payload.get("actions", []) if isinstance(list_payload, dict) else []
-    screenshot = actions[0] if actions and isinstance(actions[0], dict) else {}
-    expected_descriptor = {
-        "action_id": "blocks.screenshot.capture",
-        "protocol_version": 1,
-        "request_type": "ScreenshotCaptureActionInput",
-        "result_type": "ScreenshotCaptureActionResult",
-    }
-    if code or any(screenshot.get(key) != value for key, value in expected_descriptor.items()):
-        add_failure(failures, "action_descriptor_contract_wrong", "Action registry does not advertise the broker v1 DTO contract")
-    if "inputSchema" in screenshot or "outputSchema" in screenshot or "input_schema" in screenshot or "output_schema" in screenshot:
-        add_failure(failures, "legacy_schema_descriptor_remaining", "Action registry still advertises legacy screenshot schemas")
+    # Live capabilities now require an authenticated Broker/App. This unsigned
+    # fixture must fail before connection, not expose a static permission list.
+    if code != 1 or list_payload.get("actions") != [] or list_payload.get("error", {}).get("code") != "local_identity_unavailable":
+        add_failure(failures, "dynamic_list_not_fail_closed", f"Unsigned CLI list result: exit={code}, payload={list_payload!r}")
 
     with tempfile.TemporaryDirectory(prefix="blocks_p14e_dry_run_") as temporary:
         output_path = str(Path(temporary) / "missing" / "fixture.jpg")

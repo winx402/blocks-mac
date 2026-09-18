@@ -7,7 +7,7 @@ final class AppModel: ObservableObject {
     let applicationOperationGate: ApplicationOperationAdmissionGate
     let applicationLifecycle = ApplicationLifecycleCoordinator(requiredParticipantIDs: [
         "app", "shortcuts", "helper", "actionBroker", "clipboard", "translation",
-        "provider", "screenshot", "plugins", "database",
+        "provider", "screenshot", "plugins", "database", "cliInstallation",
     ])
     private var needsApplicationUpdateBackup = false
     @Published var selectedSection: AppSection = .screenshot
@@ -28,6 +28,7 @@ final class AppModel: ObservableObject {
     let privacyStore: PrivacyStore
     let featureAvailabilityStore: FeatureAvailabilityStore
     let actionBrokerManager: ActionBrokerServiceManager
+    let cliInstallationController: BlocksCLIInstallationController
     let clipboardCoordinator: ClipboardFeatureCoordinator
     let translationCoordinator: TranslationFeatureCoordinator
     let providerCoordinator: ProviderFeatureCoordinator
@@ -188,6 +189,7 @@ final class AppModel: ObservableObject {
         self.privacyStore = resolvedPrivacyStore
         self.featureAvailabilityStore = resolvedFeatureAvailabilityStore
         self.actionBrokerManager = resolvedActionBrokerManager
+        self.cliInstallationController = BlocksCLIInstallationController(applicationUpdateGate: applicationOperationGate)
         self.clipboardCoordinator = ClipboardFeatureCoordinator(
             clipboardStore: resolvedClipboardStore,
             privacyStore: resolvedPrivacyStore,
@@ -256,11 +258,15 @@ final class AppModel: ObservableObject {
         openClipboardPanelForVerificationIfRequested()
         translationCoordinator.openPanelForVerificationIfRequested()
         configureApplicationLifecycle()
+        if runtimeServicesEnabled { cliInstallationController.reconcileManagedInstallation() }
         if !BlocksRuntimeEnvironment.isUnitTestHost { FeedbackController.shared.startIfEnabled() }
     }
 
     private func configureApplicationLifecycle() {
-        AppTerminationCoordinator.shared.installQuitObserver { FeedbackController.shared.stopForQuit() }
+        AppTerminationCoordinator.shared.installQuitObserver { [cliInstallationController] in
+            cliInstallationController.cancelForRouteExit()
+            FeedbackController.shared.stopForQuit()
+        }
         applicationLifecycle.beforeQuitDrain = { [pluginRuntimeCoordinator] in
             _ = await pluginRuntimeCoordinator.dispatch(.init(name: .appWillTerminate))
         }
@@ -277,6 +283,11 @@ final class AppModel: ObservableObject {
             try applicationLifecycle.register(.init(id: "shortcuts", pauseAndDrain: { [shortcutStore] in
                 try await shortcutStore.prepareForApplicationUpdate()
             }, resume: { [shortcutStore] in await shortcutStore.resumeAfterCancelledApplicationUpdate() }))
+            try applicationLifecycle.register(.init(id: "cliInstallation", pauseAndDrain: { [cliInstallationController] in
+                try await cliInstallationController.prepareForApplicationUpdate()
+            }, resume: { [cliInstallationController] in
+                await cliInstallationController.resumeAfterCancelledApplicationUpdate()
+            }))
             try applicationLifecycle.register(.init(id: "helper", pauseAndDrain: { [weak self, selectionHelperSettingsController] in
                 guard self?.applicationLifecycle.intent != .quit else { return }
                 try await selectionHelperSettingsController?.prepareForApplicationUpdate()

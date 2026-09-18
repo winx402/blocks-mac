@@ -1320,6 +1320,7 @@ final class PluginDevelopmentService {
     private let pluginManager: BlocksNativePluginManager
     private let runtime: BlocksPluginRuntimeCoordinator
     private let builtInCatalogLoader: () throws -> BlocksBuiltInPluginCatalog
+    private let loadSnapshot: @MainActor () async -> Void
     private let packageWorker = TranslationSourcePackageWorker()
     private var tasks: [String: Task<PluginDevelopmentActionResult, Error>] = [:]
 
@@ -1327,11 +1328,13 @@ final class PluginDevelopmentService {
         pluginManager: BlocksNativePluginManager,
         runtime: BlocksPluginRuntimeCoordinator,
         builtInCatalogLoader: @escaping () throws -> BlocksBuiltInPluginCatalog =
-            { try BlocksBuiltInPluginCatalog.load() }
+            { try BlocksBuiltInPluginCatalog.load() },
+        loadSnapshot: (@MainActor () async -> Void)? = nil
     ) {
         self.pluginManager = pluginManager
         self.runtime = runtime
         self.builtInCatalogLoader = builtInCatalogLoader
+        self.loadSnapshot = loadSnapshot ?? { await pluginManager.reload() }
     }
 
     func execute(
@@ -1362,7 +1365,10 @@ final class PluginDevelopmentService {
         _ input: PluginDevelopmentActionInput
     ) async throws -> PluginDevelopmentActionResult {
         try Task.checkCancellation()
-        if !pluginManager.snapshotIsReady { await pluginManager.reload() }
+        if !pluginManager.snapshotIsReady { await loadSnapshot() }
+        // Reload can suspend while module authorization is revoked. In
+        // particular clearLogs below is synchronous and has no manager gate.
+        try Task.checkCancellation()
         switch input.operation {
         case .list:
             return result(.list, plugins: pluginManager.plugins)
@@ -1386,6 +1392,7 @@ final class PluginDevelopmentService {
                 "confirmation_sha256"
             ).lowercased()
             let package = try await packageWorker.validate(snapshot)
+            try Task.checkCancellation()
             guard package.packageSHA256 == reviewedHash else {
                 throw TranslationSourceManagementServiceError
                     .confirmationHashMismatch
@@ -1394,6 +1401,8 @@ final class PluginDevelopmentService {
                 validatedPackage: package,
                 sourceDisplayName: package.manifest.displayName
             )
+            do { try Task.checkCancellation() }
+            catch { pluginManager.cancelPendingInstallation(id: pending.id); throw error }
             let installed = try await pluginManager.confirmAndInstall(
                 pendingID: pending.id
             )
@@ -1465,6 +1474,7 @@ final class PluginDevelopmentService {
             let package = try await Task.detached(priority: .utility) {
                 try catalog.validatedPackage(for: entry)
             }.value
+            try Task.checkCancellation()
             guard input.confirmed else {
                 guard input.confirmationSHA256 == nil else {
                     throw TranslationSourceManagementServiceError
@@ -1490,6 +1500,8 @@ final class PluginDevelopmentService {
                 entryID: entry.id,
                 catalog: catalog
             )
+            do { try Task.checkCancellation() }
+            catch { pluginManager.cancelPendingInstallation(id: pending.id); throw error }
             let installed = try await pluginManager.confirmAndInstall(
                 pendingID: pending.id
             )

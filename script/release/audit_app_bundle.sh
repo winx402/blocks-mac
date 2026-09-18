@@ -371,6 +371,7 @@ if ((require_signature)); then
         allowed_keys=(
           com.apple.security.app-sandbox
           com.apple.security.files.user-selected.read-write
+          com.apple.security.files.user-selected.executable
           com.apple.security.network.client
           com.apple.security.temporary-exception.files.absolute-path.read-only
           com.apple.security.temporary-exception.mach-lookup.global-name
@@ -437,8 +438,8 @@ if ((require_signature)); then
 
     case "$component" in
       "$app_bundle")
-        for key in com.apple.security.app-sandbox com.apple.security.files.user-selected.read-write com.apple.security.network.client; do
-          [[ "$(plutil -extract "${key//./\\.}" raw "$entitlement_file")" == "true" ]] \
+        for key in com.apple.security.app-sandbox com.apple.security.files.user-selected.read-write com.apple.security.files.user-selected.executable com.apple.security.network.client; do
+          [[ "$(plutil -extract "${key//./\\.}" raw "$entitlement_file" 2>/dev/null)" == "true" ]] \
             || fail "Direct app entitlement is not true: $key"
         done
         expected_mach_services=(app.blocks.action-broker.xpc app.blocks.app-spks app.blocks.app-spki)

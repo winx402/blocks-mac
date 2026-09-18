@@ -89,8 +89,74 @@ func emit<T: Encodable>(_ value: T, exitCode: Int32 = 0) -> Never {
     emit(encodeCLIOutput(value, exitCode: exitCode))
 }
 
+// List output is another value-returning optimization boundary. Combining a
+// cross-module optional-error comparison/ternary with generic Never emission
+// generated unconditional brk instructions on Swift 6.3.3, in both outcomes.
+// Keep status selection and encoding outside the process-terminating caller.
+@inline(never)
+func encodeActionListOutput(_ response: CLIActionListResponse) -> CLIExecutionOutput {
+    let exitCode: Int32
+    switch response.error {
+    case .none: exitCode = 0
+    case .some: exitCode = 1
+    }
+    return encodeCLIOutput(response, exitCode: exitCode)
+}
+
 struct ActionListOutput: Codable {
     let actions: [ActionDescriptor]
+}
+
+private final class ActionListReply: @unchecked Sendable {
+    let ready = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var data: Data?
+    func finish(_ data: Data) {
+        lock.lock()
+        guard self.data == nil else { lock.unlock(); return }
+        self.data = data
+        lock.unlock()
+        ready.signal()
+    }
+    func wait() -> CLIActionListResponse {
+        guard ready.wait(timeout: .now() + 12) == .success else {
+            return .init(error: ActionBrokerError(category: .availability, code: "broker_response_timeout",
+                message: "The action list request timed out.", retryable: true))
+        }
+        lock.lock(); defer { lock.unlock() }
+        return data.flatMap { try? JSONDecoder().decode(CLIActionListResponse.self, from: $0) }
+            ?? .init(error: ActionBrokerError(category: .transport, code: "invalid_broker_response",
+                message: "The action broker returned an invalid action list.", retryable: false))
+    }
+}
+
+private func liveActionList() -> CLIActionListResponse {
+    let result = ActionListReply()
+    guard let requirement = brokerConnectionRequirement() else {
+        return .init(error: ActionBrokerError(category: .availability, code: "local_identity_unavailable",
+            message: "The local CLI identity could not be verified.", retryable: false))
+    }
+    let connection = NSXPCConnection(machServiceName: BlocksActionBrokerXPC.machServiceName)
+    connection.setCodeSigningRequirement(requirement)
+    connection.remoteObjectInterface = NSXPCInterface(with: BlocksActionBrokerClientXPCProtocol.self)
+    connection.invalidationHandler = {
+        result.finish(CLIActionListResponse.failure("broker_unavailable", "Enable a CLI module in Blocks settings."))
+    }
+    connection.interruptionHandler = connection.invalidationHandler
+    connection.resume()
+    defer { connection.invalidate() }
+    let proxy = connection.remoteObjectProxyWithErrorHandler { _ in
+        result.finish(CLIActionListResponse.failure("broker_unavailable", "Enable a CLI module in Blocks settings."))
+    } as? BlocksActionBrokerClientXPCProtocol
+    guard let proxy, verifyBroker(proxy, connection: connection) == true else {
+        result.finish(CLIActionListResponse.failure("broker_unavailable", "A verified Action Broker is required. Enable a CLI module in Blocks settings."))
+        return result.wait()
+    }
+    let invoked: Void? = proxy.listActions?(withReply: { result.finish($0) })
+    if invoked == nil {
+        result.finish(CLIActionListResponse.failure("upgrade_required", "Restart or upgrade Blocks and its Action Broker to load module authorization."))
+    }
+    return result.wait()
 }
 
 struct HelpOutput: Codable {
@@ -1548,7 +1614,9 @@ case "feedback":
     emit(feedbackOutput, exitCode: feedbackExitCode)
 
 case "list":
-    emit(ActionListOutput(actions: ActionRegistry.actions))
+    let actionList = liveActionList()
+    let output = encodeActionListOutput(actionList)
+    emit(output)
 
 case "clipboard":
     let clipboardArguments = Array(args.dropFirst())

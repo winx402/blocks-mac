@@ -7,8 +7,18 @@ import SwiftUI
 
 struct AgentCLISettingsPane: View {
     @EnvironmentObject private var appModel: AppModel
-    @StateObject private var cliInstaller =
-        BlocksCLIInstallationController()
+
+    var body: some View {
+        AgentCLISettingsContent(
+            cliInstaller: appModel.cliInstallationController,
+            manager: appModel.actionBrokerManager
+        )
+    }
+}
+
+private struct AgentCLISettingsContent: View {
+    @ObservedObject var cliInstaller: BlocksCLIInstallationController
+    @ObservedObject var manager: ActionBrokerServiceManager
     @State private var showsUninstallConfirmation = false
     @AppStorage("clipboard.agent.summaryAccess") private var clipboardAgentSummaryAccess = true
     @AppStorage("clipboard.agent.defaultScope") private var clipboardAgentDefaultScope = "single"
@@ -20,7 +30,27 @@ struct AgentCLISettingsPane: View {
 
     @ViewBuilder
     private var content: some View {
-        ActionBrokerSettingsSection(manager: appModel.actionBrokerManager)
+        ActionBrokerSettingsSection(manager: manager)
+
+        SettingsSection(title: L10n.string("settings.agentCLI.modules.title")) {
+            SettingsSectionNote(text: L10n.string("settings.agentCLI.modules.detail"))
+            ForEach(CLIModule.allCases, id: \.self) { module in
+                SettingsRowDivider()
+                SettingsToggleRow(
+                    title: L10n.string("settings.agentCLI.module.\(module.rawValue)"),
+                    isOn: Binding(
+                        get: { manager.isModuleEnabled(module) },
+                        set: { enabled in
+                            manager.setModuleEnabled(module, enabled: enabled)
+                            if enabled && manager.isModuleEnabled(module) {
+                                cliInstaller.ensureManagedInstallation(userInitiated: true)
+                            }
+                        }
+                    )
+                )
+            }
+            SettingsSectionNote(text: L10n.string("settings.agentCLI.modules.offline"))
+        }
 
         SettingsSection(
             title: L10n.string("settings.agentCLI.access")
@@ -77,22 +107,24 @@ struct AgentCLISettingsPane: View {
         ) {
             SettingsStatusRow(
                 title: L10n.string("settings.agentCLI.install.title"),
-                detail: L10n.string("settings.agentCLI.install.detail"),
+                detail: L10n.string("settings.agentCLI.managed.detail"),
                 status: cliInstaller.statusPresentation
             ) {
                 AgentCLIActionControls(
-                    installButtonTitle: cliInstaller.installButtonTitle,
+                    installButtonTitle: cliInstaller.state == .notInstalled
+                        ? L10n.string("settings.agentCLI.managed.action")
+                        : cliInstaller.installButtonTitle,
                     canInstall: cliInstaller.canInstall,
                     showsUninstallAction:
                         cliInstaller.canUninstall
                         || cliInstaller.isUninstalling,
                     canUninstall: cliInstaller.canUninstall,
-                    isBusy: cliInstaller.isBusy,
+                    isBusy: cliInstaller.isBusy || cliInstaller.isManagingInstallation,
                     showsRecoveryAction:
                         cliInstaller.recoveryURL != nil
                         || cliInstaller.legacyDisplayURL != nil,
                     installAction: {
-                        cliInstaller.chooseDestinationAndInstall()
+                        cliInstaller.ensureManagedInstallation(userInitiated: true)
                     },
                     uninstallAction: {
                         showsUninstallConfirmation = true
@@ -104,6 +136,20 @@ struct AgentCLISettingsPane: View {
                         cliInstaller.revealRecovery()
                     }
                 )
+            }
+            if let detail = cliInstaller.pathGuidanceDetail {
+                SettingsSectionNote(text: detail)
+                SettingsActionRow(title: L10n.string("settings.agentCLI.managed.pathTitle")) {
+                    Button(L10n.string("settings.agentCLI.managed.pathDismiss")) {
+                        cliInstaller.dismissPathGuidance()
+                    }
+                }
+            }
+            SettingsActionRow(title: L10n.string("settings.agentCLI.managed.advanced")) {
+                Button(L10n.string("settings.agentCLI.managed.chooseLocation")) {
+                    cliInstaller.chooseDestinationAndInstall()
+                }
+                .disabled(cliInstaller.isBusy || cliInstaller.isManagingInstallation)
             }
         }
         .alert(
@@ -118,10 +164,9 @@ struct AgentCLISettingsPane: View {
             Text(L10n.string("settings.agentCLI.uninstall.message"))
         }
         .onAppear {
-            cliInstaller.refresh()
-        }
-        .onDisappear {
-            cliInstaller.cancelForRouteExit()
+            if !cliInstaller.isBusy && !cliInstaller.isManagingInstallation {
+                cliInstaller.reconcileManagedInstallation()
+            }
         }
     }
 }
@@ -1913,12 +1958,16 @@ final class BlocksCLIInstallationController: ObservableObject {
     static let recoveryBookmarkKey =
         "agentCLI.installationRecoveryBookmark.v1"
     static let operationJournalKey = "agentCLI.operationJournal.v1"
+    static let automaticInstallationSuppressedKey = "agentCLI.automaticInstallationSuppressed.v1"
+    static let pathGuidanceDismissedKey = "agentCLI.pathGuidanceDismissed.v1"
 
     @Published private(set) var state:
         BlocksCLIInstallationState = .notInstalled
     @Published private(set) var recoveryURL: URL?
     @Published private(set) var legacyDisplayURL: URL?
     @Published private(set) var isRecovering = false
+    @Published private(set) var isManagingInstallation = false
+    @Published private(set) var pathGuidanceDetail: String?
 
     private let defaults: UserDefaults
     private let sourceURLProvider: () -> URL?
@@ -1927,6 +1976,16 @@ final class BlocksCLIInstallationController: ObservableObject {
     private let bookmarkAccess: BlocksCLIInstallationBookmarkAccess
     private let worker: BlocksCLIInstallationWorker
     private let beforeJournalRecovery: @Sendable () async -> Void
+    private let managedHomeDirectoryProvider: () -> URL?
+    private let requiresDirectoryAuthorization: Bool
+    private let authorizeDirectory: @MainActor (URL) async -> URL?
+    private let processPathProvider: () -> String?
+    private let commandName: String
+    private let applicationUpdateGate: ApplicationOperationAdmissionGate
+    private var managedInstallationTask: Task<Void, Never>?
+    private var pendingExplicitManagedInstallation = false
+    private var manualInstallationPanel: NSSavePanel?
+    private var manualPanelLease: ApplicationOperationAdmissionGate.Lease?
     private var operationGeneration = 0
     private var operationTask: Task<Void, Never>?
     private var operationFallbackState: BlocksCLIInstallationState = .notInstalled
@@ -1949,10 +2008,22 @@ final class BlocksCLIInstallationController: ObservableObject {
         beforeRestoreCommit: @escaping @Sendable () -> Void = {},
         afterRestoreSwap: @escaping @Sendable (URL) -> Void = { _ in },
         beforeUninstallCommit: @escaping @Sendable () async -> Void = {},
-        beforeUninstallRename: @escaping @Sendable () -> Void = {}
+        beforeUninstallRename: @escaping @Sendable () -> Void = {},
+        managedHomeDirectoryProvider: @escaping () -> URL? = { BlocksCLIManagedInstallationEnvironment.loginHomeDirectory },
+        requiresDirectoryAuthorization: Bool = BlocksCLIManagedInstallationEnvironment.requiresDirectoryAuthorization,
+        authorizeDirectory: @escaping @MainActor (URL) async -> URL? = BlocksCLIDirectoryAuthorization.request,
+        processPathProvider: @escaping () -> String? = { ProcessInfo.processInfo.environment["PATH"] },
+        commandName: String = BlocksRuntimeIdentity.isLocalDevelopment ? "blocks-dev" : "blocks",
+        applicationUpdateGate: ApplicationOperationAdmissionGate = ApplicationOperationAdmissionGate(name: "CLI installation")
     ) {
         self.defaults = defaults
         self.bookmarkAccess = bookmarkAccess
+        self.managedHomeDirectoryProvider = managedHomeDirectoryProvider
+        self.requiresDirectoryAuthorization = requiresDirectoryAuthorization
+        self.authorizeDirectory = authorizeDirectory
+        self.processPathProvider = processPathProvider
+        self.commandName = commandName
+        self.applicationUpdateGate = applicationUpdateGate
         self.installationRecordStore = installationRecordStore
             ?? BlocksCLIInstallationRecordStore.live(
                 defaults: defaults,
@@ -1995,7 +2066,8 @@ final class BlocksCLIInstallationController: ObservableObject {
     }
 
     var canInstall: Bool {
-        !isBusy && state != .recoveryRequired
+        applicationUpdateGate.isAcceptingOperations && manualInstallationPanel == nil
+            && !isBusy && !isManagingInstallation && state != .recoveryRequired
     }
 
     var isInstalled: Bool {
@@ -2009,7 +2081,143 @@ final class BlocksCLIInstallationController: ObservableObject {
     var isBusy: Bool { isInstalling || isUninstalling || isRecovering }
 
     var canUninstall: Bool {
-        !isBusy && (state == .installedCurrent || state == .updateAvailable)
+        applicationUpdateGate.isAcceptingOperations && manualInstallationPanel == nil
+            && !isBusy && !isManagingInstallation && (state == .installedCurrent || state == .updateAvailable)
+    }
+
+    func prepareForApplicationUpdate() async throws {
+        try applicationUpdateGate.pauseIfIdle()
+    }
+
+    func resumeAfterCancelledApplicationUpdate() async {
+        applicationUpdateGate.resume()
+    }
+
+    /// Called only after a user explicitly enables a module, or asks to install.
+    /// It does not change module permissions or the broker's global switch.
+    func ensureManagedInstallation(userInitiated: Bool) {
+        beginManagedInstallation(userInitiated: userInitiated, allowFirstInstallation: userInitiated)
+    }
+
+    /// Startup reconciliation never requests new access or reinstalls a command
+    /// the user explicitly removed. It only updates a verified managed command.
+    func reconcileManagedInstallation() {
+        beginManagedInstallation(userInitiated: false, allowFirstInstallation: false)
+    }
+
+    private func beginManagedInstallation(userInitiated: Bool, allowFirstInstallation: Bool) {
+        guard applicationUpdateGate.isAcceptingOperations, manualInstallationPanel == nil else { return }
+        if managedInstallationTask != nil {
+            if userInitiated {
+                pendingExplicitManagedInstallation = true
+                defaults.removeObject(forKey: Self.automaticInstallationSuppressedKey)
+            }
+            return
+        }
+        guard !isBusy, let applicationLease = applicationUpdateGate.begin() else { return }
+        pendingExplicitManagedInstallation = userInitiated
+        if userInitiated { defaults.removeObject(forKey: Self.automaticInstallationSuppressedKey) }
+        isManagingInstallation = true
+        managedInstallationTask = Task { [weak self] in
+            defer { applicationLease.release() }
+            guard let self else { return }
+            defer {
+                self.pendingExplicitManagedInstallation = false
+                self.isManagingInstallation = false
+                self.managedInstallationTask = nil
+            }
+            self.refresh()
+            // Recovery can replace the refresh task with another refresh. Wait
+            // through that chain before considering any managed installation.
+            while let pending = self.operationTask {
+                await pending.value
+                guard !Task.isCancelled else { return }
+            }
+            guard !Task.isCancelled,
+                  !self.defaults.bool(forKey: Self.automaticInstallationSuppressedKey) else { return }
+            let allowFirstInstallation = allowFirstInstallation || self.pendingExplicitManagedInstallation
+            if self.state == .installedCurrent {
+                self.updatePathGuidance()
+                return
+            }
+            guard let source = self.sourceURLProvider() else { return }
+            if (self.state == .updateAvailable || (allowFirstInstallation && self.state == .missing)),
+               let record = self.installationRecord(),
+               let resolved = resolveCLIRecordDestination(record, using: self.bookmarkAccess) {
+                var scopeURL = resolved.scopeURL
+                var destinationURL = resolved.destinationURL
+                if self.state == .missing, allowFirstInstallation, self.requiresDirectoryAuthorization {
+                    guard let authorized = await self.authorizeDirectory(destinationURL.deletingLastPathComponent()),
+                          !Task.isCancelled else { return }
+                    // Reauthorization may restore access to the original path;
+                    // moving a still-owned command remains the worker's decision.
+                    scopeURL = authorized
+                    destinationURL = authorized.appendingPathComponent(self.commandName)
+                }
+                let accessed = self.bookmarkAccess.start(scopeURL)
+                guard accessed || !self.requiresDirectoryAuthorization else {
+                    self.state = .inaccessible
+                    return
+                }
+                defer { if accessed { self.bookmarkAccess.stop(scopeURL) } }
+                guard BlocksCLIManagedInstallationEnvironment.prepareDirectory(
+                    destinationURL.deletingLastPathComponent(),
+                    createMissing: allowFirstInstallation && self.state == .missing && !self.requiresDirectoryAuthorization
+                ) else {
+                    self.state = .destinationConflict
+                    return
+                }
+                await self.install(sourceURL: source, destinationURL: destinationURL)
+                self.updatePathGuidance()
+                return
+            }
+            guard allowFirstInstallation, self.state == .notInstalled,
+                  self.cachedInstallationRecordData == nil,
+                  let home = self.managedHomeDirectoryProvider() else { return }
+            let suggestedDirectory = home.appendingPathComponent(".local/bin", isDirectory: true)
+            let directory: URL
+            if self.requiresDirectoryAuthorization {
+                guard let authorized = await self.authorizeDirectory(suggestedDirectory), !Task.isCancelled else { return }
+                directory = authorized
+            } else {
+                directory = suggestedDirectory
+            }
+            let accessed = self.bookmarkAccess.start(directory)
+            guard !self.requiresDirectoryAuthorization || accessed else {
+                self.state = .inaccessible
+                return
+            }
+            defer { if accessed { self.bookmarkAccess.stop(directory) } }
+            guard BlocksCLIManagedInstallationEnvironment.prepareDirectory(
+                directory, createMissing: !self.requiresDirectoryAuthorization
+            ) else {
+                self.state = .destinationConflict
+                return
+            }
+            await self.install(sourceURL: source, destinationURL: directory.appendingPathComponent(self.commandName))
+            self.updatePathGuidance()
+        }
+    }
+
+    private func updatePathGuidance() {
+        guard state == .installedCurrent,
+              !defaults.bool(forKey: Self.pathGuidanceDismissedKey),
+              let record = installationRecord() else { return }
+        let directory = URL(fileURLWithPath: record.displayPath).deletingLastPathComponent().path
+        let inheritedPaths = (processPathProvider() ?? "").split(separator: ":").map(String.init)
+        guard !inheritedPaths.contains(directory) else { pathGuidanceDetail = nil; return }
+        // A GUI application's inherited PATH is not evidence of the user's
+        // terminal PATH. The localized guidance explicitly asks them to check.
+        pathGuidanceDetail = L10n.format("settings.agentCLI.install.pathGuidance", directory)
+    }
+
+    func dismissPathGuidance() {
+        defaults.set(true, forKey: Self.pathGuidanceDismissedKey)
+        pathGuidanceDetail = nil
+    }
+
+    func waitForManagedInstallationForTesting() async {
+        await managedInstallationTask?.value
     }
 
     var installButtonTitle: String {
@@ -2085,13 +2293,14 @@ final class BlocksCLIInstallationController: ObservableObject {
     }
 
     func refresh() {
-        guard !isBusy else { return }
+        guard !isBusy, let applicationLease = applicationUpdateGate.begin() else { return }
         recoveryURL = nil
         legacyDisplayURL = nil
         let generation = beginOperation()
         let sourceURL = sourceURLProvider()
         let legacyBookmark = defaults.data(forKey: Self.bookmarkKey)
         operationTask = Task { [weak self, worker, beforeJournalRecovery] in
+            defer { applicationLease.release() }
             guard let self else { return }
             defer { self.finishOperationTask(generation: generation) }
             let journalLoad = await worker.loadOperationJournal()
@@ -2216,11 +2425,15 @@ final class BlocksCLIInstallationController: ObservableObject {
     }
 
     func uninstall() {
-        guard !isBusy else { return }
+        guard !isBusy, let applicationLease = applicationUpdateGate.begin() else { return }
+        defaults.set(true, forKey: Self.automaticInstallationSuppressedKey)
+        managedInstallationTask?.cancel()
+        pathGuidanceDetail = nil
         let generation = beginOperation()
         state = .uninstalling
         recoveryURL = nil
         operationTask = Task { [weak self, worker] in
+            defer { applicationLease.release() }
             guard let self else { return }
             defer { self.finishOperationTask(generation: generation) }
             let acquired = await worker.withOperationLease { [weak self] in
@@ -2296,6 +2509,7 @@ final class BlocksCLIInstallationController: ObservableObject {
     }
 
     func chooseDestinationAndInstall() {
+        guard canInstall else { return }
         guard let sourceURL = sourceURLProvider() else {
             state = .unavailable
             return
@@ -2312,30 +2526,39 @@ final class BlocksCLIInstallationController: ObservableObject {
             startInstall(sourceURL: sourceURL, destinationURL: resolvedRecord.destinationURL)
             return
         }
+        guard let panelLease = applicationUpdateGate.begin() else { return }
         let panel = NSSavePanel()
+        manualInstallationPanel = panel
+        manualPanelLease = panelLease
         panel.title = L10n.string("settings.agentCLI.install.panelTitle")
         panel.prompt = L10n.string("settings.agentCLI.install.button")
-        panel.nameFieldStringValue = BlocksRuntimeIdentity.isLocalDevelopment ? "blocks-dev" : "blocks"
+        panel.nameFieldStringValue = commandName
         panel.canCreateDirectories = true
         panel.isExtensionHidden = true
-        let defaultDirectory = FileManager.default.homeDirectoryForCurrentUser
+        let defaultDirectory = managedHomeDirectoryProvider()?
             .appendingPathComponent(".local/bin", isDirectory: true)
         panel.directoryURL = defaultDirectory
         panel.begin { [weak self] response in
+            guard let self, self.manualInstallationPanel === panel else { return }
+            self.manualInstallationPanel = nil
+            self.manualPanelLease?.release()
+            self.manualPanelLease = nil
             guard response == .OK, let destinationURL = panel.url else {
                 return
             }
-            self?.startInstall(sourceURL: sourceURL, destinationURL: destinationURL)
+            self.startInstall(sourceURL: sourceURL, destinationURL: destinationURL)
         }
     }
 
     private func startInstall(sourceURL: URL, destinationURL: URL) {
-        guard !isBusy else { return }
+        guard !isBusy, let applicationLease = applicationUpdateGate.begin() else { return }
+        defaults.removeObject(forKey: Self.automaticInstallationSuppressedKey)
         let generation = beginOperation()
         state = .installing
         recoveryURL = nil
         legacyDisplayURL = nil
         operationTask = Task { [weak self, worker] in
+            defer { applicationLease.release() }
             guard let self else { return }
             defer { self.finishOperationTask(generation: generation) }
             let acquired = await worker.withOperationLease { [weak self] in
@@ -2369,7 +2592,8 @@ final class BlocksCLIInstallationController: ObservableObject {
         sourceURL: URL,
         destinationURL: URL
     ) async {
-        guard !isBusy else { return }
+        guard !isBusy, let applicationLease = applicationUpdateGate.begin() else { return }
+        defer { applicationLease.release() }
         let generation = beginOperation()
         state = .installing
         recoveryURL = nil
@@ -2630,6 +2854,13 @@ final class BlocksCLIInstallationController: ObservableObject {
     }
 
     func cancelForRouteExit() {
+        managedInstallationTask?.cancel()
+        pendingExplicitManagedInstallation = false
+        let panel = manualInstallationPanel
+        manualInstallationPanel = nil
+        panel?.cancel(nil)
+        manualPanelLease?.release()
+        manualPanelLease = nil
         operationGeneration += 1
         operationTask?.cancel()
         operationTask = nil
@@ -2643,6 +2874,7 @@ final class BlocksCLIInstallationController: ObservableObject {
     }
 
     deinit {
+        managedInstallationTask?.cancel()
         operationTask?.cancel()
     }
 

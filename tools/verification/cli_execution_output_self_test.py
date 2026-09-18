@@ -103,7 +103,7 @@ def main() -> None:
         "import Darwin\nimport Foundation",
         (CORE / "ActionRegistry.swift").read_text().split("public struct ActionDescriptor:", 1)[0],
         (CORE / "ActionEnvelope.swift").read_text(),
-        section(source, "struct CLIExecutionOutput {", "struct ActionListOutput:"),
+        section(source, "struct CLIExecutionOutput {", "// List output is"),
         section(source, "struct ScreenshotCLIParseError:", "private func optionValue("),
         section(source, "private enum OutputDestinationKind {", "func emitActionFailure<Result:"),
         section(source, "enum BlocksCLITransportError:", "// This non-generic owner"),

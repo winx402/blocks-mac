@@ -106,6 +106,18 @@ final class ActionBrokerServiceManager: ObservableObject {
 
     @Published private(set) var state: State = .disabled
     @Published private(set) var isServiceRegistered = false
+    @Published private(set) var enabledModules: Set<CLIModule> = []
+    let moduleAccess: CLIModuleAccessPolicy
+
+    func isModuleEnabled(_ module: CLIModule) -> Bool { moduleAccess.isEnabled(module) }
+
+    func setModuleEnabled(_ module: CLIModule, enabled: Bool) {
+        guard !isQuitting, !applicationUpdatePaused else { return }
+        moduleAccess.setEnabled(enabled, for: module)
+        enabledModules = Set(CLIModule.allCases.filter(moduleAccess.isEnabled))
+        if enabled { setEnabled(true) }
+        else { host.revokeModule(module) }
+    }
 
     private let service: ActionBrokerServiceControl
     private let host: any ActionBrokerHosting
@@ -192,6 +204,9 @@ final class ActionBrokerServiceManager: ObservableObject {
         pluginDevelopmentService: PluginDevelopmentService,
         clipboardStore: ClipboardStore? = nil
     ) {
+        let moduleAccess = CLIModuleAccessPolicy()
+        self.moduleAccess = moduleAccess
+        enabledModules = Set(CLIModule.allCases.filter(moduleAccess.isEnabled))
         service = ActionBrokerServiceControl(
             service: SMAppService.agent(plistName: BlocksActionBrokerXPC.launchAgentPlistName)
         )
@@ -201,7 +216,8 @@ final class ActionBrokerServiceManager: ObservableObject {
             historyService: historyService,
             translationSourceService: translationSourceService,
             pluginDevelopmentService: pluginDevelopmentService,
-            clipboardStore: clipboardStore
+            clipboardStore: clipboardStore,
+            moduleAccess: moduleAccess
         )
         retryPolicy = .default
         retryScheduler = Self.liveRetryScheduler
@@ -224,8 +240,14 @@ final class ActionBrokerServiceManager: ObservableObject {
         retryScheduler: @escaping ActionBrokerRetryScheduler,
         updateRecoveryJournal: ActionBrokerUpdateRecoveryJournal = .init(),
         runningBrokerProcessIDs: @escaping () throws -> [Int32] = { [] },
-        processHasExited: @escaping (Int32) -> Bool = { _ in true }
+        processHasExited: @escaping (Int32) -> Bool = { _ in true },
+        moduleAccess: CLIModuleAccessPolicy? = nil
     ) {
+        // Isolated tests may inject their own policy through the additional
+        // initializer argument; no module defaults are written by this path.
+        let policy = moduleAccess ?? CLIModuleAccessPolicy()
+        self.moduleAccess = policy
+        enabledModules = Set(CLIModule.allCases.filter(policy.isEnabled))
         self.service = service
         self.host = host
         self.embeddedServiceAvailable = embeddedServiceAvailable

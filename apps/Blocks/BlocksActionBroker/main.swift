@@ -137,6 +137,29 @@ private final class BrokerConnectionService: NSObject, BlocksActionBrokerHostXPC
         }
     }
 
+    func listActions(withReply reply: @escaping (Data) -> Void) {
+        guard let lease = updateAdmission.begin() else {
+            reply(CLIActionListResponse.failure("application_update_preparing", "Blocks is preparing to update.")); return
+        }
+        let once = ReplyOnce { data in defer { lease.release() }; reply(data) }
+        Task {
+            if await router.waitForHost(timeout: .zero) == nil { launchMainApp() }
+            guard let host = await router.waitForHost() else {
+                once.send(CLIActionListResponse.failure("app_host_unavailable", "Blocks did not register its action host.")); return
+            }
+            let proxy = host.remoteObjectProxyWithErrorHandler { _ in
+                once.send(CLIActionListResponse.failure("app_host_connection_failed", "The Blocks action host is unavailable."))
+            } as? BlocksActionHostXPCProtocol
+            guard let proxy else {
+                once.send(CLIActionListResponse.failure("app_host_proxy_unavailable", "The Blocks action host is unavailable.")); return
+            }
+            let invoked: Void? = proxy.listActions?(withReply: { once.send($0) })
+            if invoked == nil {
+                once.send(CLIActionListResponse.failure("upgrade_required", "Restart or upgrade Blocks to load its module authorization policy."))
+            }
+        }
+    }
+
     func cancel(
         _ requestID: String,
         withReply reply: @escaping (Bool) -> Void

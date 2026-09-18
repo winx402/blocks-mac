@@ -657,8 +657,10 @@ def verify_direct_signature_audit_is_hermetic() -> None:
         "main:keychain-extra": (
             "error: Direct app keychain-access-groups must contain exactly default and shared groups\n"
         ),
+        "main:executable-missing": "error: Direct app entitlement is not true: com.apple.security.files.user-selected.executable\n",
+        "main:executable-false": "error: Direct app entitlement is not true: com.apple.security.files.user-selected.executable\n",
     }
-    require(len(expected_errors) == 26, "Direct signature fixture mutation count drifted")
+    require(len(expected_errors) == 28, "Direct signature fixture mutation count drifted")
 
     def write_shim(path: Path, contents: str) -> None:
         path.write_text(contents, encoding="utf-8")
@@ -830,6 +832,9 @@ def verify_direct_signature_audit_is_hermetic() -> None:
                 "values = {'com.apple.application-identifier': team + '.' + identifiers[role], 'com.apple.developer.team-identifier': team}\n"
                 "if role == 'main':\n"
                 "    values.update({'com.apple.security.app-sandbox': True, 'com.apple.security.files.user-selected.read-write': True, 'com.apple.security.network.client': True, 'com.apple.security.temporary-exception.files.absolute-path.read-only': ['/Applications/Blocks Selection Helper.app/'], 'com.apple.security.temporary-exception.mach-lookup.global-name': ['app.blocks.action-broker.xpc'], 'keychain-access-groups': [team + '.app.blocks.app', team + '.app.blocks.selection-helper.shared']})\n"
+                "    values['com.apple.security.files.user-selected.executable'] = True\n"
+                "    if mutation_target == 'main' and mutation_property == 'executable-missing': values.pop('com.apple.security.files.user-selected.executable')\n"
+                "    if mutation_target == 'main' and mutation_property == 'executable-false': values['com.apple.security.files.user-selected.executable'] = False\n"
                 "    if mutation_target == 'main' and mutation_property == 'keychain-missing': values.pop('keychain-access-groups')\n"
                 "    if mutation_target == 'main' and mutation_property == 'keychain-wrong': values['keychain-access-groups'][1] = team + '.app.blocks.wrong'\n"
                 "    if mutation_target == 'main' and mutation_property == 'keychain-extra': values['keychain-access-groups'].append(team + '.app.blocks.extra')\n"
@@ -2542,6 +2547,9 @@ def main() -> None:
         "com.apple.security.network.client",
     }
     require(set(store_entitlements) == required_store_keys, "Store entitlements drifted")
+    for name, entitlements in (("Direct", direct_entitlements), ("Development", development_entitlements)):
+        require(entitlements.get("com.apple.security.files.user-selected.executable") is True,
+                f"{name} must allow writing its CLI only in user-authorized locations")
     server_entitlement = "com.apple.security.network.server"
     for entitlement_name, entitlements in {
         "Direct": direct_entitlements,
@@ -2976,6 +2984,7 @@ def main() -> None:
             "com.apple.developer.team-identifier",
             "com.apple.security.app-sandbox",
             "com.apple.security.files.user-selected.read-write",
+            "com.apple.security.files.user-selected.executable",
             "com.apple.security.network.client",
             "com.apple.security.temporary-exception.files.absolute-path.read-only",
             "com.apple.security.temporary-exception.mach-lookup.global-name",

@@ -40,6 +40,7 @@ private struct ActionBrokerRequestHeader: Decodable, Sendable {
 
 @MainActor
 protocol ActionBrokerHosting: AnyObject {
+    func revokeModule(_ module: CLIModule)
     func start(
         completion: @escaping (Result<Void, Error>) -> Void,
         onInvalidated: @escaping () -> Void
@@ -52,6 +53,7 @@ protocol ActionBrokerHosting: AnyObject {
 }
 
 extension ActionBrokerHosting {
+    func revokeModule(_ module: CLIModule) {}
     func pauseAndDrainForApplicationUpdate() async throws {
         throw ApplicationOperationAdmissionGate.AdmissionError.paused("Action Broker lifecycle adapter is unavailable")
     }
@@ -151,6 +153,7 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
         TranslationSourceManagementService
     private let pluginDevelopmentService: PluginDevelopmentService
     private let clipboardStore: ClipboardStore?
+    private let moduleAccess: CLIModuleAccessPolicy
     private let clipboardManagementAccess = ClipboardManagementAccessController()
     private let listener = NSXPCListener.anonymous()
     private lazy var exportedService = ScreenshotActionHostService(
@@ -163,11 +166,18 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
         },
         cancelHandler: { [weak self] requestID in
             self?.cancel(requestID: requestID) ?? false
-        }
+        },
+        moduleAccess: moduleAccess
     )
     private var brokerConnection: NSXPCConnection?
     private var activeRequestID: ActionRequestID?
     private let connectionLifecycle: ActionBrokerHostConnectionLifecycle
+
+    @MainActor func revokeModule(_ module: CLIModule) {
+        exportedService.revokeModule(module) { [weak self] requestID in
+            _ = self?.cancel(requestID: requestID)
+        }
+    }
 
     @MainActor func pauseAndDrainForApplicationUpdate() async throws {
         try exportedService.pauseForApplicationUpdate()
@@ -258,6 +268,7 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
         translationSourceService: TranslationSourceManagementService,
         pluginDevelopmentService: PluginDevelopmentService,
         clipboardStore: ClipboardStore? = nil,
+        moduleAccess: CLIModuleAccessPolicy? = nil,
         connectionLifecycle: ActionBrokerHostConnectionLifecycle = .init()
     ) {
         self.screenshotStore = screenshotStore
@@ -265,6 +276,7 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
         self.translationSourceService = translationSourceService
         self.pluginDevelopmentService = pluginDevelopmentService
         self.clipboardStore = clipboardStore
+        self.moduleAccess = moduleAccess ?? CLIModuleAccessPolicy()
         self.connectionLifecycle = connectionLifecycle
         super.init()
         listener.delegate = self
@@ -274,6 +286,7 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
         completion: @escaping (Result<Void, Error>) -> Void,
         onInvalidated: @escaping () -> Void
     ) {
+        exportedService.setIntegrationEnabled(true)
         let previousConnection = brokerConnection
         let connectionStart = connectionLifecycle.beginConnection()
         let generation = connectionStart.generation
@@ -349,6 +362,8 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
     }
 
     @MainActor func stop() {
+        for module in CLIModule.allCases { revokeModule(module) }
+        exportedService.setIntegrationEnabled(false)
         let shouldSuspendListener = connectionLifecycle.stop()
         brokerConnection?.invalidate()
         brokerConnection = nil
@@ -390,6 +405,10 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
                 code: "invalid_request",
                 message: "The action request could not be decoded."
             )
+        }
+        guard moduleAccess.allows(envelope.actionID) else {
+            return Self.failureData(requestID: envelope.requestID, actionID: envelope.actionID,
+                code: "module_disabled", message: "Enable this CLI module in Blocks settings.")
         }
         switch envelope.actionID {
         case BlocksAction.screenshotCapture.actionID:
@@ -464,10 +483,16 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
         case BlocksAction.clipboardManage.actionID:
             return await executeTyped(
                 data, action: .clipboardManage,
-                handler: { [clipboardStore, clipboardManagementAccess] (input: ClipboardManagementActionInput, _: ActionRequestID) in
+                handler: { [clipboardStore, clipboardManagementAccess, moduleAccess] (input: ClipboardManagementActionInput, _: ActionRequestID) in
                     guard let clipboardStore else { throw ClipboardManagementError("repository_unavailable") }
+                    let revision = moduleAccess.revision(for: .clipboard)
                     return try await clipboardManagementAccess.execute(input) {
-                        try await clipboardStore.executeManagement($0)
+                        guard moduleAccess.isEnabled(.clipboard),
+                              moduleAccess.revision(for: .clipboard) == revision else {
+                            throw ClipboardManagementError("module_disabled")
+                        }
+                        try Task.checkCancellation()
+                        return try await clipboardStore.executeManagement($0)
                     }
                 }
             )
@@ -538,6 +563,11 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
         activeRequestID = request.requestID
         defer { activeRequestID = nil }
         do {
+            guard moduleAccess.allows(request.actionID) else {
+                return Self.failureData(requestID: request.requestID, actionID: request.actionID,
+                    code: "module_disabled", message: "Enable this CLI module in Blocks settings.")
+            }
+            try Task.checkCancellation()
             let result = try await screenshotStore.executeAction(request.payload, outputFile: outputFile)
             return Self.encode(.completed(
                 requestID: request.requestID,
@@ -631,6 +661,11 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
             )
         }
         do {
+            guard moduleAccess.allows(request.actionID) else {
+                return Self.failureData(requestID: request.requestID, actionID: request.actionID,
+                    code: "module_disabled", message: "Enable this CLI module in Blocks settings.")
+            }
+            try Task.checkCancellation()
             let result = try await handler(
                 request.payload,
                 request.requestID
@@ -646,13 +681,17 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
                let input = request.payload as? ClipboardManagementActionInput,
                var managementResult = result as? ClipboardManagementResult {
                 while true {
-                    let allowed = (UserDefaults.standard.object(forKey: "clipboard.agent.summaryAccess") as? Bool) ?? true
+                    let moduleEnabled = moduleAccess.isEnabled(.clipboard)
+                    if !moduleEnabled, !input.isMutating || input.dryRun { throw ClipboardManagementError("module_disabled") }
+                    let allowed = moduleEnabled && ((UserDefaults.standard.object(forKey: "clipboard.agent.summaryAccess") as? Bool) ?? true)
                     managementResult = try ClipboardManagementAccessController.prepareForDelivery(
                         managementResult, input: input, summaryAllowed: allowed)
                     let response = ActionBrokerTerminalResponse.completed(
                         requestID: request.requestID, actionID: request.actionID, result: managementResult)
                     let encoded = await Task.detached(priority: .utility) { Self.encode(response) }.value
-                    let currentAllowed = (UserDefaults.standard.object(forKey: "clipboard.agent.summaryAccess") as? Bool) ?? true
+                    let currentModuleEnabled = moduleAccess.isEnabled(.clipboard)
+                    if !currentModuleEnabled, !input.isMutating || input.dryRun { throw ClipboardManagementError("module_disabled") }
+                    let currentAllowed = currentModuleEnabled && ((UserDefaults.standard.object(forKey: "clipboard.agent.summaryAccess") as? Bool) ?? true)
                     managementResult = try ClipboardManagementAccessController.prepareForDelivery(
                         managementResult, input: input, summaryAllowed: currentAllowed)
                     // No await between this final check and handing the bytes
@@ -793,15 +832,57 @@ final class ScreenshotActionHostService: NSObject, BlocksActionHostXPCProtocol {
     typealias CancelHandler = @MainActor (String) async -> Bool
     private let handler: Handler
     private let cancelHandler: CancelHandler
+    private let moduleAccess: CLIModuleAccessPolicy?
+    @MainActor private var integrationEnabled = true
     private let lock = NSLock()
     private var executions: [String: Execution] = [:]
 
     init(
         executeHandler: @escaping Handler,
-        cancelHandler: @escaping CancelHandler
+        cancelHandler: @escaping CancelHandler,
+        moduleAccess: CLIModuleAccessPolicy? = nil
     ) {
         handler = executeHandler
         self.cancelHandler = cancelHandler
+        self.moduleAccess = moduleAccess
+    }
+
+    func listActions(withReply reply: @escaping (Data) -> Void) {
+        guard let lease = applicationUpdateGate.begin() else {
+            reply(CLIActionListResponse.failure("application_update_preparing", "Blocks is preparing to update.")); return
+        }
+        Task { @MainActor in
+            defer { lease.release() }
+            guard integrationEnabled else {
+                reply(CLIActionListResponse.failure("integration_disabled", "CLI integration is disabled.")); return
+            }
+            guard let moduleAccess else {
+                reply(CLIActionListResponse.failure("module_policy_unavailable", "Module authorization is unavailable.")); return
+            }
+            reply((try? JSONEncoder().encode(CLIActionListResponse(actions: moduleAccess.actions))) ?? Data())
+        }
+    }
+
+    @MainActor func revokeModule(_ module: CLIModule, invalidate: ((String) -> Void)? = nil) {
+        let revoked = lock.withLock {
+            executions.values.filter { $0.module == module }.map { execution in
+                execution.isCancelled = true
+                execution.isRevoked = true
+                return (execution.requestID, execution.task)
+            }
+        }
+        for (requestID, task) in revoked {
+            // Production invalidates Store/service request tokens synchronously
+            // before task cancellation can unwind an awaited side effect.
+            invalidate?(requestID)
+            task?.cancel()
+            if invalidate == nil { Task { @MainActor in _ = await cancelHandler(requestID) } }
+        }
+    }
+
+    @MainActor func setIntegrationEnabled(_ enabled: Bool) {
+        integrationEnabled = enabled
+        if !enabled { for module in CLIModule.allCases { revokeModule(module) } }
     }
 
     func execute(
@@ -836,7 +917,7 @@ final class ScreenshotActionHostService: NSObject, BlocksActionHostXPCProtocol {
             } else { reply(Data()) }
             return
         }
-        let execution = Execution(requestID: requestID)
+        let execution = Execution(requestID: requestID, module: requestHeader.flatMap { CLIModule.module(for: $0.actionID) })
         lock.lock()
         let isDuplicate = requestHeader != nil && executions[requestID] != nil
         if !isDuplicate {
@@ -854,13 +935,66 @@ final class ScreenshotActionHostService: NSObject, BlocksActionHostXPCProtocol {
             defer { lease.release() }
             defer { self?.remove(execution) }
             guard let self else { return }
-            reply(await self.handler(requestData, outputFile))
+            guard self.integrationEnabled else {
+                if let requestHeader { reply(Self.moduleDisabledFailure(requestHeader)) }
+                else { reply(Data()) }
+                return
+            }
+            if let moduleAccess = self.moduleAccess, let requestHeader,
+               !moduleAccess.allows(requestHeader.actionID) || self.wasRevoked(execution) {
+                reply(Self.moduleDisabledFailure(requestHeader))
+                return
+            }
+            let response = await self.handler(requestData, outputFile)
+            if let moduleAccess = self.moduleAccess, let requestHeader,
+               (!moduleAccess.allows(requestHeader.actionID) || self.wasRevoked(execution) || !self.integrationEnabled),
+               Self.requiresAuthorizedDelivery(requestData, actionID: requestHeader.actionID) {
+                reply(Self.moduleDisabledFailure(requestHeader))
+                return
+            }
+            reply(response)
         }
         lock.lock()
         execution.task = task
         let shouldCancel = execution.isCancelled
         lock.unlock()
         if shouldCancel { task.cancel() }
+    }
+
+    /// Reads must still be authorized at delivery. Mutations retain their
+    /// actual outcome: revocation cannot claim a committed write rolled back.
+    private static func requiresAuthorizedDelivery(_ data: Data, actionID: ActionID) -> Bool {
+        switch BlocksAction(rawValue: actionID.rawValue) {
+        case .screenshotHistoryQuery, .screenshotHistorySearch, .screenshotOCRStatus, .screenshotScrollingStatus:
+            return true
+        case .clipboardManage, .translationSourceManage, .pluginManage:
+            struct Scope: Decodable {
+                struct Payload: Decodable {
+                    let operation: String
+                    let dryRun: Bool?
+                    enum CodingKeys: String, CodingKey { case operation; case dryRun = "dry_run" }
+                }
+                let payload: Payload
+            }
+            guard let scope = try? JSONDecoder().decode(Scope.self, from: data) else { return true }
+            if scope.payload.dryRun == true { return true }
+            switch BlocksAction(rawValue: actionID.rawValue) {
+            case .clipboardManage: return ["list", "search", "pinboard_list", "show", "export"].contains(scope.payload.operation)
+            case .translationSourceManage: return ["list", "scaffold", "validate_package", "inspect_package", "inspect_installed", "export_redacted"].contains(scope.payload.operation)
+            case .pluginManage: return ["list", "inspect", "catalog_list", "show_logs"].contains(scope.payload.operation)
+            default: return true
+            }
+        default: return false
+        }
+    }
+
+    private static func moduleDisabledFailure(_ header: ActionBrokerRequestHeader) -> Data {
+        (try? JSONEncoder().encode(ActionBrokerTerminalResponse<JSONValue>.failed(
+            requestID: header.requestID, actionID: header.actionID,
+            error: ActionBrokerError(category: .invalidRequest, code: "module_disabled",
+                message: "Enable this CLI module in Blocks settings.", retryable: false,
+                details: ["module": .string(CLIModule.module(for: header.actionID)?.rawValue ?? "unknown")])
+        ))) ?? Data()
     }
 
     private static func duplicateRequestIDFailure(
@@ -914,6 +1048,10 @@ final class ScreenshotActionHostService: NSObject, BlocksActionHostXPCProtocol {
         return execution
     }
 
+    private func wasRevoked(_ execution: Execution) -> Bool {
+        lock.withLock { execution.isRevoked }
+    }
+
     private func remove(_ execution: Execution) {
         lock.lock()
         if executions[execution.requestID] === execution {
@@ -945,11 +1083,14 @@ final class ScreenshotActionHostService: NSObject, BlocksActionHostXPCProtocol {
 
     private final class Execution: @unchecked Sendable {
         let requestID: String
+        let module: CLIModule?
         var task: Task<Void, Never>?
         var isCancelled = false
+        var isRevoked = false
 
-        init(requestID: String) {
+        init(requestID: String, module: CLIModule?) {
             self.requestID = requestID
+            self.module = module
         }
     }
 }
