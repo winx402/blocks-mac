@@ -55,12 +55,15 @@ def build_settings(scheme: str, overlay: Path) -> dict[str, set[str]]:
         result.returncode == 0,
         f"xcodebuild -showBuildSettings failed for {scheme}: {result.stderr}",
     )
+    # The stable scheme name is an automation entry point; the Helper target
+    # and product were renamed without removing that entry point.
+    target = "blocksHelper" if scheme == "BlocksSelectionHelper" else scheme
     section = re.search(
-        rf"Build settings for action build and target {re.escape(scheme)}:\n(?P<body>.*?)(?=\nBuild settings for action|\Z)",
+        rf"Build settings for action build and target {re.escape(target)}:\n(?P<body>.*?)(?=\nBuild settings for action|\Z)",
         result.stdout,
         re.DOTALL,
     )
-    require(section is not None, f"xcodebuild did not report a {scheme} target settings section")
+    require(section is not None, f"xcodebuild did not report a {target} target settings section for {scheme}")
     values: dict[str, set[str]] = {}
     for key, value in re.findall(r"(?m)^\s*([A-Z0-9_]+) = (.*)$", section.group("body")):
         values.setdefault(key, set()).add(value.strip())
