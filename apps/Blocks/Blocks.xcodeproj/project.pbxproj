@@ -7,6 +7,12 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B05700000000000000000006 /* SourceUpgradeProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F05700000000000000000006; };
+		B05700000000000000000001 /* SourceUpgradeProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = F05700000000000000000001; };
+		B05700000000000000000002 /* SourceUpgradeTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F05700000000000000000002; };
+		B05700000000000000000003 /* SourceUpgradeCLI.swift in Sources */ = {isa = PBXBuildFile; fileRef = F05700000000000000000003; };
+		B05700000000000000000004 /* SourceUpgradeCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F05700000000000000000004; };
+		B05700000000000000000005 /* SourceUpgradeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F05700000000000000000005; };
 		B909R0000000000000000001 /* ClipboardRecencyPublicationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F909R0000000000000000001; };
 		B909W0000000000000000001 /* SettingsWindowBackingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F909W0000000000000000001; };
 		B909H0000000000000000001 /* SelectionHelperLocalAssociation.swift in Sources */ = {isa = PBXBuildFile; fileRef = F909H0000000000000000001; };
@@ -548,6 +554,12 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		F05700000000000000000006 /* SourceUpgradeProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceUpgradeProtocolTests.swift; sourceTree = "<group>"; };
+		F05700000000000000000001 /* SourceUpgradeProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceUpgradeProtocol.swift; sourceTree = "<group>"; };
+		F05700000000000000000002 /* SourceUpgradeTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceUpgradeTransport.swift; sourceTree = "<group>"; };
+		F05700000000000000000003 /* SourceUpgradeCLI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceUpgradeCLI.swift; sourceTree = "<group>"; };
+		F05700000000000000000004 /* SourceUpgradeCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/SourceUpgradeCoordinator.swift; sourceTree = "<group>"; };
+		F05700000000000000000005 /* SourceUpgradeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceUpgradeTests.swift; sourceTree = "<group>"; };
 		F909R0000000000000000001 /* ClipboardRecencyPublicationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardRecencyPublicationTests.swift; sourceTree = "<group>"; };
 		F909W0000000000000000001 /* SettingsWindowBackingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsWindowBackingTests.swift; sourceTree = "<group>"; };
 		F909H0000000000000000001 /* SelectionHelperLocalAssociation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionHelperLocalAssociation.swift; sourceTree = "<group>"; };
@@ -1109,6 +1121,8 @@
 				F9090000000000000000004 /* SurfaceBoundaryTests.swift */,
 				F9090000000000000000005 /* ClipboardToolbarDensityTests.swift */,
 				F908U0000000000000000003 /* ActionBrokerUpdateSafetyTests.swift */,
+				F05700000000000000000005 /* SourceUpgradeTests.swift */,
+				F05700000000000000000006 /* SourceUpgradeProtocolTests.swift */,
 				F908D0000000000000000006 /* BlocksRuntimeIdentityTests.swift */,
 				F90700000000000000000003 /* FloatingPanelGeometryTests.swift */,
 				F90700000000000000000001 /* SettingsNavigationInteractionTests.swift */,
@@ -1156,6 +1170,8 @@
 				F909F0000000000000000005 /* ShutdownPrivateProcesses.swift */,
 				F908D0000000000000000001 /* BlocksRuntimeIdentity.swift */,
 				F908D0000000000000000002 /* BlocksLocalBuildTrust.swift */,
+				F05700000000000000000001 /* SourceUpgradeProtocol.swift */,
+				F05700000000000000000002 /* SourceUpgradeTransport.swift */,
 				F909H0000000000000000001 /* SelectionHelperLocalAssociation.swift */,
 				F908D0000000000000000003 /* BlocksKeychainNamespace.swift */,
 				F10100000000000000000001 /* ActionEnvelope.swift */,
@@ -1211,6 +1227,7 @@
 				F20100000000000000000001 /* main.swift */,
 				F20100000000000000000002 /* PrivacyCLIService.swift */,
 				F909F0000000000000000006 /* FeedbackCLI.swift */,
+				F05700000000000000000003 /* SourceUpgradeCLI.swift */,
 				F32S00000000000000000002 /* TranslationSourceCLI.swift */,
 			);
 			path = BlocksCLI;
@@ -1286,6 +1303,7 @@
 				F30100000000000000000001 /* BlocksApp.swift */,
 				F34R00000000000000000001 /* DistributionChannel.swift */,
 				F34R00000000000000000002 /* DiagnosticsExportService.swift */,
+				F05700000000000000000004 /* SourceUpgradeCoordinator.swift */,
 				F30100000000000000000002 /* AppDelegate.swift */,
 				F30100000000000000000003 /* AppStatus.swift */,
 				F30100000000000000000014 /* AppSection.swift */,
@@ -1920,6 +1938,8 @@
 				B909F0000000000000000005 /* ShutdownPrivateProcesses.swift in Sources */,
 				B908D0000000000000000001 /* BlocksRuntimeIdentity.swift in Sources */,
 				B908D0000000000000000002 /* BlocksLocalBuildTrust.swift in Sources */,
+				B05700000000000000000001 /* SourceUpgradeProtocol.swift in Sources */,
+				B05700000000000000000002 /* SourceUpgradeTransport.swift in Sources */,
 				B909H0000000000000000001 /* SelectionHelperLocalAssociation.swift in Sources */,
 				B908D0000000000000000003 /* BlocksKeychainNamespace.swift in Sources */,
 				B00100000000000000000001 /* ActionEnvelope.swift in Sources */,
@@ -1982,6 +2002,7 @@
 				B00300000000000000000001 /* BlocksApp.swift in Sources */,
 				B34R00000000000000000001 /* DistributionChannel.swift in Sources */,
 				B34R00000000000000000002 /* DiagnosticsExportService.swift in Sources */,
+				B05700000000000000000004 /* SourceUpgradeCoordinator.swift in Sources */,
 				B00300000000000000000002 /* AppDelegate.swift in Sources */,
 				B00300000000000000000003 /* AppStatus.swift in Sources */,
 				B00300000000000000000004 /* ScreenshotCapture.swift in Sources */,
@@ -2187,6 +2208,7 @@
 				B00200000000000000000001 /* main.swift in Sources */,
 				B00200000000000000000003 /* PrivacyCLIService.swift in Sources */,
 				B909F0000000000000000006 /* FeedbackCLI.swift in Sources */,
+				B05700000000000000000003 /* SourceUpgradeCLI.swift in Sources */,
 				B32S00000000000000000002 /* TranslationSourceCLI.swift in Sources */,
 				B34C00000000000000000001 /* BlocksNativePluginRunnerCore.swift in Sources */,
 			);
@@ -2251,6 +2273,8 @@
 				B9090000000000000000004 /* SurfaceBoundaryTests.swift in Sources */,
 				B9090000000000000000005 /* ClipboardToolbarDensityTests.swift in Sources */,
 				B908U0000000000000000003 /* ActionBrokerUpdateSafetyTests.swift in Sources */,
+				B05700000000000000000005 /* SourceUpgradeTests.swift in Sources */,
+				B05700000000000000000006 /* SourceUpgradeProtocolTests.swift in Sources */,
 				B908D0000000000000000006 /* BlocksRuntimeIdentityTests.swift in Sources */,
 				B90700000000000000000003 /* FloatingPanelGeometryTests.swift in Sources */,
 				B90700000000000000000001 /* SettingsNavigationInteractionTests.swift in Sources */,

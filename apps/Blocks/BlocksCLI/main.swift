@@ -995,7 +995,7 @@ enum BlocksCLITransportError: Error {
 
     // XPC failure does not reveal module authorization or establish that the
     // peer's signing identity was rejected. Keep both possibilities explicit.
-    static let brokerUnavailableMessage = "Unable to connect to a verified BlocksActionBroker. Check CLI module access in Blocks settings and background-item approval in System Settings. If already enabled, the Broker may be unavailable or its registration/signing identity may be stale after an update; this error does not establish that access is disabled. Before a source reinstall, wait for active requests, turn off the main CLI integration switch, and quit Blocks. If that fails, preserve the existing installation for recovery; do not kill a possibly busy Broker."
+    static let brokerUnavailableMessage = "Unable to connect to a verified BlocksActionBroker. Check CLI module access in Blocks settings and background-item approval in System Settings. If already enabled, the Broker may be unavailable or its registration/signing identity may be stale after an update; this error does not establish that access is disabled. For source upgrades, use script/dev.sh run or update so the installed App can prepare automatically. Older installations may require the one-time migration described by the installer. Preserve the existing installation if authenticated preparation fails; do not kill a possibly busy Broker."
 
     var brokerError: ActionBrokerError {
         switch self {
@@ -1611,6 +1611,10 @@ if args.isEmpty || args == ["--help"] || args == ["help"] {
 }
 
 switch args.first {
+case "source-upgrade":
+    let sourceUpgradeOutput = SourceUpgradeCLI.run(args: Array(args.dropFirst()))
+    emit(sourceUpgradeOutput)
+
 case "feedback":
     let feedbackArguments = Array(args.dropFirst())
     if feedbackArguments.isEmpty || feedbackArguments == ["--help"] || feedbackArguments == ["help"] {

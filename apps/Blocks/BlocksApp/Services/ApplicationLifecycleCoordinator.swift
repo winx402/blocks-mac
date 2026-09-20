@@ -40,6 +40,7 @@ final class ApplicationLifecycleCoordinator {
     private(set) var state: State = .active
     private var participants: [Participant] = []
     private var pausedParticipants: [Participant] = []
+    private var recoveryTask: Task<Void, Never>?
 
     init(requiredParticipantIDs: Set<String>) {
         self.requiredParticipantIDs = requiredParticipantIDs
@@ -60,10 +61,19 @@ final class ApplicationLifecycleCoordinator {
         }
     }
 
+    /// Synchronous quit fence: a cancelled update must not reopen participants
+    /// before the asynchronous quit dispatcher gets its next actor turn.
+    func beginQuit() {
+        quitCommitted = true
+        ApplicationOperationAdmissionGate.closeAdmissionForQuit()
+        // Only real quit may cancel recovery. A cancelled update caller must
+        // never pass its cancellation bit into remote resume commands.
+        recoveryTask?.cancel()
+    }
+
     func prepare(for requestedIntent: Intent = .update) async throws {
         if requestedIntent == .quit {
-            quitCommitted = true
-            ApplicationOperationAdmissionGate.closeAdmissionForQuit()
+            beginQuit()
         } else if quitCommitted {
             throw SafetyError.preparationInProgress
         }
@@ -108,7 +118,7 @@ final class ApplicationLifecycleCoordinator {
             try Task.checkCancellation()
             state = .prepared
         } catch {
-            if requestedIntent == .update, !quitCommitted { await resumePausedParticipants() }
+            if requestedIntent == .update, !quitCommitted { await recoverPausedParticipants() }
             throw error
         }
     }
@@ -116,8 +126,29 @@ final class ApplicationLifecycleCoordinator {
     /// Used after Sparkle aborts installation. This never cancels admitted
     /// operations. A participant must make its own resume idempotent.
     func resumeAfterCancelledUpdate() async {
+        if let recoveryTask {
+            await recoveryTask.value
+            return
+        }
         guard state == .prepared, intent == .update, !quitCommitted else { return }
-        await resumePausedParticipants()
+        await recoverPausedParticipants()
+    }
+
+    private func recoverPausedParticipants() async {
+        if let recoveryTask {
+            await recoveryTask.value
+            return
+        }
+        guard !quitCommitted else { return }
+        state = .resuming
+        let task = Task { @MainActor [self] in
+            await resumePausedParticipants()
+            recoveryTask = nil
+        }
+        recoveryTask = task
+        // Unstructured tasks do not inherit caller cancellation. Keep the
+        // lifecycle and transaction owner blocked until all recovery finishes.
+        await task.value
     }
 
     private func resumePausedParticipants() async {

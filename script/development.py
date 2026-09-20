@@ -17,6 +17,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 
 
@@ -134,6 +135,114 @@ def update_plist(path: Path, change) -> None:
     path.write_bytes(plistlib.dumps(data, fmt=plistlib.FMT_BINARY))
 
 
+class SourceUpgradePreparation:
+    """Use the installed, still-registered CLI before replacing any peer bytes.
+
+    This never bootouts a job or kills an application. A successful management
+    reply is necessary but not sufficient: process and launchd checks still
+    fence the filesystem transaction immediately before promotion.
+    """
+    def __init__(self, application: Path):
+        self.application = application
+        self.identity = path_identity(application)
+        self.attempted = False
+        self.original_manifest: bytes | None = None
+
+    @staticmethod
+    def require_idle() -> None:
+        ensure_action_broker_unregistered()
+        if running_local_processes():
+            raise RuntimeError("Blocks still has running processes; refusing replacement.")
+
+    def verify_installed_cli(self) -> Path:
+        if path_identity(self.application) != self.identity:
+            raise RuntimeError("Installed application changed before upgrade preparation.")
+        run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(self.application)])
+        cli = self.application / "Contents/Resources/CLI/blocks"
+        for path in (cli, *cli.parents, MANIFEST, *MANIFEST.parents):
+            if path.is_symlink():
+                raise RuntimeError("Linked installation management paths are not allowed.")
+            info = path.lstat()
+            if info.st_uid not in {0, os.getuid()} or info.st_mode & 0o022:
+                raise RuntimeError("Installation management paths must not be writable by other users.")
+        metadata = MANIFEST.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_mode & 0o077 or metadata.st_size > 16384:
+            raise RuntimeError("Installed peer manifest is not a private owned regular file.")
+        raw = MANIFEST.read_bytes()
+        manifest = json.loads(raw)
+        if self.original_manifest is not None and raw != self.original_manifest:
+            raise RuntimeError("Installed peer manifest changed during upgrade preparation.")
+        if not isinstance(manifest, dict) or manifest.get("schemaVersion") != 1 or manifest.get("appBundlePath") != str(self.application):
+            raise RuntimeError("Installed peer manifest does not identify this application.")
+        records = manifest.get("peers")
+        if not isinstance(records, list) or not all(isinstance(peer, dict) for peer in records):
+            raise RuntimeError("Installed peer manifest is malformed.")
+        peers = [peer for peer in records if peer.get("role") == "cli"]
+        metadata = cli.lstat()
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or not metadata.st_mode & 0o111:
+            raise RuntimeError("Installed CLI is not an owned executable regular file.")
+        identity = signature(cli)
+        if len(peers) != 1 or peers[0].get("relativeExecutablePath") != "Contents/Resources/CLI/blocks" or peers[0].get("identifier") != "app.blocks.dev.cli" or identity.get("Identifier") != "app.blocks.dev.cli" or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", identity.get("CDHash", "")) is None or identity.get("CDHash") != peers[0].get("cdHash"):
+            raise RuntimeError("Installed CLI identity does not match its registered build.")
+        self.original_manifest = raw
+        return cli
+
+    def prepare_if_needed(self) -> None:
+        try:
+            self.require_idle()
+            return
+        except RuntimeError:
+            pass
+        info = plistlib.loads((self.application / "Contents/Info.plist").read_bytes())
+        if info.get("BlocksSourceUpgradeProtocolVersion") != 1:
+            raise RuntimeError(
+                "This installed version predates automatic source-upgrade preparation. "
+                "For this one-time migration, finish active work, turn off the main CLI integration "
+                "switch, then quit Blocks/Helper and retry. Subsequent upgrades from the new version "
+                "are prepared automatically; no process was killed or registration changed."
+            )
+        cli = self.verify_installed_cli()
+        self.attempted = True
+        # Also covers a previously quit App whose Broker registration remains.
+        run(["/usr/bin/open", "-g", str(self.application)])
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith(("DYLD_", "BLOCKS_"))}
+        result = subprocess.run([str(cli), "source-upgrade", "--json"],
+                                capture_output=True, text=True, timeout=45, env=environment)
+        if len(result.stdout) > 8192:
+            raise RuntimeError("Source-upgrade response exceeded its allowed size; installation was not replaced.")
+        try:
+            response = json.loads(result.stdout)
+        except (ValueError, TypeError) as error:
+            raise RuntimeError("Source-upgrade preparation returned no valid receipt; installation was not replaced.") from error
+        if result.returncode != 0 or not isinstance(response, dict) or response.get("version") != 1 or response.get("status") != "committed":
+            raise RuntimeError("Blocks could not safely prepare this upgrade. Finish active work and retry; no bundle or peer manifest was replaced.")
+        try:
+            uuid.UUID(response.get("token", ""))
+        except (ValueError, TypeError, AttributeError) as error:
+            raise RuntimeError("Source-upgrade receipt has no valid transaction identity.") from error
+        deadline = time.monotonic() + 15
+        while True:
+            try:
+                self.require_idle()
+                return
+            except RuntimeError:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("Prepared application did not fully exit; installation was not replaced.")
+                time.sleep(0.1)
+
+    def restore_after_failure(self) -> None:
+        if not self.attempted or path_identity(self.application) != self.identity:
+            return
+        try:
+            self.verify_installed_cli()
+            if not running_local_processes():
+                run(["/usr/bin/open", "-g", str(self.application)])
+                print("Requested the unchanged previous App to reopen and restore its saved service intent.", file=sys.stderr)
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
+            print("Could not safely reopen the previous App; preserve its backup and matching peers.json for recovery.", file=sys.stderr)
+
+
 def rename_display(bundle: Path, name: str) -> None:
     def change(data):
         data["CFBundleDisplayName"] = name
@@ -213,12 +322,12 @@ def install_development(products: Path) -> None:
 
 
 def _install_development_locked(products: Path) -> None:
-    ensure_action_broker_unregistered()
-    if running_local_processes():
-        raise RuntimeError("Quit Blocks and the previous Blocks Dev before replacing this local build; no process was killed.")
     if DESTINATION.exists() and LEGACY_DESTINATION.exists():
         raise RuntimeError("Both old and new local install paths exist; review them before replacing either.")
     existing = DESTINATION if DESTINATION.exists() else LEGACY_DESTINATION if LEGACY_DESTINATION.exists() else None
+    if existing is None:
+        SourceUpgradePreparation.require_idle()
+    preparation = SourceUpgradePreparation(existing) if existing is not None else None
     if existing is not None:
         if existing.is_symlink() or existing.stat().st_uid != os.getuid():
             raise RuntimeError("Refusing an unowned or linked existing destination.")
@@ -260,7 +369,8 @@ def _install_development_locked(products: Path) -> None:
         # without changing product identity or pretending an unchanged code hash
         # proves permission retention across an upgrade.
         update_plist(staged / "Contents/Info.plist", lambda data: data.update(
-            BlocksLocalBuildIdentifier=str(uuid.uuid4())
+            BlocksLocalBuildIdentifier=str(uuid.uuid4()),
+            BlocksSourceUpgradeProtocolVersion=1,
         ))
         def helper_info(data):
             for item in data.get("CFBundleURLTypes", []):
@@ -310,6 +420,8 @@ def _install_development_locked(products: Path) -> None:
             if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
                 raise RuntimeError("Existing development manifest is not a private owned regular file.")
             shutil.copy2(MANIFEST, previous_manifest)
+        if preparation is not None:
+            preparation.prepare_if_needed()
         ensure_action_broker_unregistered()
         if running_local_processes():
             raise RuntimeError("Blocks started during staging; refusing replacement.")
@@ -348,6 +460,8 @@ def _install_development_locked(products: Path) -> None:
             print(f"Installation did not complete; recovery material: {stage}", file=sys.stderr)
         raise
     finally:
+        if not committed and preparation is not None:
+            preparation.restore_after_failure()
         # Never discard the only recoverable old app, even after interruption.
         if not previous.exists() and not promoted:
             shutil.rmtree(stage, ignore_errors=True)

@@ -10,6 +10,11 @@ final class AppModel: ObservableObject {
         "provider", "screenshot", "plugins", "database", "cliInstallation",
     ])
     private var needsApplicationUpdateBackup = false
+    private var ownsSparklePreparation = false
+    private var sourceUpgradeCoordinator: SourceUpgradeCoordinator?
+    #if BLOCKS_LOCAL_DEVELOPMENT
+    private var sourceUpgradeServer: SourceUpgradeTransport.Server?
+    #endif
     @Published var selectedSection: AppSection = .screenshot
     @Published private(set) var mainWindowNavigationGeneration:
         UInt64 = 0
@@ -258,6 +263,7 @@ final class AppModel: ObservableObject {
         openClipboardPanelForVerificationIfRequested()
         translationCoordinator.openPanelForVerificationIfRequested()
         configureApplicationLifecycle()
+        configureSourceUpgrade(runtimeServicesEnabled: runtimeServicesEnabled)
         selectionHelperSettingsController?.startApplicationLaunchRecovery(
             runtimeServicesEnabled: runtimeServicesEnabled
         )
@@ -266,7 +272,12 @@ final class AppModel: ObservableObject {
     }
 
     private func configureApplicationLifecycle() {
-        AppTerminationCoordinator.shared.installQuitObserver { [cliInstallationController] in
+        AppTerminationCoordinator.shared.installQuitObserver { [weak self, cliInstallationController] in
+            self?.applicationLifecycle.beginQuit()
+            self?.sourceUpgradeCoordinator?.beginQuit()
+            #if BLOCKS_LOCAL_DEVELOPMENT
+            self?.sourceUpgradeServer?.stop()
+            #endif
             cliInstallationController.cancelForRouteExit()
             FeedbackController.shared.stopForQuit()
         }
@@ -353,6 +364,17 @@ final class AppModel: ObservableObject {
     }
 
     func prepareForApplicationUpdate() async throws {
+        guard sourceUpgradeCoordinator?.hasTransaction != true,
+              !ownsSparklePreparation, applicationLifecycle.state == .active else {
+            throw ApplicationLifecycleCoordinator.SafetyError.preparationInProgress
+        }
+        // Reserve before the first suspension, including appWillTerminate hooks.
+        // Only Sparkle's matching recovery callback may release this ownership.
+        ownsSparklePreparation = true
+        try await prepareOwnedApplicationUpdate()
+    }
+
+    private func prepareOwnedApplicationUpdate() async throws {
         guard !AppTerminationCoordinator.shared.isQuitting else {
             throw ApplicationLifecycleCoordinator.SafetyError.preparationInProgress
         }
@@ -373,9 +395,51 @@ final class AppModel: ObservableObject {
     }
 
     func resumeAfterCancelledApplicationUpdate() async {
+        guard ownsSparklePreparation else { return }
+        await resumeOwnedApplicationUpdate()
+        ownsSparklePreparation = false
+    }
+
+    private func resumeOwnedApplicationUpdate() async {
         guard !AppTerminationCoordinator.shared.isQuitting else { return }
         await applicationLifecycle.resumeAfterCancelledUpdate()
         needsApplicationUpdateBackup = false
+    }
+
+    private func configureSourceUpgrade(runtimeServicesEnabled: Bool) {
+        #if BLOCKS_LOCAL_DEVELOPMENT
+        guard runtimeServicesEnabled, applicationLifecycle.hasCompleteSafetyCoverage else { return }
+        let coordinator = SourceUpgradeCoordinator(canPrepare: { [weak self] in
+            guard let self else { return false }
+            return !AppTerminationCoordinator.shared.isQuitting
+                && !ownsSparklePreparation
+                && !AppUpdateCoordinator.shared.isPreparingInstallation
+                && applicationLifecycle.state == .active
+        }, prepare: { [weak self] in
+            guard let self else { throw CancellationError() }
+            try await prepareOwnedApplicationUpdate()
+        }, resume: { [weak self] in
+            await self?.resumeOwnedApplicationUpdate()
+        }, terminate: {
+            NSApp.terminate(nil)
+        })
+        let server = SourceUpgradeTransport.Server()
+        guard server.start(handler: { [weak coordinator] sessionID, request, reply in
+            Task { @MainActor in
+                guard let coordinator else {
+                    reply(.init(token: request.token, status: .failed, errorCode: "unavailable"))
+                    return
+                }
+                coordinator.handle(sessionID: sessionID, request: request, completion: reply)
+            }
+        }, didCommit: { [weak coordinator] sessionID, token in
+            Task { @MainActor in coordinator?.didCommit(sessionID: sessionID, token: token) }
+        }, disconnected: { [weak coordinator] sessionID in
+            Task { @MainActor in coordinator?.disconnected(sessionID: sessionID) }
+        }) else { return }
+        sourceUpgradeCoordinator = coordinator
+        sourceUpgradeServer = server
+        #endif
     }
     var clipboardTagStore: ClipboardTagStore { clipboardCoordinator.tagStore }
 
