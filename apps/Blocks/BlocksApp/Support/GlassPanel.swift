@@ -334,6 +334,7 @@ struct BlocksCompactIconButton: View {
     var isLoading = false
     var emphasis: BlocksCompactIconButtonEmphasis = .standard
     var tint: Color? = nil
+    var isBorderless = false
     var density: BlocksCompactIconButtonDensity = .compact
     var focusRequestID: UUID? = nil
     var showsHelp = true
@@ -377,6 +378,7 @@ struct BlocksCompactIconButton: View {
                 isSelected: isSelected,
                 emphasis: emphasis,
                 tint: tint,
+                isBorderless: isBorderless,
                 density: density,
                 increasesContrast:
                     colorSchemeContrast == .increased,
@@ -431,6 +433,7 @@ struct BlocksIconButtonStyle: ButtonStyle {
     let isSelected: Bool
     let emphasis: BlocksCompactIconButtonEmphasis
     var tint: Color? = nil
+    var isBorderless = false
     let density: BlocksCompactIconButtonDensity
     let increasesContrast: Bool
     let isWindowActive: Bool
@@ -464,7 +467,7 @@ struct BlocksIconButtonStyle: ButtonStyle {
                         emphasis: emphasis,
                         isSelected: isSelected
                     ))
-                    .opacity(appearance.backgroundOpacity)
+                    .opacity(isBorderless ? 0 : appearance.backgroundOpacity)
                 )
                 .frame(
                     width: density.visualSize,
@@ -481,7 +484,7 @@ struct BlocksIconButtonStyle: ButtonStyle {
                             isFocused: isFocused,
                             isSelected: isSelected
                         ))
-                        .opacity(appearance.strokeOpacity),
+                        .opacity(isBorderless ? 0 : appearance.strokeOpacity),
                         lineWidth: BlocksVisualTokens.Stroke.width
                     )
                     .frame(

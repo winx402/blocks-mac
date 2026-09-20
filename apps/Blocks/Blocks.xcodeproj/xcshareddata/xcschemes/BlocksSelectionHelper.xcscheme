@@ -16,8 +16,8 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "T27X00000000000000000001"
-               BuildableName = "Blocks Selection Helper.app"
-               BlueprintName = "BlocksSelectionHelper"
+               BuildableName = "blocksHelper.app"
+               BlueprintName = "blocksHelper"
                ReferencedContainer = "container:Blocks.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
@@ -77,8 +77,8 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "T27X00000000000000000001"
-            BuildableName = "Blocks Selection Helper.app"
-            BlueprintName = "BlocksSelectionHelper"
+            BuildableName = "blocksHelper.app"
+            BlueprintName = "blocksHelper"
             ReferencedContainer = "container:Blocks.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
@@ -94,8 +94,8 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "T27X00000000000000000001"
-            BuildableName = "Blocks Selection Helper.app"
-            BlueprintName = "BlocksSelectionHelper"
+            BuildableName = "blocksHelper.app"
+            BlueprintName = "blocksHelper"
             ReferencedContainer = "container:Blocks.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>

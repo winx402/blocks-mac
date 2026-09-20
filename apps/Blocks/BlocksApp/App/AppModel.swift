@@ -258,6 +258,9 @@ final class AppModel: ObservableObject {
         openClipboardPanelForVerificationIfRequested()
         translationCoordinator.openPanelForVerificationIfRequested()
         configureApplicationLifecycle()
+        selectionHelperSettingsController?.startApplicationLaunchRecovery(
+            runtimeServicesEnabled: runtimeServicesEnabled
+        )
         if runtimeServicesEnabled { cliInstallationController.reconcileManagedInstallation() }
         if !BlocksRuntimeEnvironment.isUnitTestHost { FeedbackController.shared.startIfEnabled() }
     }

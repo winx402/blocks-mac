@@ -3092,6 +3092,189 @@ final class TranslationEntryBridgeTests: XCTestCase {
         guard case .failure(.helperNotRunning) = passive else { return XCTFail("Expected not running") }
     }
 
+    func testSelectionHelperApplicationLaunchRecoveryStartsOnlyPairedHelper()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let helper = root.appendingPathComponent("Blocks Selection Helper.app")
+        try makeSelectionHelperBundle(at: helper)
+        let lock = NSLock()
+        var isRunning = false
+        var launches = 0
+        let locator = SelectionHelperApplicationLocator(
+            candidateURLsProvider: { [helper] },
+            runningApplicationURLsProvider: {
+                lock.withLock { isRunning ? [helper] : [] }
+            },
+            openApplication: { _, _ in
+                lock.withLock {
+                    launches += 1
+                    isRunning = true
+                }
+            },
+            allowedApplicationURLsProvider: { [helper] },
+            identityVerifier: SelectionHelperBundleIdentityVerifierStub(
+                teamID: "TESTTEAM01"
+            ),
+            trustedHostTeamIdentifierProvider: { "TESTTEAM01" }
+        )
+        let key = Data(repeating: 0xA5, count: 32)
+        let pairedClient = SelectionHelperClient(
+            keyStore: SelectionHelperKeyStoreStub(key: key),
+            connection: SelectionHelperAuthenticatedConnectionStub(
+                key: key,
+                disconnectResult: .success(true),
+                authenticatedResponder: { command in
+                    guard command.kind == .health else {
+                        return .failure(.invalidResponse)
+                    }
+                    return lock.withLock {
+                        isRunning
+                            ? .success(.init(health: .init(
+                                helperVersion: "fixture",
+                                accessibilityTrusted: true
+                            )))
+                            : .failure(.connectionFailed)
+                    }
+                }
+            ),
+            applicationLocator: locator
+        )
+        let pairedController = SelectionHelperSettingsController(
+            client: pairedClient,
+            disconnectRecoveryStore: SelectionHelperDisconnectRecoveryStoreStub()
+        )
+
+        pairedController.startApplicationLaunchRecovery(
+            runtimeServicesEnabled: false
+        )
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(lock.withLock { launches }, 0)
+
+        pairedController.startApplicationLaunchRecovery(
+            runtimeServicesEnabled: true
+        )
+        await waitUntil {
+            if case .ready = pairedController.state { return true }
+            return false
+        }
+        XCTAssertEqual(lock.withLock { launches }, 1)
+
+        pairedController.startApplicationLaunchRecovery(
+            runtimeServicesEnabled: true
+        )
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(lock.withLock { launches }, 1)
+
+        let unpairedLock = NSLock()
+        var unpairedLaunches = 0
+        let unpairedClient = SelectionHelperClient(
+            keyStore: SelectionHelperKeyStoreStub(),
+            connection: SelectionHelperAuthenticatedConnectionStub(
+                key: key,
+                disconnectResult: .success(true)
+            ),
+            applicationLocator: SelectionHelperApplicationLocator(
+                candidateURLsProvider: { [helper] },
+                runningApplicationURLsProvider: { [] },
+                openApplication: { _, _ in
+                    unpairedLock.withLock { unpairedLaunches += 1 }
+                },
+                allowedApplicationURLsProvider: { [helper] },
+                identityVerifier: SelectionHelperBundleIdentityVerifierStub(
+                    teamID: "TESTTEAM01"
+                ),
+                trustedHostTeamIdentifierProvider: { "TESTTEAM01" }
+            )
+        )
+        let unpairedController = SelectionHelperSettingsController(
+            client: unpairedClient,
+            disconnectRecoveryStore: SelectionHelperDisconnectRecoveryStoreStub()
+        )
+        unpairedController.startApplicationLaunchRecovery(runtimeServicesEnabled: true)
+        await waitUntil { unpairedController.state == .notPaired }
+        XCTAssertEqual(unpairedLock.withLock { unpairedLaunches }, 0)
+
+        let disconnectLock = NSLock()
+        var disconnectLaunches = 0
+        let disconnectRecoveryStore = SelectionHelperDisconnectRecoveryStoreStub()
+        disconnectRecoveryStore.deadline = Date().addingTimeInterval(5)
+        let disconnectClient = SelectionHelperClient(
+            keyStore: SelectionHelperKeyStoreStub(key: key),
+            connection: SelectionHelperAuthenticatedConnectionStub(
+                key: key,
+                disconnectResult: .failure(.connectionFailed)
+            ),
+            applicationLocator: SelectionHelperApplicationLocator(
+                candidateURLsProvider: { [helper] },
+                runningApplicationURLsProvider: { [] },
+                openApplication: { _, _ in
+                    disconnectLock.withLock { disconnectLaunches += 1 }
+                },
+                allowedApplicationURLsProvider: { [helper] },
+                identityVerifier: SelectionHelperBundleIdentityVerifierStub(
+                    teamID: "TESTTEAM01"
+                ),
+                trustedHostTeamIdentifierProvider: { "TESTTEAM01" }
+            )
+        )
+        let disconnectController = SelectionHelperSettingsController(
+            client: disconnectClient,
+            disconnectRecoveryStore: disconnectRecoveryStore
+        )
+        disconnectController.startApplicationLaunchRecovery(runtimeServicesEnabled: true)
+        await waitUntil { disconnectController.state == .connectionFailed }
+        XCTAssertEqual(disconnectLock.withLock { disconnectLaunches }, 0)
+    }
+
+    func testSelectionHelperApplicationLaunchRecoveryPreservesKeychainFailure()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let helper = root.appendingPathComponent("Blocks Selection Helper.app")
+        try makeSelectionHelperBundle(at: helper)
+        let lock = NSLock()
+        var launches = 0
+        let store = SelectionHelperSharedKeyStore(
+            accessGroupProvider: { "TESTTEAM01.fixture" },
+            itemCopyMatching: { _, _ in errSecAuthFailed }
+        )
+        let client = SelectionHelperClient(
+            keyStore: store,
+            connection: SelectionHelperAuthenticatedConnectionStub(
+                key: Data(repeating: 0xA5, count: 32),
+                disconnectResult: .success(true)
+            ),
+            applicationLocator: SelectionHelperApplicationLocator(
+                candidateURLsProvider: { [helper] },
+                runningApplicationURLsProvider: { [] },
+                openApplication: { _, _ in lock.withLock { launches += 1 } },
+                allowedApplicationURLsProvider: { [helper] },
+                identityVerifier: SelectionHelperBundleIdentityVerifierStub(
+                    teamID: "TESTTEAM01"
+                ),
+                trustedHostTeamIdentifierProvider: { "TESTTEAM01" }
+            )
+        )
+        let controller = SelectionHelperSettingsController(
+            client: client,
+            disconnectRecoveryStore: SelectionHelperDisconnectRecoveryStoreStub()
+        )
+
+        controller.startApplicationLaunchRecovery(runtimeServicesEnabled: true)
+        await waitUntil { controller.state == .connectionFailed }
+
+        XCTAssertEqual(lock.withLock { launches }, 0)
+        XCTAssertEqual(
+            controller.lastError,
+            L10n.string("translation.selectionHelper.error.keychainUnavailable")
+        )
+    }
+
     func testHelperPermissionPrimaryActionOpensTargetedGuideWithoutSystemRequest() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

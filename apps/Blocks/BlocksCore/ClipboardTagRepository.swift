@@ -160,7 +160,7 @@ public final class ClipboardTagRepository {
         return tagsByRecord
     }
 
-    public func createTag(displayName: String, colorToken: String = "blue") throws -> ClipboardTagMutationResult {
+    public func createTag(displayName: String, colorToken: String? = nil) throws -> ClipboardTagMutationResult {
         let tag = try database.connection.transaction {
             try createTagInTransaction(displayName: displayName, colorToken: colorToken)
         }
@@ -169,7 +169,7 @@ public final class ClipboardTagRepository {
 
     public func createTagAndAttach(
         displayName: String,
-        colorToken: String = "blue",
+        colorToken: String? = nil,
         recordID: String
     ) throws -> ClipboardTagMutationResult {
         try database.connection.transaction {
@@ -188,7 +188,7 @@ public final class ClipboardTagRepository {
     /// concurrent first creates on the normalized-name uniqueness constraint.
     public func ensureTagAndAttach(
         displayName: String,
-        colorToken: String = "blue",
+        colorToken: String? = nil,
         recordID: String
     ) throws -> ClipboardTagEnsureAndAttachResult {
         try database.connection.transaction {
@@ -197,6 +197,12 @@ public final class ClipboardTagRepository {
             let id = "tag.\(UUID().uuidString.lowercased())"
             let now = Date()
             let sortOrder = try nextOrdinarySortOrder()
+            let resolvedColorToken: String
+            if let colorToken {
+                resolvedColorToken = colorToken
+            } else {
+                resolvedColorToken = try nextTagColorTokenInTransaction()
+            }
             try database.connection.withStatement(
                 """
                 INSERT INTO clipboard_tags
@@ -208,7 +214,7 @@ public final class ClipboardTagRepository {
                     .string(id),
                     .string(normalized.displayName),
                     .string(normalized.normalizedName),
-                    .string(colorToken),
+                    .string(resolvedColorToken),
                     .int(sortOrder),
                     .string(ClipboardTagBuiltInKind.none.rawValue),
                     .double(now.timeIntervalSince1970),
@@ -664,12 +670,18 @@ public final class ClipboardTagRepository {
         }
     }
 
-    private func createTagInTransaction(displayName: String, colorToken: String) throws -> ClipboardTag {
+    private func createTagInTransaction(displayName: String, colorToken: String?) throws -> ClipboardTag {
         let normalized = try normalizeUserName(displayName)
         try ensureNameAvailable(normalized.normalizedName, excluding: nil)
         let id = "tag.\(UUID().uuidString.lowercased())"
         let now = Date()
         let sortOrder = try nextOrdinarySortOrder()
+        let resolvedColorToken: String
+        if let colorToken {
+            resolvedColorToken = colorToken
+        } else {
+            resolvedColorToken = try nextTagColorTokenInTransaction()
+        }
         try database.connection.withStatement(
             """
             INSERT INTO clipboard_tags
@@ -680,7 +692,7 @@ public final class ClipboardTagRepository {
                 .string(id),
                 .string(normalized.displayName),
                 .string(normalized.normalizedName),
-                .string(colorToken),
+                .string(resolvedColorToken),
                 .int(sortOrder),
                 .string(ClipboardTagBuiltInKind.none.rawValue),
                 .double(now.timeIntervalSince1970),
@@ -886,6 +898,32 @@ public final class ClipboardTagRepository {
             bindings: [.string(ClipboardTagBuiltInKind.favorite.rawValue)]
         ) ?? 0
         return current + 1
+    }
+
+    /// Must be called inside the creating mutation transaction. This keeps
+    /// concurrent CLI/import/UI creates from observing the same palette slot.
+    private func nextTagColorTokenInTransaction() throws -> String {
+        let ordinaryColorTokens = try database.connection.withStatement(
+            """
+            SELECT color_token
+            FROM clipboard_tags
+            WHERE built_in_kind != ? AND is_enabled = 1
+            """,
+            bindings: [.string(ClipboardTagBuiltInKind.favorite.rawValue)]
+        ) { statement in
+            var tokens: [String] = []
+            while try statement.step() {
+                if let token = statement.columnString(0) {
+                    tokens.append(token)
+                }
+            }
+            return tokens
+        }
+        let usedTokens = Set(ordinaryColorTokens.filter(ClipboardTagColorPalette.isValidPaletteToken))
+        return ClipboardTagColorPalette.nextToken(
+            usedTokens: usedTokens,
+            tagCount: ordinaryColorTokens.count
+        )
     }
 
     private func decodeTag(_ statement: SQLiteStatement) -> ClipboardTag {

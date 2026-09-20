@@ -111,6 +111,9 @@ private final class ActionListReply: @unchecked Sendable {
     let ready = DispatchSemaphore(value: 0)
     private let lock = NSLock()
     private var data: Data?
+    func finish(response: CLIActionListResponse) {
+        finish((try? JSONEncoder().encode(response)) ?? Data())
+    }
     func finish(_ data: Data) {
         lock.lock()
         guard self.data == nil else { lock.unlock(); return }
@@ -140,16 +143,20 @@ private func liveActionList() -> CLIActionListResponse {
     connection.setCodeSigningRequirement(requirement)
     connection.remoteObjectInterface = NSXPCInterface(with: BlocksActionBrokerClientXPCProtocol.self)
     connection.invalidationHandler = {
-        result.finish(CLIActionListResponse.failure("broker_unavailable", "Enable a CLI module in Blocks settings."))
+        result.finish(response: .init(error: BlocksCLITransportError.proxyUnavailable.brokerError))
     }
     connection.interruptionHandler = connection.invalidationHandler
     connection.resume()
     defer { connection.invalidate() }
     let proxy = connection.remoteObjectProxyWithErrorHandler { _ in
-        result.finish(CLIActionListResponse.failure("broker_unavailable", "Enable a CLI module in Blocks settings."))
+        result.finish(response: .init(error: BlocksCLITransportError.proxyUnavailable.brokerError))
     } as? BlocksActionBrokerClientXPCProtocol
-    guard let proxy, verifyBroker(proxy, connection: connection) == true else {
-        result.finish(CLIActionListResponse.failure("broker_unavailable", "A verified Action Broker is required. Enable a CLI module in Blocks settings."))
+    guard let proxy, let trusted = verifyBroker(proxy, connection: connection) else {
+        result.finish(response: .init(error: BlocksCLITransportError.proxyUnavailable.brokerError))
+        return result.wait()
+    }
+    guard trusted else {
+        result.finish(response: .init(error: BlocksCLITransportError.untrustedPeer.brokerError))
         return result.wait()
     }
     let invoked: Void? = proxy.listActions?(withReply: { result.finish($0) })
@@ -882,9 +889,8 @@ func submitToBroker<Payload: Codable, Result: Codable>(
         result.finish(.failure(ActionBrokerError(
             category: .availability,
             code: "broker_unavailable",
-            message: "BlocksActionBroker is unavailable. Enable CLI integration in Blocks settings.",
-            retryable: false,
-            details: ["explicit_enable_required": .bool(true)]
+            message: BlocksCLITransportError.brokerUnavailableMessage,
+            retryable: false
         )))
     }
     connection.interruptionHandler = connection.invalidationHandler
@@ -894,9 +900,8 @@ func submitToBroker<Payload: Codable, Result: Codable>(
         result.finish(.failure(ActionBrokerError(
             category: .availability,
             code: "broker_unavailable",
-            message: "BlocksActionBroker is unavailable. Enable CLI integration in Blocks settings.",
-            retryable: false,
-            details: ["explicit_enable_required": .bool(true)]
+            message: BlocksCLITransportError.brokerUnavailableMessage,
+            retryable: false
         )))
     } as? BlocksActionBrokerClientXPCProtocol
     guard let proxy else {
@@ -988,15 +993,18 @@ enum BlocksCLITransportError: Error {
     case localIdentityUnavailable
     case untrustedPeer
 
+    // XPC failure does not reveal module authorization or establish that the
+    // peer's signing identity was rejected. Keep both possibilities explicit.
+    static let brokerUnavailableMessage = "Unable to connect to a verified BlocksActionBroker. Check CLI module access in Blocks settings and background-item approval in System Settings. If already enabled, the Broker may be unavailable or its registration/signing identity may be stale after an update; this error does not establish that access is disabled. Before a source reinstall, wait for active requests, turn off the main CLI integration switch, and quit Blocks. If that fails, preserve the existing installation for recovery; do not kill a possibly busy Broker."
+
     var brokerError: ActionBrokerError {
         switch self {
         case .proxyUnavailable:
             return ActionBrokerError(
                 category: .availability,
                 code: "broker_unavailable",
-                message: "BlocksActionBroker is unavailable. Enable CLI integration in Blocks settings.",
-                retryable: false,
-                details: ["explicit_enable_required": .bool(true)]
+                message: Self.brokerUnavailableMessage,
+                retryable: false
             )
         case .localIdentityUnavailable:
             return ActionBrokerError(
@@ -1069,9 +1077,8 @@ private func classifyActionFailure(_ error: Error) -> CLIActionFailure {
     return CLIActionFailure(error: ActionBrokerError(
         category: .availability,
         code: "broker_unavailable",
-        message: "BlocksActionBroker is unavailable. Enable CLI integration in Blocks settings.",
-        retryable: false,
-        details: ["explicit_enable_required": .bool(true)]
+        message: BlocksCLITransportError.brokerUnavailableMessage,
+        retryable: false
     ), exitCode: 1)
 }
 
@@ -1548,9 +1555,8 @@ private func runClipboardCLI(args: [String]) -> Never {
             error: ActionBrokerError(
                 category: .availability,
                 code: "broker_unavailable",
-                message: "BlocksActionBroker is unavailable. Enable CLI integration in Blocks settings.",
-                retryable: false,
-                details: ["explicit_enable_required": .bool(true)]
+                message: BlocksCLITransportError.brokerUnavailableMessage,
+                retryable: false
             ),
             resultType: ClipboardManagementResult.self,
             exitCode: 1

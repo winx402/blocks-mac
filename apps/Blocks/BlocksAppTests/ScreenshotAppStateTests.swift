@@ -8462,6 +8462,108 @@ final class ScreenshotAppStateTests: XCTestCase {
         XCTAssertEqual(try repository.loadRecent(limit: 10).map(\.id), ["new"])
     }
 
+    func testClipboardPolicyProtectsOrganizedRecordsWithoutExpandingCountBudget() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ClipboardPolicyOrganizedProtection.\(UUID().uuidString)", isDirectory: true)
+        let database = try AppDatabase.open(environment: StorageEnvironment(rootDirectory: root))
+        defer { database.close(); try? FileManager.default.removeItem(at: root) }
+        let repository = ClipboardRepository(database: database)
+        for (id, timestamp) in [
+            ("tagged", 10.0), ("grouped", 20.0), ("legacy-pinned", 30.0),
+            ("favorite", 40.0), ("ordinary-new", 60.0), ("ordinary-old", 50.0)
+        ] {
+            try insertClipboardCleanupFixture(repository, id: id, timestamp: timestamp)
+        }
+        let tags = ClipboardTagRepository(repository: repository)
+        _ = try tags.createTagAndAttach(displayName: "Protected", recordID: "tagged")
+        try repository.move(recordID: "grouped", toPinboard: "pinboard.work")
+        // Model an interrupted legacy write: `pinned` is user-visible state
+        // even if its metadata row was not durably created.
+        try database.connection.execute("UPDATE clipboard_items SET pinned = 1 WHERE id = 'legacy-pinned'")
+        _ = try tags.toggleFavorite(recordID: "favorite")
+
+        let countPolicy = ClipboardRepositoryPrunePolicy(
+            retentionSeconds: nil,
+            maxItems: 2,
+            preserveFavorite: false
+        )
+        let countResult = try repository.applyPolicy(countPolicy)
+        XCTAssertEqual(Set(countResult.deletedRecordIDs), ["favorite", "ordinary-new", "ordinary-old"])
+        XCTAssertEqual(
+            Set(try repository.loadRecent(limit: 10).map(\.id)),
+            ["tagged", "grouped", "legacy-pinned"]
+        )
+
+        try insertClipboardCleanupFixture(repository, id: "ordinary-expired", timestamp: 0)
+        let timeResult = try repository.applyPolicy(.init(
+            retentionSeconds: 10,
+            maxItems: nil,
+            preserveFavorite: false,
+            now: Date(timeIntervalSince1970: 100)
+        ))
+        XCTAssertEqual(timeResult.deletedRecordIDs, ["ordinary-expired"])
+        XCTAssertEqual(
+            Set(try repository.loadRecent(limit: 10).map(\.id)),
+            ["tagged", "grouped", "legacy-pinned"]
+        )
+    }
+
+    func testInMemoryClipboardPolicyProtectsOrganizedRecordsWithoutExpandingCountBudget() async {
+        func record(_ id: String, timestamp: TimeInterval, pinned: Bool = false) -> ClipboardRecorderRecord {
+            let date = Date(timeIntervalSince1970: timestamp)
+            return ClipboardRecorderRecord(
+                id: id,
+                createdAt: date,
+                changeCount: Int(timestamp),
+                kind: .text,
+                formatSummary: .init(itemCount: 1, types: ["public.utf8-plain-text"]),
+                sourceApp: nil,
+                signatureSHA256_12: String((id + "------------").prefix(12)),
+                fixtureOwned: true,
+                pinned: pinned,
+                restorable: true,
+                lastCopiedAt: date,
+                summary: id
+            )
+        }
+
+        let store = ClipboardStore(repository: nil)
+        store.records = [
+            record("tagged", timestamp: 10),
+            record("pinned", timestamp: 20, pinned: true),
+            record("favorite", timestamp: 30),
+            record("ordinary", timestamp: 40),
+        ]
+        // Mirror the normal capture/load path before attaching tags. A raw
+        // records assignment alone does not populate the tag-store snapshot.
+        store.tagStore.load(recordIDs: store.records.map(\.id))
+        let createdTag = await store.tagStore.createTagAndAttach(
+            displayName: "Protected",
+            recordID: "tagged"
+        )
+        XCTAssertTrue(createdTag)
+        XCTAssertTrue(store.tagStore.tags(for: "tagged").contains { $0.builtInKind == .none })
+        let favorited = await store.tagStore.toggleFavorite(recordID: "favorite")
+        XCTAssertTrue(favorited)
+
+        _ = store.applyPolicy(
+            cleanupMode: .count,
+            retentionPolicy: .days30,
+            maxItems: 2,
+            preserveFavorite: false
+        )
+        XCTAssertEqual(Set(store.records.map(\.id)), ["tagged", "pinned"])
+
+        store.records.append(record("expired", timestamp: 0))
+        _ = store.applyPolicy(
+            cleanupMode: .time,
+            retentionPolicy: .days7,
+            maxItems: 2,
+            preserveFavorite: false
+        )
+        XCTAssertEqual(Set(store.records.map(\.id)), ["tagged", "pinned"])
+    }
+
     func testClipboardPolicyConfirmingStaleTokenDeletesNothing() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ClipboardPolicyStale.\(UUID().uuidString)", isDirectory: true)
@@ -10371,7 +10473,7 @@ final class ScreenshotAppStateTests: XCTestCase {
         XCTAssertEqual(fixture.manager.state, .enabled)
     }
 
-    func testActionBrokerDisableCancelsPendingReconnect() {
+    func testActionBrokerDisableCancelsPendingReconnect() async {
         let fixture = makeActionBrokerManagerFixture(
             retryPolicy: ActionBrokerRetryPolicy(
                 delays: [],
@@ -10382,6 +10484,7 @@ final class ScreenshotAppStateTests: XCTestCase {
         XCTAssertEqual(fixture.manager.state, .recovering)
 
         fixture.manager.setEnabled(false)
+        await fixture.manager.serviceChangeTask?.value
         fixture.scheduler.fireNext()
         fixture.host.invalidateLatest()
 
@@ -10432,17 +10535,18 @@ final class ScreenshotAppStateTests: XCTestCase {
         XCTAssertEqual(fixture.manager.state, .enabled)
     }
 
-    func testActionBrokerUnregisterFailureKeepsRegisteredHostRunning() {
+    func testActionBrokerUnregisterFailureRestoresRegisteredHost() async {
         let fixture = makeActionBrokerManagerFixture()
         fixture.host.completeLatest(.success(()))
         fixture.service.unregisterError = TestFailure.expected
         let stopCountBeforeDisable = fixture.host.stopCount
 
         fixture.manager.setEnabled(false)
+        await fixture.manager.serviceChangeTask?.value
 
         XCTAssertTrue(fixture.manager.isEnabled)
-        XCTAssertEqual(fixture.host.stopCount, stopCountBeforeDisable)
-        XCTAssertEqual(fixture.host.startCount, 1)
+        XCTAssertGreaterThan(fixture.host.stopCount, stopCountBeforeDisable)
+        XCTAssertEqual(fixture.host.startCount, 2)
         XCTAssertEqual(
             fixture.manager.state,
             .failed(TestFailure.expected.localizedDescription)
@@ -10482,7 +10586,7 @@ final class ScreenshotAppStateTests: XCTestCase {
         XCTAssertEqual(manager.state, .enabled)
     }
 
-    func testActionBrokerUnregisterFailureDoesNotOverwriteSynchronousHostRecovery() {
+    func testActionBrokerUnregisterFailureReportsFailureAfterSynchronousHostRecovery() async {
         let service = ActionBrokerServiceTestDouble()
         service.status = .notRegistered
         service.unregisterError = TestFailure.expected
@@ -10491,10 +10595,11 @@ final class ScreenshotAppStateTests: XCTestCase {
         service.status = .enabled
 
         manager.setEnabled(false)
+        await manager.serviceChangeTask?.value
 
         XCTAssertTrue(manager.isEnabled)
         XCTAssertEqual(host.startCount, 1)
-        XCTAssertEqual(manager.state, .enabled)
+        XCTAssertEqual(manager.state, .failed(TestFailure.expected.localizedDescription))
     }
 
     func testActionBrokerRegisterFailureWithoutRegistrationRemainsDisabled() {
@@ -26869,6 +26974,10 @@ private final class ActionBrokerServiceTestDouble {
 
 @MainActor
 private final class ActionBrokerHostTestDouble: ActionBrokerHosting {
+    func pauseAndDrainForApplicationUpdate() async throws {}
+    func resumeAfterCancelledApplicationUpdate() {}
+    func prepareBrokerForApplicationUpdate(token: String) async throws -> Int32 { 77 }
+    func resumeBrokerAfterCancelledApplicationUpdate(token: String) async throws {}
     private struct Attempt {
         let completion: (Result<Void, Error>) -> Void
         let onInvalidated: () -> Void
@@ -26905,6 +27014,10 @@ private final class ActionBrokerHostTestDouble: ActionBrokerHosting {
 
 @MainActor
 private final class ActionBrokerSynchronousSuccessHostTestDouble: ActionBrokerHosting {
+    func pauseAndDrainForApplicationUpdate() async throws {}
+    func resumeAfterCancelledApplicationUpdate() {}
+    func prepareBrokerForApplicationUpdate(token: String) async throws -> Int32 { 77 }
+    func resumeBrokerAfterCancelledApplicationUpdate(token: String) async throws {}
     private(set) var startCount = 0
 
     func start(

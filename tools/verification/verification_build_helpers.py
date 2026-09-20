@@ -1805,7 +1805,7 @@ def isolated_build_registration(derived_data: Path, configuration: str, bundle_n
 def run_blocks_no_launch_build(root: Path, timeout: int, gate_name: str) -> dict[str, Any]:
     safe_gate_name = re.sub(r"[^a-z0-9-]+", "-", gate_name.lower()).strip("-") or "gate"
     with tempfile.TemporaryDirectory(prefix=f"blocks-{safe_gate_name}-derived-data-") as derived_data:
-        with isolated_build_registration(Path(derived_data).resolve(), "Debug", ("Blocks.app", "Blocks Selection Helper.app")):
+        with isolated_build_registration(Path(derived_data).resolve(), "Debug", ("Blocks.app", "blocksHelper.app")):
             completed = run_controlled_xcode_build([
                 "xcodebuild", "-project", str(root / "apps" / "Blocks" / "Blocks.xcodeproj"), "-scheme", "Blocks",
                 "-configuration", "Debug", "-derivedDataPath", derived_data, "CODE_SIGNING_ALLOWED=NO",

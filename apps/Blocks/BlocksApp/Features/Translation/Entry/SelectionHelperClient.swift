@@ -210,7 +210,7 @@ struct SelectionHelperApplicationLocator {
     }
 
     private static var bundledHelperURL: URL {
-        Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/Blocks Selection Helper.app")
+        Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/blocksHelper.app")
     }
 
     private static func loginHomeDirectoryURL() -> URL {
@@ -1172,6 +1172,23 @@ final class SelectionHelperClient: @unchecked Sendable {
         )
     }
 
+    /// The main App's single cold-start recovery is deliberately narrower than
+    /// a user-requested recheck: it may start only an existing, trusted Helper
+    /// with an already-readable pairing key. It never creates, replaces, or
+    /// resets pairing material, and keychain failures remain distinguishable.
+    func recoverPairedHealthAfterApplicationLaunch(
+        timeout: TimeInterval = 3
+    ) -> Result<SelectionHelperHealth, SelectionAgentServiceFailure> {
+        switch keyStore.loadForAssociation() {
+        case let .failure(failure):
+            return .failure(failure)
+        case .success(nil):
+            return .failure(.notPaired)
+        case .success(.some):
+            return recoverHealth(timeout: timeout, allowLaunch: true)
+        }
+    }
+
     /// Best-effort optional enhancement for paste admission. It never launches
     /// or pairs the Helper; callers must treat nil and unknown as the regular
     /// paste path.
@@ -1774,6 +1791,7 @@ final class SelectionHelperSettingsController:
     private var lifecycleObservations = Set<AnyCancellable>()
     private var refreshInFlight = false
     private var refreshAgainWithoutLaunch = false
+    private var didStartApplicationLaunchRecovery = false
     init(
         client: SelectionHelperClient =
             SelectionHelperClient(),
@@ -1826,6 +1844,48 @@ final class SelectionHelperSettingsController:
             return nil
         }
         return url
+    }
+
+    /// Called once while the main App starts real runtime services. A user
+    /// quitting the Helper later is still observed with `allowLaunch: false`;
+    /// this is not a background keep-alive loop.
+    func startApplicationLaunchRecovery(
+        runtimeServicesEnabled: Bool
+    ) {
+        guard runtimeServicesEnabled,
+              !didStartApplicationLaunchRecovery else {
+            return
+        }
+        didStartApplicationLaunchRecovery = true
+
+        if pendingDisconnectRecovery || disconnectRecoveryExpired {
+            // An explicit disconnect is allowed to complete its authenticated
+            // recovery without relaunching the Helper.
+            refresh(allowLaunch: false)
+            return
+        }
+
+        guard !refreshInFlight,
+              let lease = client.beginApplicationOperation() else {
+            return
+        }
+        generation &+= 1
+        let currentGeneration = generation
+        state = .checking
+        refreshInFlight = true
+        let client = client
+        Task.detached(priority: .utility) {
+            client.recoverPairedHealthAfterApplicationLaunch()
+        }.valueTask(holding: lease) { [weak self] result in
+            guard let self else { return }
+            refreshInFlight = false
+            guard generation == currentGeneration else { return }
+            applyHealthResult(result)
+            if refreshAgainWithoutLaunch {
+                refreshAgainWithoutLaunch = false
+                refresh(allowLaunch: false)
+            }
+        }
     }
 
     func refresh(allowLaunch: Bool = true) {

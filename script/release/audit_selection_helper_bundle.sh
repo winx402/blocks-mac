@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 '/path/to/Blocks Selection Helper.app' [--require-signature --expected-team-id TEAM_ID --expected-authority AUTHORITY --expected-cert-sha1 SHA1]" >&2
+  echo "usage: $0 '/path/to/blocksHelper.app' [--require-signature --expected-team-id TEAM_ID --expected-authority AUTHORITY --expected-cert-sha1 SHA1]" >&2
 }
 
 if (($# < 1)); then
@@ -51,7 +51,7 @@ fi
   exit 66
 }
 
-executable="$app_bundle/Contents/MacOS/Blocks Selection Helper"
+executable="$app_bundle/Contents/MacOS/blocksHelper"
 info_plist="$app_bundle/Contents/Info.plist"
 contents="$app_bundle/Contents"
 [[ -x "$executable" ]] || { echo "error: Helper executable is missing" >&2; exit 1; }

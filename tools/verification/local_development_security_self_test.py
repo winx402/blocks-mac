@@ -89,7 +89,7 @@ do {
         ("app", "app.blocks.dev", "Contents/MacOS/Blocks"),
         ("cli", "app.blocks.dev.cli", "Contents/Resources/CLI/blocks"),
         ("broker", "app.blocks.dev.action-broker", "Contents/MacOS/BlocksActionBroker"),
-        ("helper", "app.blocks.dev.selection-helper", "Contents/Helpers/Blocks Selection Helper.app/Contents/MacOS/Blocks Selection Helper"),
+        ("helper", "app.blocks.dev.selection-helper", "Contents/Helpers/blocksHelper.app/Contents/MacOS/blocksHelper"),
     ]
     let peers = layout.map { ["role": $0.0, "identifier": $0.1,
                              "relativeExecutablePath": $0.2, "cdHash": String(repeating: "a", count: 40)] }

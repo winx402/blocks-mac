@@ -379,6 +379,7 @@
 		B14E00000000000000000007 /* ScreenshotHistoryCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F14E00000000000000000007 /* ScreenshotHistoryCoordinator.swift */; };
 		B14E00000000000000000004 /* ScreenshotLocalizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = F14E00000000000000000004 /* ScreenshotLocalizable.xcstrings */; };
 		B00500000000000000000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F50000000000000000000001 /* Assets.xcassets */; };
+		B05300000000000000000001 /* App icon assets in Helper */ = {isa = PBXBuildFile; fileRef = F50000000000000000000001 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -407,7 +408,7 @@
 			containerPortal = A00000000000000000000001 /* Project object */;
 			proxyType = 1;
 			remoteGlobalIDString = T27X00000000000000000001;
-			remoteInfo = BlocksSelectionHelper;
+			remoteInfo = blocksHelper;
 		};
 		C00600000000000000000001 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -745,7 +746,7 @@
 		F27X00000000000000000002 /* SelectionHelperClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Translation/Entry/SelectionHelperClient.swift; sourceTree = "<group>"; };
 		F27X00000000000000000003 /* TranslationSourceTextEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Translation/TranslationSourceTextEditor.swift; sourceTree = "<group>"; };
 		F27X00000000000000000004 /* BlocksSelectionHelperApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlocksSelectionHelperApp.swift; sourceTree = "<group>"; };
-		F27X00000000000000000005 /* Blocks Selection Helper.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Blocks Selection Helper.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		F27X00000000000000000005 /* blocksHelper.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "blocksHelper.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		F27X00000000000000000008 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		F27X00000000000000000009 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		F27X0000000000000000000A /* BlocksSelectionHelper.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = BlocksSelectionHelper.entitlements; sourceTree = "<group>"; };
@@ -1051,7 +1052,7 @@
 				F14F00000000000000000002 /* BlocksActionBroker */,
 				F28C00000000000000000005 /* BlocksClipboardBroker */,
 				F29F00000000000000000002 /* BlocksClipboardBlockingProviderFixture */,
-				F27X00000000000000000005 /* Blocks Selection Helper.app */,
+				F27X00000000000000000005 /* blocksHelper.app */,
 				F27V00000000000000000001 /* BlocksSelectionHelperTests.xctest */,
 				F15P00000000000000000004 /* BlocksPluginRunner.xpc */,
 			);
@@ -1691,7 +1692,7 @@
 			productReference = F29F00000000000000000002 /* BlocksClipboardBlockingProviderFixture */;
 			productType = "com.apple.product-type.tool";
 		};
-		T27X00000000000000000001 /* BlocksSelectionHelper */ = {
+		T27X00000000000000000001 /* blocksHelper */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = L27X00000000000000000001 /* Build configuration list for PBXNativeTarget "BlocksSelectionHelper" */;
 			buildPhases = (
@@ -1703,9 +1704,9 @@
 			);
 			dependencies = (
 			);
-			name = BlocksSelectionHelper;
-			productName = "Blocks Selection Helper";
-			productReference = F27X00000000000000000005 /* Blocks Selection Helper.app */;
+			name = blocksHelper;
+			productName = "blocksHelper";
+			productReference = F27X00000000000000000005 /* blocksHelper.app */;
 			productType = "com.apple.product-type.application";
 		};
 		T27V00000000000000000001 /* BlocksSelectionHelperTests */ = {
@@ -1796,7 +1797,7 @@
 				T15P00000000000000000001 /* BlocksPluginRunner */,
 				T28C00000000000000000001 /* BlocksClipboardBroker */,
 				T29F00000000000000000001 /* BlocksClipboardBlockingProviderFixture */,
-				T27X00000000000000000001 /* BlocksSelectionHelper */,
+				T27X00000000000000000001 /* blocksHelper */,
 				T27V00000000000000000001 /* BlocksSelectionHelperTests */,
 			);
 		};
@@ -1855,6 +1856,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				B27X00000000000000000007 /* Localizable.xcstrings in Resources */,
+				B05300000000000000000001 /* App icon assets in Helper */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -2401,7 +2403,7 @@
 		};
 		D27V00000000000000000001 /* BlocksSelectionHelper */ = {
 			isa = PBXTargetDependency;
-			target = T27X00000000000000000001 /* BlocksSelectionHelper */;
+			target = T27X00000000000000000001 /* blocksHelper */;
 			targetProxy = C27V00000000000000000001 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
@@ -2851,7 +2853,9 @@
 					INFOPLIST_FILE = BlocksSelectionHelper/Info.plist;
 					MARKETING_VERSION = 0.1.0;
 					PRODUCT_BUNDLE_IDENTIFIER = app.blocks.selection-helper;
-					PRODUCT_NAME = "Blocks Selection Helper";
+					PRODUCT_NAME = "blocksHelper";
+					PRODUCT_MODULE_NAME = Blocks_Selection_Helper;
+					ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 					SKIP_INSTALL = NO;
 					SUPPORTED_PLATFORMS = macosx;
 					SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG BLOCKS_SELECTION_HELPER";
@@ -2869,7 +2873,9 @@
 					INFOPLIST_FILE = BlocksSelectionHelper/Info.plist;
 					MARKETING_VERSION = 0.1.0;
 					PRODUCT_BUNDLE_IDENTIFIER = app.blocks.selection-helper;
-					PRODUCT_NAME = "Blocks Selection Helper";
+					PRODUCT_NAME = "blocksHelper";
+					PRODUCT_MODULE_NAME = Blocks_Selection_Helper;
+					ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 					SKIP_INSTALL = NO;
 					SUPPORTED_PLATFORMS = macosx;
 					SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) BLOCKS_SELECTION_HELPER";
@@ -2886,7 +2892,9 @@
 					INFOPLIST_FILE = BlocksSelectionHelper/Info.plist;
 					MARKETING_VERSION = 0.1.0;
 					PRODUCT_BUNDLE_IDENTIFIER = app.blocks.selection-helper;
-					PRODUCT_NAME = "Blocks Selection Helper";
+					PRODUCT_NAME = "blocksHelper";
+					PRODUCT_MODULE_NAME = Blocks_Selection_Helper;
+					ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 					SKIP_INSTALL = YES;
 					SUPPORTED_PLATFORMS = macosx;
 					SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) BLOCKS_SELECTION_HELPER";
@@ -2904,7 +2912,7 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = macosx;
 				SWIFT_ENABLE_EXPLICIT_MODULES = NO;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Blocks Selection Helper.app/Contents/MacOS/Blocks Selection Helper";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/blocksHelper.app/Contents/MacOS/blocksHelper";
 			};
 			name = Debug;
 		};
@@ -2919,7 +2927,7 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = macosx;
 				SWIFT_ENABLE_EXPLICIT_MODULES = NO;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Blocks Selection Helper.app/Contents/MacOS/Blocks Selection Helper";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/blocksHelper.app/Contents/MacOS/blocksHelper";
 			};
 			name = Release;
 		};
@@ -2934,7 +2942,7 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = macosx;
 				SWIFT_ENABLE_EXPLICIT_MODULES = NO;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Blocks Selection Helper.app/Contents/MacOS/Blocks Selection Helper";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/blocksHelper.app/Contents/MacOS/blocksHelper";
 			};
 			name = AppStoreRelease;
 		};
@@ -3279,7 +3287,9 @@
 					INFOPLIST_FILE = BlocksSelectionHelper/Info.plist;
 					MARKETING_VERSION = 0.1.0;
 					PRODUCT_BUNDLE_IDENTIFIER = app.blocks.dev.selection-helper;
-					PRODUCT_NAME = "Blocks Selection Helper";
+					PRODUCT_NAME = "blocksHelper";
+					PRODUCT_MODULE_NAME = Blocks_Selection_Helper;
+					ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 					SKIP_INSTALL = NO;
 					SUPPORTED_PLATFORMS = macosx;
 					SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG BLOCKS_SELECTION_HELPER BLOCKS_LOCAL_DEVELOPMENT";
@@ -3298,7 +3308,7 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = macosx;
 				SWIFT_ENABLE_EXPLICIT_MODULES = NO;
-				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Blocks Selection Helper.app/Contents/MacOS/Blocks Selection Helper";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/blocksHelper.app/Contents/MacOS/blocksHelper";
 			};
 			name = LocalDevelopment;
 		};

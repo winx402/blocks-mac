@@ -2,18 +2,6 @@ import Combine
 import Foundation
 import BlocksCore
 
-private enum ClipboardTagColorPalette {
-    static let tokens = ["blue", "green", "purple", "orange", "pink", "gray", "cyan", "mint"]
-
-    static func token(at index: Int) -> String {
-        tokens[index % tokens.count]
-    }
-
-    static func isValidPaletteToken(_ token: String) -> Bool {
-        tokens.contains(token)
-    }
-}
-
 protocol ClipboardRepositoryMutationExecutor: Sendable {
     func enqueue(_ operation: @escaping @Sendable () -> Void)
 }
@@ -305,17 +293,17 @@ final class ClipboardTagStore: ObservableObject {
 
     @discardableResult
     func createTag(displayName: String, colorToken: String? = nil) async -> Bool {
-        let resolvedColorToken = colorToken ?? nextTagColorToken()
         if repository != nil {
             return await performRepositoryMutation { repository in
                 ClipboardTagRepositoryMutation(
                     result: try repository.createTag(
                         displayName: displayName,
-                        colorToken: resolvedColorToken
+                        colorToken: colorToken
                     )
                 )
             } != nil
         }
+        let resolvedColorToken = colorToken ?? nextTagColorToken()
         return performInMemory {
             let tag = try createInMemoryTag(displayName: displayName, colorToken: resolvedColorToken)
             return ClipboardTagMutationResult(changedTagIDs: [tag.id], affectedRecordIDs: [])
@@ -328,12 +316,11 @@ final class ClipboardTagStore: ObservableObject {
         afterTagID: String? = nil,
         colorToken: String? = nil
     ) async -> String? {
-        let resolvedColorToken = colorToken ?? nextTagColorToken()
         if repository != nil {
             return await performRepositoryMutation { repository in
                 let created = try repository.createTag(
                     displayName: displayName,
-                    colorToken: resolvedColorToken
+                    colorToken: colorToken
                 )
                 guard let createdTagID = created.changedTagIDs.first else {
                     return ClipboardTagRepositoryMutation(result: created)
@@ -365,6 +352,7 @@ final class ClipboardTagStore: ObservableObject {
                 )
             }?.createdTagID
         }
+        let resolvedColorToken = colorToken ?? nextTagColorToken()
         var createdTagID: String?
         let created = performInMemory {
             let tag = try createInMemoryTag(displayName: displayName, colorToken: resolvedColorToken)
@@ -396,12 +384,11 @@ final class ClipboardTagStore: ObservableObject {
         colorToken: String? = nil,
         recordID: String
     ) async -> String? {
-        let resolvedColorToken = colorToken ?? nextTagColorToken()
         if repository != nil {
             return await performRepositoryMutation { repository in
                 let result = try repository.createTagAndAttach(
                     displayName: displayName,
-                    colorToken: resolvedColorToken,
+                    colorToken: colorToken,
                     recordID: recordID
                 )
                 return ClipboardTagRepositoryMutation(
@@ -410,6 +397,7 @@ final class ClipboardTagStore: ObservableObject {
                 )
             }?.createdTagID
         }
+        let resolvedColorToken = colorToken ?? nextTagColorToken()
         var createdTagID: String?
         let created = performInMemory {
             let tag = try createInMemoryTag(displayName: displayName, colorToken: resolvedColorToken)
@@ -463,12 +451,11 @@ final class ClipboardTagStore: ObservableObject {
         colorToken: String? = nil,
         recordID: String
     ) async -> ClipboardPanelTagMutation? {
-        let resolvedColorToken = colorToken ?? nextTagColorToken()
         if repository != nil {
             return await performRepositoryMutation { repository in
                 let result = try repository.createTagAndAttach(
                     displayName: displayName,
-                    colorToken: resolvedColorToken,
+                    colorToken: colorToken,
                     recordID: recordID
                 )
                 guard let tagID = result.changedTagIDs.first,
@@ -489,7 +476,7 @@ final class ClipboardTagStore: ObservableObject {
         }
         guard let tagID = await createTagAndAttachReturningID(
             displayName: displayName,
-            colorToken: resolvedColorToken,
+            colorToken: colorToken,
             recordID: recordID
         ), isTagged(recordID: recordID, tagID: tagID) else {
             return nil
@@ -1089,10 +1076,7 @@ final class ClipboardTagStore: ObservableObject {
     private func nextTagColorToken() -> String {
         let ordinaryTags = tags.filter { !$0.isFavorite }
         let usedTokens = Set(ordinaryTags.map(\.colorToken).filter(ClipboardTagColorPalette.isValidPaletteToken))
-        if let unusedToken = ClipboardTagColorPalette.tokens.first(where: { !usedTokens.contains($0) }) {
-            return unusedToken
-        }
-        return ClipboardTagColorPalette.token(at: ordinaryTags.count)
+        return ClipboardTagColorPalette.nextToken(usedTokens: usedTokens, tagCount: ordinaryTags.count)
     }
 
     private func repairLoadedTagColorsIfNeeded() throws {
@@ -1102,8 +1086,10 @@ final class ClipboardTagStore: ObservableObject {
             guard !ClipboardTagColorPalette.isValidPaletteToken(tag.colorToken) else {
                 return nil
             }
-            let nextToken = ClipboardTagColorPalette.tokens.first(where: { !usedTokens.contains($0) })
-                ?? ClipboardTagColorPalette.token(at: usedTokens.count)
+            let nextToken = ClipboardTagColorPalette.nextToken(
+                usedTokens: usedTokens,
+                tagCount: usedTokens.count
+            )
             usedTokens.insert(nextToken)
             return (tag, nextToken)
         }

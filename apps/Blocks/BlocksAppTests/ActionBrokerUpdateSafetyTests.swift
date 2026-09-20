@@ -6,6 +6,166 @@ import XCTest
 
 @MainActor
 final class ActionBrokerUpdateSafetyTests: XCTestCase {
+    func testEnabledRegistrationWithFailedHandshakeNeverAutomaticallyUnregisters() {
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.host.startError = ActionBrokerUpdateError.untrustedPeer
+        let manager = fixture.makeManager()
+        XCTAssertNotEqual(manager.state, .enabled, "registration alone is not connection readiness")
+        XCTAssertEqual(fixture.registerCount, 0)
+        XCTAssertEqual(fixture.unregisterCount, 0)
+        XCTAssertTrue(fixture.host.prepareTokens.isEmpty)
+    }
+
+    func testExplicitDisableDrainsAndPreservesModuleAuthorization() async throws {
+        let suite = "BrokerDisable.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let access = CLIModuleAccessPolicy(defaults: defaults)
+        access.setEnabled(true, for: .clipboard)
+        let fixture = BrokerServiceUpdateFixture()
+        let manager = fixture.makeManager(moduleAccess: access)
+        manager.setEnabled(false)
+        await manager.serviceChangeTask?.value
+        XCTAssertEqual(fixture.unregisterCount, 1)
+        XCTAssertEqual(fixture.host.prepareTokens.count, 1)
+        XCTAssertEqual(fixture.registerCount, 0)
+        XCTAssertEqual(manager.state, .disabled)
+        XCTAssertFalse(manager.isEnabled)
+        XCTAssertNil(try fixture.journal.load())
+        XCTAssertTrue(access.isEnabled(.clipboard))
+        manager.setEnabled(true)
+        XCTAssertEqual(fixture.registerCount, 1)
+        XCTAssertEqual(manager.state, .enabled)
+    }
+
+    func testExplicitDisableRefusesBusyOrUnverifiablePeerWithoutUnregistering() async throws {
+        for error in [ActionBrokerUpdateError.busy, .untrustedPeer, .unsupportedPeer] {
+            let fixture = BrokerServiceUpdateFixture()
+            fixture.host.prepareError = error
+            let manager = fixture.makeManager()
+            manager.setEnabled(false)
+            await manager.serviceChangeTask?.value
+            XCTAssertEqual(fixture.unregisterCount, 0)
+            XCTAssertEqual(fixture.registerCount, 0)
+            XCTAssertTrue(manager.isEnabled)
+            guard case .failed = manager.state else { return XCTFail("failure must remain visible") }
+            XCTAssertEqual(fixture.host.resumeTokens, fixture.host.prepareTokens)
+        }
+    }
+
+    func testExplicitDisableWhenAlreadyUnregisteredNeedsNoRemoteProof() async throws {
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.status = .notRegistered
+        fixture.processes = []
+        let manager = fixture.makeManager()
+        manager.setEnabled(false)
+        await manager.serviceChangeTask?.value
+        XCTAssertEqual(manager.state, .disabled)
+        XCTAssertEqual(fixture.unregisterCount, 0)
+        XCTAssertTrue(fixture.host.prepareTokens.isEmpty)
+        XCTAssertNil(try fixture.journal.load())
+    }
+
+    func testPartialUnregisterFailureRestoresServiceAndReportsFailure() async {
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.unregister = {
+            fixture.status = .notRegistered
+            fixture.processes = []
+            throw ActionBrokerUpdateError.serviceDidNotStop
+        }
+        defer { fixture.unregister = nil }
+        let manager = fixture.makeManager()
+        manager.setEnabled(false)
+        await manager.serviceChangeTask?.value
+        XCTAssertEqual(fixture.unregisterCount, 1)
+        XCTAssertEqual(fixture.registerCount, 1)
+        XCTAssertTrue(manager.isEnabled)
+        guard case .failed = manager.state else { return XCTFail("partial disable must not claim success") }
+    }
+
+    func testExplicitDisableCancelsPendingApprovalOnlyWithoutLingeringProcess() async throws {
+        for processes: [Int32] in [[], [77]] {
+            let fixture = BrokerServiceUpdateFixture()
+            fixture.status = .requiresApproval
+            fixture.processes = processes
+            let manager = fixture.makeManager()
+            manager.setEnabled(false)
+            await manager.serviceChangeTask?.value
+            XCTAssertEqual(fixture.unregisterCount, processes.isEmpty ? 1 : 0)
+            XCTAssertEqual(fixture.registerCount, 0)
+            XCTAssertTrue(fixture.host.prepareTokens.isEmpty)
+            XCTAssertNil(try fixture.journal.load())
+            if processes.isEmpty {
+                XCTAssertEqual(manager.state, .disabled)
+                XCTAssertEqual(fixture.status, .notRegistered)
+            } else {
+                XCTAssertEqual(fixture.status, .requiresApproval)
+                XCTAssertEqual(fixture.processes, [77])
+                guard case .failed = manager.state else { return XCTFail("lingering peer must block disable") }
+            }
+        }
+    }
+
+    func testExplicitDisableCancellationResumesAdmissionWithoutUnregister() async throws {
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.host.onResume = { try Task.checkCancellation() }
+        let entered = expectation(description: "prepare suspended")
+        var release: CheckedContinuation<Void, Never>?
+        fixture.host.onPrepare = {
+            await withCheckedContinuation { release = $0; entered.fulfill() }
+        }
+        let manager = fixture.makeManager()
+        manager.setEnabled(false)
+        let operation = manager.serviceChangeTask
+        await fulfillment(of: [entered], timeout: 1)
+        do {
+            try await manager.prepareForApplicationUpdate()
+            XCTFail("update must not interleave with explicit disable")
+        } catch { }
+        await manager.resumeAfterCancelledApplicationUpdate()
+        XCTAssertTrue(fixture.host.resumeTokens.isEmpty, "aborted update must not resume another transaction")
+        operation?.cancel()
+        release?.resume()
+        await operation?.value
+        XCTAssertEqual(fixture.unregisterCount, 0)
+        XCTAssertEqual(fixture.host.resumeTokens, fixture.host.prepareTokens)
+        XCTAssertEqual(fixture.host.successfulResumeCount, 1)
+        XCTAssertNil(try fixture.journal.load(), "independent recovery must finish despite disable cancellation")
+        XCTAssertTrue(manager.isEnabled)
+    }
+
+    func testQuitFencesSuspendedExplicitDisableAndPreservesRecoveryIntent() async throws {
+        let fixture = BrokerServiceUpdateFixture()
+        let entered = expectation(description: "prepare suspended")
+        var release: CheckedContinuation<Void, Never>?
+        fixture.host.onPrepare = {
+            await withCheckedContinuation { release = $0; entered.fulfill() }
+        }
+        let manager = fixture.makeManager()
+        manager.setEnabled(false)
+        let operation = manager.serviceChangeTask
+        await fulfillment(of: [entered], timeout: 1)
+        manager.setEnabled(true)
+        XCTAssertEqual(fixture.registerCount, 0, "no interleaved register during disable")
+        manager.beginApplicationQuit()
+        release?.resume()
+        await operation?.value
+        XCTAssertEqual(fixture.unregisterCount, 0)
+        XCTAssertTrue(fixture.host.resumeTokens.isEmpty)
+        XCTAssertNotNil(try fixture.journal.load())
+    }
+
+    func testExplicitDisableDoesNotInterfereWithPreparedUpdate() async throws {
+        let fixture = BrokerServiceUpdateFixture()
+        let manager = fixture.makeManager()
+        try await manager.prepareForApplicationUpdate()
+        manager.setEnabled(false)
+        XCTAssertNil(manager.serviceChangeTask)
+        XCTAssertNotNil(try fixture.journal.load())
+        await manager.resumeAfterCancelledApplicationUpdate()
+        XCTAssertEqual(manager.state, .enabled)
+    }
+
     func testHostRequestAdmissionWaitsForTrustedReplacementRegistration() {
         let lifecycle = ActionBrokerHostConnectionLifecycle()
         let first = lifecycle.beginConnection().generation
@@ -202,7 +362,7 @@ private final class BrokerServiceUpdateFixture {
     let host = BrokerServiceUpdateHost()
     let journal = ActionBrokerUpdateRecoveryJournal()
 
-    func makeManager() -> ActionBrokerServiceManager {
+    func makeManager(moduleAccess: CLIModuleAccessPolicy? = nil) -> ActionBrokerServiceManager {
         let control = ActionBrokerServiceControl(status: { self.status }, register: {
             self.registerCount += 1
             if self.registrationRequiresApproval {
@@ -222,13 +382,17 @@ private final class BrokerServiceUpdateFixture {
         })
         return ActionBrokerServiceManager(service: control, host: host,
             retryScheduler: { _, _ in AnyCancellable {} }, updateRecoveryJournal: journal,
-            runningBrokerProcessIDs: { self.processes }, processHasExited: { !self.processes.contains($0) })
+            runningBrokerProcessIDs: { self.processes }, processHasExited: { !self.processes.contains($0) },
+            moduleAccess: moduleAccess)
     }
 }
 
 @MainActor
 private final class BrokerServiceUpdateHost: ActionBrokerHosting {
-    var onResume: (() async -> Void)?
+    var onPrepare: (() async -> Void)?
+    var startError: Error?
+    var onResume: (() async throws -> Void)?
+    var successfulResumeCount = 0
     var localResumeCount = 0
     var prepareError: Error?
     var resumeError: Error?
@@ -236,19 +400,21 @@ private final class BrokerServiceUpdateHost: ActionBrokerHosting {
     var resumeTokens: [String] = []
     var didStart: (() -> Void)?
     func start(completion: @escaping (Result<Void, Error>) -> Void, onInvalidated: @escaping () -> Void) {
-        completion(.success(())); didStart?()
+        completion(startError.map { .failure($0) } ?? .success(())); didStart?()
     }
     func stop() {}
     func pauseAndDrainForApplicationUpdate() async throws {}
     func resumeAfterCancelledApplicationUpdate() { localResumeCount += 1 }
     func prepareBrokerForApplicationUpdate(token: String) async throws -> Int32 {
         prepareTokens.append(token)
+        await onPrepare?()
         if let prepareError { throw prepareError }
         return 77
     }
     func resumeBrokerAfterCancelledApplicationUpdate(token: String) async throws {
         resumeTokens.append(token)
-        await onResume?()
+        try await onResume?()
         if let resumeError { throw resumeError }
+        successfulResumeCount += 1
     }
 }

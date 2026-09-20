@@ -92,7 +92,7 @@ fi
 
 xcodebuild "${build_args[@]}" build
 app_bundle="$derived_data/Build/Products/Release/Blocks.app"
-helper_destination="$app_bundle/Contents/Helpers/Blocks Selection Helper.app"
+helper_destination="$app_bundle/Contents/Helpers/blocksHelper.app"
 [[ ! -e "$helper_destination" && ! -L "$helper_destination" ]] || { echo "error: main build unexpectedly already contains a Helper payload." >&2; exit 1; }
 mkdir -p "$app_bundle/Contents/Helpers"
 /usr/bin/ditto "$embedded_helper" "$helper_destination"

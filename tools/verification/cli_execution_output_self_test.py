@@ -155,6 +155,9 @@ def main() -> None:
                 assert envelope["request_id"] == "req_fixture" and envelope["action_id"] == action_id
                 assert envelope["protocol_version"] == 1
                 assert envelope.get("error", {}).get("code") == error, (scenario, envelope)
+                if scenario in {"proxy-failure", "unknown-failure"}:
+                    assert "explicit_enable_required" not in envelope["error"].get("details", {}), envelope
+                    assert "does not establish that access is disabled" in envelope["error"]["message"], envelope
                 assert result.stdout.endswith(b"\n")
                 if scenario == "dry-run":
                     assert envelope["result"] == {"dry_run": True, "request": {"value": "fixture"}}

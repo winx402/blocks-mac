@@ -795,10 +795,14 @@ public final class ClipboardRepository: @unchecked Sendable {
     private func makePrunePlanInCurrentTransaction(
         _ policy: ClipboardRepositoryPrunePolicy
     ) throws -> ClipboardRepositoryPrunePlan {
-        let favoriteRecordIDs = policy.preserveFavorite ? try favoriteRecordIDs() : []
-        let retainedRecords = try loadAllRecords()
+        var protectedRecordIDs = try automaticallyProtectedRecordIDs()
+        if policy.preserveFavorite {
+            protectedRecordIDs.formUnion(try favoriteRecordIDs())
+        }
+        let allRecords = try loadAllRecords()
+        let retainedRecords = allRecords
             .filter { record in
-                if policy.preserveFavorite, favoriteRecordIDs.contains(record.id) {
+                if protectedRecordIDs.contains(record.id) {
                     return true
                 }
                 guard let retentionSeconds = policy.retentionSeconds else {
@@ -809,18 +813,21 @@ public final class ClipboardRepository: @unchecked Sendable {
             .sorted { ClipboardRecordOrdering.isMoreRecent($0, than: $1) }
 
         let keepIDs: Set<String>
-        if let maxItems = policy.maxItems, policy.preserveFavorite {
-            let favorites = retainedRecords.filter { favoriteRecordIDs.contains($0.id) }
-            let ordinaryLimit = max(0, maxItems - favorites.count)
-            let ordinary = retainedRecords.filter { !favoriteRecordIDs.contains($0.id) }.prefix(ordinaryLimit)
-            keepIDs = Set((favorites + ordinary).map(\.id))
-        } else if let maxItems = policy.maxItems {
-            keepIDs = Set(retainedRecords.prefix(maxItems).map(\.id))
+        if let maxItems = policy.maxItems {
+            let protected = retainedRecords.filter { protectedRecordIDs.contains($0.id) }
+            // Protection is an exemption, not an expansion of the total
+            // budget: when protected records reach the limit, no ordinary
+            // records are retained by the count policy.
+            let ordinaryLimit = max(0, maxItems - protected.count)
+            let ordinary = retainedRecords
+                .filter { !protectedRecordIDs.contains($0.id) }
+                .prefix(ordinaryLimit)
+            keepIDs = Set((protected + ordinary).map(\.id))
         } else {
             keepIDs = Set(retainedRecords.map(\.id))
         }
 
-        let allIDs = Set(try loadAllRecords().map(\.id))
+        let allIDs = Set(allRecords.map(\.id))
         return ClipboardRepositoryPrunePlan(
             deleteRecordIDs: allIDs.subtracting(keepIDs)
         )
@@ -1266,6 +1273,37 @@ public final class ClipboardRepository: @unchecked Sendable {
             return ids
         }
         return Set(ids)
+    }
+
+    /// Automatic retention respects explicit organization even when the user
+    /// has intentionally removed the favorite star. Keep this query within the
+    /// prune transaction so a preview and its confirming mutation use the same
+    /// protection set.
+    private func automaticallyProtectedRecordIDs() throws -> Set<String> {
+        try database.connection.withStatement(
+            """
+            SELECT id
+            FROM clipboard_items
+            WHERE pinned = 1
+            UNION
+            SELECT record_id
+            FROM clipboard_pinned_metadata
+            UNION
+            SELECT record_id
+            FROM clipboard_record_tags
+            JOIN clipboard_tags ON clipboard_tags.id = clipboard_record_tags.tag_id
+            WHERE clipboard_tags.built_in_kind = ?
+            """,
+            bindings: [.string(ClipboardTagBuiltInKind.none.rawValue)]
+        ) { statement in
+            var ids = Set<String>()
+            while try statement.step() {
+                if let id = statement.columnString(0) {
+                    ids.insert(id)
+                }
+            }
+            return ids
+        }
     }
 
     public func loadRecord(recordID: String) throws -> ClipboardRecorderRecord? {

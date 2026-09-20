@@ -453,7 +453,7 @@ class Pipeline:
             result = subprocess.run(command, cwd=source_root, text=True, env=env)
             if result.returncode:
                 raise ReleaseError("release build step failed: " + " ".join(command))
-        helper = helper_dd / "Build/Products/Release/Blocks Selection Helper.app"
+        helper = helper_dd / "Build/Products/Release/blocksHelper.app"
         app = app_dd / "Build/Products/Release/Blocks.app"
         invoke(["bash", "script/release/build_selection_helper_beta.sh", "--provisioning-profile", identity["helper_profile_uuid"], "--version", self.version.marketing_version, "--build-number", self.args.build_number, "--release-name", self.release_name, "--update-feed-url", self.appcast_url])
         invoke(["bash", "script/release/build_direct_beta.sh", "--provisioning-profile", identity["main_profile_uuid"], "--embedded-helper", str(helper), "--version", self.version.marketing_version, "--build-number", self.args.build_number, "--release-name", self.release_name, "--update-feed-url", self.appcast_url])

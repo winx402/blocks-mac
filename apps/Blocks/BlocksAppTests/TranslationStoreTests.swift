@@ -11,6 +11,48 @@ import Translation
 
 @MainActor
 final class TranslationStoreTests: XCTestCase {
+    func testDragPublishedWillSetImmediatelyProtectsDismissalAndClearsAfterEnd() {
+        let model = TranslationPanelSessionModel(input: .init(source: .manual, text: ""),
+            direction: .init(target: TranslationLanguageTag("en")!),
+            translationStore: TranslationStore(defaults: isolatedDefaults()))
+        let presenter = TranslationPanelPresenter(model: model,
+            actions: .init(copyText: { _ in .failed }, openFavorites: {},
+                openTranslationSettings: {}, retakeScreenshot: {}), onClose: { _ in })
+        let drag = presenter.dragCoordinatorForTesting
+        XCTAssertFalse(presenter.directInteractionActiveForTesting)
+        drag.begin(serviceID: "fixture-source")
+        XCTAssertTrue(presenter.directInteractionActiveForTesting)
+        drag.endSession()
+        XCTAssertFalse(presenter.directInteractionActiveForTesting)
+    }
+
+    func testDragSurvivesDestinationRefreshAndIgnoresOldSessionCompletion() {
+        let coordinator = TranslationServiceOrderDragCoordinator()
+        let old = coordinator.begin(serviceID: "source")
+        let current = coordinator.begin(serviceID: "source")
+        coordinator.endSession(generation: old)
+        XCTAssertEqual(coordinator.activeServiceID, "source")
+        let target = TranslationResultOrderDragTarget(sourceServiceID: "source",
+            destinationServiceID: "destination", placement: .after)
+        coordinator.updateTarget(target)
+        // A rebuilt destination receives the same coordinator rather than
+        // replacing the active native drag session.
+        let replacement = TranslationServiceOrderNativeDragSource.DragSourceView(frame: .init(x: 0, y: 0, width: 160, height: 28))
+        replacement.serviceID = "destination"
+        replacement.dragCoordinator = coordinator
+        var commits = 0
+        replacement.onPerformDrop = { _ in commits += 1 }
+        let pasteboard = NSPasteboard(name: .init(UUID().uuidString))
+        defer { pasteboard.releaseGlobally() }
+        pasteboard.setData(TranslationServiceOrderDragPayload(serviceID: "source").encodedData(),
+            forType: TranslationServiceOrderDragPayload.pasteboardType)
+        XCTAssertEqual(replacement.updateDestination(pasteboard: pasteboard, locationInView: .init(x: 30, y: 20)), .move)
+        XCTAssertTrue(replacement.performDrop(pasteboard: pasteboard, locationInView: .init(x: 30, y: 20)))
+        XCTAssertEqual(commits, 1)
+        coordinator.endSession(generation: current)
+        XCTAssertNil(coordinator.activeServiceID)
+    }
+
     func testProductionRegistryContainsBuiltInsAndNoMockService() {
         let defaults = isolatedDefaults()
         let store = TranslationStore(defaults: defaults)

@@ -55,16 +55,35 @@ def test_pipeline_fixtures():
    assert calls[-1]=="unregister" and ("test" in calls)==(scenario in ("success","test-failure","registration-failure")),calls
    assert ("PASS: isolated XCTest completed" in output.getvalue())==(scenario=="success")
    assert product.is_dir() and installed.is_dir()
+
+def test_broker_registration_preflight():
+ label="app.blocks.dev.action-broker"
+ missing=f'Bad request.\nCould not find service "{label}" in domain for user gui: {os.getuid()}\n'
+ missing_user=f'Bad request.\nCould not find service "{label}" in domain for uid: {os.getuid()}\n'
+ def result(code,stderr=""):
+  return d.subprocess.CompletedProcess([],code,"",stderr)
+ for responses,allowed in (([result(113,missing),result(113,missing_user)],True),
+                           ([result(0)],False),
+                           ([result(113,missing),result(0)],False),
+                           ([result(113,"Could not find domain")],False),
+                           ([result(1,"permission denied")],False)):
+  with patch.object(d.subprocess,"run",side_effect=responses) as call:
+   try:d.ensure_action_broker_unregistered()
+   except RuntimeError:assert not allowed
+   else:assert allowed
+   assert all(c.args[0][:2]==["/bin/launchctl","print"] for c in call.call_args_list)
+
 def app(p,m):
- for x in ("Contents/MacOS/Blocks","Contents/MacOS/BlocksActionBroker","Contents/Resources/CLI/blocks","Contents/Helpers/Blocks Selection Helper.app/Contents/MacOS/Blocks Selection Helper"):
+ for x in ("Contents/MacOS/Blocks","Contents/MacOS/BlocksActionBroker","Contents/Resources/CLI/blocks","Contents/Helpers/blocksHelper.app/Contents/MacOS/blocksHelper"):
   q=p/x;q.parent.mkdir(parents=True,exist_ok=True);q.write_text(m);q.chmod(0o755)
- (p/"Contents/Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier":"app.blocks.dev"})); h=p/"Contents/Helpers/Blocks Selection Helper.app/Contents/Info.plist";h.write_bytes(plistlib.dumps({"CFBundleURLTypes":[]})); a=p/"Contents/Library/LaunchAgents/app.blocks.action-broker.plist";a.parent.mkdir(parents=True,exist_ok=True);a.write_bytes(plistlib.dumps({}))
+ (p/"Contents/Info.plist").write_bytes(plistlib.dumps({"CFBundleIdentifier":"app.blocks.dev"})); h=p/"Contents/Helpers/blocksHelper.app/Contents/Info.plist";h.write_bytes(plistlib.dumps({"CFBundleURLTypes":[]})); a=p/"Contents/Library/LaunchAgents/app.blocks.action-broker.plist";a.parent.mkdir(parents=True,exist_ok=True);a.write_bytes(plistlib.dumps({}))
 def main():
  test_nested_signing_inventory()
  test_pipeline_fixtures()
+ test_broker_registration_preflight()
  with tempfile.TemporaryDirectory() as t:
-  root=Path(t); prod=root/"p";app(prod/"Blocks.app","new");shutil.rmtree(prod/"Blocks.app/Contents/Helpers");app(prod/"Blocks Selection Helper.app","h");(prod/"blocks").write_text("c")
-  old={k:getattr(d,k) for k in ("HOME","DESTINATION","LEGACY_DESTINATION","MANIFEST","run","sign","signature","rename_display","update_plist","running_local_processes","verify_upgrade_identity")};d.HOME=root;d.DESTINATION=root/"Apps/Blocks.app";d.LEGACY_DESTINATION=root/"Legacy/Blocks Dev.app";d.MANIFEST=root/"Support/peers.json";d.ensure_real_directory=lambda p:p.mkdir(parents=True,exist_ok=True);d.running_local_processes=lambda:[];d.sign=lambda *_:None;d.rename_display=lambda *_:None;d.verify_upgrade_identity=lambda *_:None;d.update_plist=lambda p,f:(lambda x:(f(x),p.write_bytes(plistlib.dumps(x))))(plistlib.loads(p.read_bytes()))
+  root=Path(t); prod=root/"p";app(prod/"Blocks.app","new");shutil.rmtree(prod/"Blocks.app/Contents/Helpers");app(prod/"blocksHelper.app","h");(prod/"blocks").write_text("c")
+  old={k:getattr(d,k) for k in ("HOME","DESTINATION","LEGACY_DESTINATION","MANIFEST","run","sign","signature","rename_display","update_plist","running_local_processes","verify_upgrade_identity","ensure_action_broker_unregistered")};d.HOME=root;d.DESTINATION=root/"Apps/Blocks.app";d.LEGACY_DESTINATION=root/"Legacy/Blocks Dev.app";d.MANIFEST=root/"Support/peers.json";d.ensure_real_directory=lambda p:p.mkdir(parents=True,exist_ok=True);d.running_local_processes=lambda:[];d.ensure_action_broker_unregistered=lambda:None;d.sign=lambda *_:None;d.rename_display=lambda *_:None;d.verify_upgrade_identity=lambda *_:None;d.update_plist=lambda p,f:(lambda x:(f(x),p.write_bytes(plistlib.dumps(x))))(plistlib.loads(p.read_bytes()))
   def run(c,**_):
    if c[0]=="/usr/bin/ditto":shutil.copytree(c[1],c[2],symlinks=True)
    return ""
@@ -98,6 +117,15 @@ def main():
    finally:d.DESTINATION,d.LEGACY_DESTINATION,d.MANIFEST=saved_paths
    u=os.umask(0o022);d.install_development(prod);os.umask(u);assert (d.MANIFEST.stat().st_mode&0o777)==0o600
    app(d.DESTINATION,"old");d.MANIFEST.write_text("old");
+   # A dormant registered job, including one appearing during staging, must
+   # block before either the bundle or identity manifest is replaced.
+   for responses in ([RuntimeError("registered")],[None,RuntimeError("registered during staging")]):
+    with patch.object(d,"ensure_action_broker_unregistered",side_effect=responses) as preflight:
+     try:d.install_development(prod)
+     except RuntimeError:pass
+     else:raise AssertionError("registered Broker was replaced")
+     assert preflight.call_count==len(responses)
+    assert (d.DESTINATION/"Contents/MacOS/Blocks").read_text()=="old" and d.MANIFEST.read_text()=="old"
    real=os.replace; hit=[0]
    def bad(s,t):
     if Path(t)==d.MANIFEST and not hit[0]:hit[0]=1;raise OSError("manifest")

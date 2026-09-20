@@ -373,7 +373,7 @@ struct ClipboardSettingsPane: View {
                     retentionPolicy: cleanupRetentionDraft,
                     maxItems: cleanupMaxItemsDraft,
                     preserveFavorite: cleanupPreserveFavoriteDraft
-                )
+                ) + "\n" + L10n.string("settings.clipboardPolicyProtectedDetail")
             ) {
                 SettingsBooleanSwitch(
                     L10n.string("settings.clipboardPolicyPreserveFavorite"),

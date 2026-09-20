@@ -112,7 +112,7 @@ final class ActionBrokerServiceManager: ObservableObject {
     func isModuleEnabled(_ module: CLIModule) -> Bool { moduleAccess.isEnabled(module) }
 
     func setModuleEnabled(_ module: CLIModule, enabled: Bool) {
-        guard !isQuitting, !applicationUpdatePaused else { return }
+        guard !isQuitting, !applicationUpdatePaused, serviceChangeTask == nil else { return }
         moduleAccess.setEnabled(enabled, for: module)
         enabledModules = Set(CLIModule.allCases.filter(moduleAccess.isEnabled))
         if enabled { setEnabled(true) }
@@ -137,6 +137,7 @@ final class ActionBrokerServiceManager: ObservableObject {
     private let processHasExited: (Int32) -> Bool
     private var updateRecoveryTicket: ActionBrokerUpdateRecoveryTicket?
     private var updateRecoveryTask: Task<Void, Never>?
+    private(set) var serviceChangeTask: Task<Void, Never>?
     private var updateRecoveryFailureMessage: String?
     private var isQuitting = false
     private var recoveryGeneration = 0
@@ -148,6 +149,7 @@ final class ActionBrokerServiceManager: ObservableObject {
         recoveryGeneration += 1
         updateRecoveryTask?.cancel()
         updateRecoveryTask = nil
+        serviceChangeTask?.cancel()
         applicationUpdatePaused = true
         reconnectTask?.cancel()
         reconnectTask = nil
@@ -155,6 +157,13 @@ final class ActionBrokerServiceManager: ObservableObject {
     }
 
     func prepareForApplicationUpdate(stopService: Bool = true) async throws {
+        // The update coordinator must not resume or consume an explicit
+        // disable transaction that is currently awaiting the remote peer.
+        if stopService, serviceChangeTask != nil { throw ActionBrokerUpdateError.invalidRecoveryState }
+        try await prepareServiceRemoval(stopService: stopService)
+    }
+
+    private func prepareServiceRemoval(stopService: Bool = true) async throws {
         if stopService, updateRecoveryTask != nil { throw ActionBrokerUpdateError.invalidRecoveryState }
         try applicationManagementGate.pauseIfIdle()
         applicationUpdatePaused = true
@@ -194,6 +203,7 @@ final class ActionBrokerServiceManager: ObservableObject {
     }
 
     func resumeAfterCancelledApplicationUpdate() async {
+        guard serviceChangeTask == nil else { return }
         await restoreServiceAfterUpdate()
     }
 
@@ -344,6 +354,17 @@ final class ActionBrokerServiceManager: ObservableObject {
     }
 
     func setEnabled(_ enabled: Bool) {
+        guard !isQuitting, !applicationUpdatePaused, serviceChangeTask == nil, updateRecoveryTask == nil else { return }
+        if !enabled, embeddedServiceAvailable {
+            // A user disabling CLI integration has not authorized interrupting
+            // a write. Reuse the authenticated idle proof and async SM removal.
+            serviceChangeTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                defer { self.serviceChangeTask = nil }
+                await self.disableServiceSafely()
+            }
+            return
+        }
         guard let lease = applicationManagementGate.begin() else { return }
         defer { lease.release() }
         guard embeddedServiceAvailable else {
@@ -356,20 +377,57 @@ final class ActionBrokerServiceManager: ObservableObject {
             if enabled {
                 try service.register()
                 refresh()
-            } else {
-                try service.unregister()
-                try updateRecoveryJournal.clear()
-                updateRecoveryTicket = nil
-                cancelReconnectAndStopHost()
-                isServiceRegistered = false
-                state = .disabled
             }
         } catch {
-            if enabled {
-                recoverAfterRegisterFailure(error)
-            } else {
-                recoverAfterUnregisterFailure(error)
+            recoverAfterRegisterFailure(error)
+        }
+    }
+
+    private func disableServiceSafely() async {
+        let generation = recoveryGeneration
+        do {
+            try Task.checkCancellation()
+            try await prepareServiceRemoval()
+            guard !isQuitting, generation == recoveryGeneration else { return }
+            try Task.checkCancellation()
+            if service.status() == .requiresApproval {
+                // Cancelling a pending registration is an explicit user action.
+                // It has no runnable job, but a lingering old binary still makes
+                // removal unsafe and must not be killed without an idle proof.
+                guard try runningBrokerProcessIDs().isEmpty else { throw ActionBrokerUpdateError.serviceDidNotStop }
+                try await service.unregisterAndWait()
+                guard !isQuitting, generation == recoveryGeneration else { return }
+                try Task.checkCancellation()
+                guard try runningBrokerProcessIDs().isEmpty else { throw ActionBrokerUpdateError.serviceDidNotStop }
             }
+            guard service.status() == .notRegistered || service.status() == .notFound else {
+                throw ActionBrokerUpdateError.requiresApproval
+            }
+            // Explicit disable consumes saved enabled intent only after the
+            // service is gone. Module authorization preferences are untouched.
+            try updateRecoveryJournal.clear()
+            updateRecoveryTicket = nil
+            updateRecoveryFailureMessage = nil
+            cancelReconnectAndStopHost()
+            isServiceRegistered = false
+            applicationUpdatePaused = false
+            applicationManagementGate.resume()
+            host.resumeAfterCancelledApplicationUpdate()
+            state = .disabled
+        } catch {
+            guard !isQuitting, generation == recoveryGeneration else { return }
+            // Cancellation of the attempted disable must not cancel the
+            // authenticated resume command needed to undo its remote pause.
+            // Track this independent task so quit still cancels/fences it.
+            let recovery = Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.restoreServiceAfterUpdate()
+            }
+            updateRecoveryTask = recovery
+            await recovery.value
+            guard !isQuitting, generation == recoveryGeneration else { return }
+            updateRecoveryTask = nil
+            state = .failed(error.localizedDescription)
         }
     }
 
@@ -484,23 +542,6 @@ final class ActionBrokerServiceManager: ObservableObject {
     }
 
     private func recoverAfterRegisterFailure(_ error: Error) {
-        guard service.status() == .enabled else {
-            refresh()
-            return
-        }
-
-        isServiceRegistered = true
-        let hostAttemptBeforeRecovery = hostAttempt
-        if !hostIsActive, reconnectTask == nil {
-            startHost(isReconnect: true)
-        }
-        guard !(hostAttempt != hostAttemptBeforeRecovery && successfulHostAttempt == hostAttempt) else {
-            return
-        }
-        state = .failed(error.localizedDescription)
-    }
-
-    private func recoverAfterUnregisterFailure(_ error: Error) {
         guard service.status() == .enabled else {
             refresh()
             return

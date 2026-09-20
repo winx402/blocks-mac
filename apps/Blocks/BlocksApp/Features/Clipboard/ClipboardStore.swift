@@ -2285,8 +2285,21 @@ final class ClipboardStore: ObservableObject {
         }
 
         let previousRecordIDs = Set(records.map(\.id))
+        var protectedRecordIDs = Set(records.lazy
+            .filter(\.pinned)
+            .map(\.id))
+        protectedRecordIDs.formUnion(records.lazy.compactMap { record in
+            self.tagStore.tags(for: record.id).contains { $0.builtInKind == .none }
+                ? record.id
+                : nil
+        })
+        if preserveFavorite {
+            protectedRecordIDs.formUnion(records.lazy.compactMap { record in
+                self.tagStore.isFavorite(recordID: record.id) ? record.id : nil
+            })
+        }
         let ageFiltered = records.filter { record in
-            if preserveFavorite, tagStore.isFavorite(recordID: record.id) {
+            if protectedRecordIDs.contains(record.id) {
                 return true
             }
             guard let retentionSeconds else {
@@ -2295,13 +2308,13 @@ final class ClipboardStore: ObservableObject {
             return record.lastCopiedAt >= Date().addingTimeInterval(-TimeInterval(retentionSeconds))
         }
         let sorted = ageFiltered.sorted { ClipboardRecordOrdering.isMoreRecent($0, than: $1) }
-        if let itemLimit, preserveFavorite {
-            let favorites = sorted.filter { tagStore.isFavorite(recordID: $0.id) }
-            let ordinaryLimit = max(0, itemLimit - favorites.count)
-            let ordinary = sorted.filter { !tagStore.isFavorite(recordID: $0.id) }.prefix(ordinaryLimit)
-            records = (favorites + ordinary).sorted { ClipboardRecordOrdering.isMoreRecent($0, than: $1) }
-        } else if let itemLimit {
-            records = Array(sorted.prefix(itemLimit))
+        if let itemLimit {
+            let protected = sorted.filter { protectedRecordIDs.contains($0.id) }
+            let ordinaryLimit = max(0, itemLimit - protected.count)
+            let ordinary = sorted
+                .filter { !protectedRecordIDs.contains($0.id) }
+                .prefix(ordinaryLimit)
+            records = (protected + ordinary).sorted { ClipboardRecordOrdering.isMoreRecent($0, than: $1) }
         } else {
             records = sorted
         }

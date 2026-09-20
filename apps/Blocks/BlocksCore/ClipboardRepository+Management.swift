@@ -212,7 +212,7 @@ private extension ClipboardRepository {
         result.counts.duplicates = validated.count - result.counts.inserted
         result.counts.updated = existingIDs.count
         result.counts.pinboardsCreated = boardNames.filter { boardIDs[$0] == nil }.count
-        result.warnings = ["unfavorited_imports_follow_normal_retention", "existing_payload_title_and_ocr_preserved"]
+        result.warnings = ["unprotected_imports_follow_normal_retention", "existing_payload_title_and_ocr_preserved"]
         if input.dryRun { return result }
         for name in boardNames.sorted() where boardIDs[name] == nil { boardIDs[name] = try managementCreatePinboard(name) }
         let tags = ClipboardTagRepository(database: database)

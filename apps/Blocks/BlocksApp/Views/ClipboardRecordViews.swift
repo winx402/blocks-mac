@@ -156,8 +156,9 @@ struct ClipboardFloatingRecordCard: View {
                     : L10n.string("clipboard.tags.favorite"),
                 isEnabled: isFavoriteActionVisible,
                 isSelected: isFavorite,
-                emphasis: .accent,
-                tint: Color.yellow.opacity(0.95),
+                emphasis: .standard,
+                tint: isFavorite ? Color.yellow.opacity(0.95) : Color.secondary,
+                isBorderless: true,
                 density: .micro,
                 showsHelp: true,
                 action: {

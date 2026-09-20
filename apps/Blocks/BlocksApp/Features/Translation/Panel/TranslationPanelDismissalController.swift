@@ -55,6 +55,9 @@ struct TranslationPanelDismissalState: Equatable {
 /// and the temporary Carbon Escape registration.
 @MainActor
 final class TranslationPanelDismissalController {
+#if DEBUG
+    var directInteractionActiveForTesting: Bool { state.isDirectInteractionActive }
+#endif
     private let dismissMonitor = FloatingPanelDismissMonitor()
     private let onDismiss: @MainActor () -> Void
     private weak var panel: NSPanel?

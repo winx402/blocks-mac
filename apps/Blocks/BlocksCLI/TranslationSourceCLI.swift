@@ -113,7 +113,7 @@ func runTranslationSourceCLI(
             action: brokerAction,
             code: "broker_unavailable",
             message:
-                "BlocksActionBroker is unavailable. Enable CLI integration in Blocks settings.",
+                BlocksCLITransportError.brokerUnavailableMessage,
             exitCode: 1
         )
     }

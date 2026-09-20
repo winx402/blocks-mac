@@ -110,7 +110,7 @@ if ((unsigned)); then
 fi
 
 xcodebuild "${build_args[@]}" build
-app_bundle="$derived_data/Build/Products/Release/Blocks Selection Helper.app"
+app_bundle="$derived_data/Build/Products/Release/blocksHelper.app"
 
 # Check structural and release identity before applying the final signature.
 helper_audit_args=("$app_bundle")

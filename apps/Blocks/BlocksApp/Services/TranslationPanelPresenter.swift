@@ -327,16 +327,16 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
         )
     }
 
-    private func updateDismissalHandling() {
+    private func updateDismissalHandling(pinned: Bool? = nil, systemInteraction: Bool? = nil, directInteraction: Bool? = nil) {
         dismissalController.update(
             TranslationPanelDismissalState(
                 isVisible: panel?.isVisible == true,
-                isPinned: model.isPinned,
+                isPinned: pinned ?? model.isPinned,
                 isSuspended: isSuspended,
                 isSystemInteractionActive:
-                    AppleTranslationSystemInteractionGuard.shared.isActive,
+                    systemInteraction ?? AppleTranslationSystemInteractionGuard.shared.isActive,
                 isDirectInteractionActive:
-                    resultOrderDragCoordinator.activeServiceID != nil
+                    directInteraction ?? (resultOrderDragCoordinator.activeServiceID != nil)
             )
         )
     }
@@ -345,8 +345,8 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
         guard pinObservation == nil else { return }
         pinObservation = model.$isPinned
             .removeDuplicates()
-            .sink { [weak self] _ in
-                self?.updateDismissalHandling()
+            .sink { [weak self] pinned in
+                self?.updateDismissalHandling(pinned: pinned)
             }
     }
 
@@ -355,8 +355,8 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
         systemInteractionObservation =
             AppleTranslationSystemInteractionGuard.shared.$isActive
                 .removeDuplicates()
-                .sink { [weak self] _ in
-                    self?.updateDismissalHandling()
+                .sink { [weak self] active in
+                    self?.updateDismissalHandling(systemInteraction: active)
                 }
     }
 
@@ -366,8 +366,10 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
             .$activeServiceID
             .map { $0 != nil }
             .removeDuplicates()
-            .sink { [weak self] _ in
-                self?.updateDismissalHandling()
+            .sink { [weak self] active in
+                // @Published emits in willSet; rereading the property here
+                // would keep dismissal enabled throughout the new drag.
+                self?.updateDismissalHandling(directInteraction: active)
             }
     }
 
@@ -425,6 +427,13 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
     }
 
 #if DEBUG
+    var dragCoordinatorForTesting: TranslationServiceOrderDragCoordinator {
+        startDirectInteractionObservation()
+        return resultOrderDragCoordinator
+    }
+
+    var directInteractionActiveForTesting: Bool { dismissalController.directInteractionActiveForTesting }
+
     var panelForTesting: TranslationSessionPanel? {
         panel
     }

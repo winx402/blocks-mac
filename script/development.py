@@ -63,7 +63,7 @@ def build() -> Path:
     doctor()
     sys.path.insert(0, str(ROOT / "tools/verification"))
     from verification_build_helpers import isolated_build_registration
-    with isolated_build_registration(DERIVED, "LocalDevelopment", ("Blocks.app", "Blocks Dev.app", "Blocks Selection Helper.app")):
+    with isolated_build_registration(DERIVED, "LocalDevelopment", ("Blocks.app", "Blocks Dev.app", "blocksHelper.app")):
         for scheme in ("Blocks", "BlocksCLI", "BlocksSelectionHelper"):
             run(["xcodebuild", "-project", str(ROOT / "apps/Blocks/Blocks.xcodeproj"),
                  "-scheme", scheme, "-configuration", "LocalDevelopment", "-destination",
@@ -90,6 +90,42 @@ def running_local_processes() -> list[int]:
         if len(fields) == 2 and any(fields[1].startswith(str(path) + "/") for path in (DESTINATION, LEGACY_DESTINATION)):
             found.append(int(fields[0]))
     return found
+
+
+def ensure_action_broker_unregistered() -> None:
+    """A sleeping SM job is unsafe to replace even when ps reports no binary.
+
+    This is deliberately read-only: only the authenticated application update
+    protocol can prove that the Broker has drained before unregistering it.
+    Ordinary application quit does not unregister the Broker.
+    """
+    label = "app.blocks.dev.action-broker"
+    for domain in (f"gui/{os.getuid()}", f"user/{os.getuid()}"):
+        result = subprocess.run(
+            ["/bin/launchctl", "print", f"{domain}/{label}"],
+            capture_output=True, text=True, timeout=10,
+            env={**os.environ, "LC_ALL": "C", "LANG": "C"},
+        )
+        if result.returncode == 0:
+            raise RuntimeError(
+                "The development Action Broker is still registered, even if it has no running process. "
+                "Refusing to replace its bundle or peers.json; no process was killed or service changed. "
+                "Wait for active CLI requests to finish, then turn OFF the main CLI integration switch "
+                "in Blocks Settings > Agent / CLI (not the individual module switches). Once it reports "
+                "disabled, quit Blocks and rerun this installer; turn the main switch on afterward. "
+                "Ordinary Quit alone does not unregister this service. If an earlier replacement "
+                "already broke identity verification, recover the previous bundle and its matching "
+                "peers.json before attempting authenticated recovery; do not kill a possibly busy Broker."
+            )
+        # Never confuse a missing GUI domain, permission failure, or unexpected
+        # launchctl error with proof that this particular job is absent.
+        domain_description = f"user gui: {os.getuid()}" if domain.startswith("gui/") else f"uid: {os.getuid()}"
+        missing = f'Could not find service "{label}" in domain for {domain_description}'
+        if result.returncode != 113 or missing not in result.stderr:
+            raise RuntimeError(
+                f"Unable to verify that the development Action Broker is unregistered in {domain}; "
+                "refusing replacement without changing any service."
+            )
 
 
 def update_plist(path: Path, change) -> None:
@@ -177,6 +213,7 @@ def install_development(products: Path) -> None:
 
 
 def _install_development_locked(products: Path) -> None:
+    ensure_action_broker_unregistered()
     if running_local_processes():
         raise RuntimeError("Quit Blocks and the previous Blocks Dev before replacing this local build; no process was killed.")
     if DESTINATION.exists() and LEGACY_DESTINATION.exists():
@@ -208,9 +245,9 @@ def _install_development_locked(products: Path) -> None:
     destination_identity = path_identity(DESTINATION)
     try:
         run(["/usr/bin/ditto", str(products / "Blocks.app"), str(staged)])
-        helper = staged / "Contents/Helpers/Blocks Selection Helper.app"
+        helper = staged / "Contents/Helpers/blocksHelper.app"
         helper.parent.mkdir(parents=True, exist_ok=True)
-        run(["/usr/bin/ditto", str(products / "Blocks Selection Helper.app"), str(helper)])
+        run(["/usr/bin/ditto", str(products / "blocksHelper.app"), str(helper)])
         cli = staged / "Contents/Resources/CLI/blocks"
         cli.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(products / "blocks", cli)
@@ -218,7 +255,7 @@ def _install_development_locked(products: Path) -> None:
         wrapper.write_text("#!/bin/sh\nexec " + shlex.quote(str(DESTINATION / "Contents/Resources/CLI/blocks")) + ' "$@"\n')
         wrapper.chmod(0o755)
         rename_display(staged, "Blocks")
-        rename_display(helper, "Blocks Helper")
+        rename_display(helper, "blocksHelper")
         # A distinct build receipt makes repeated installations distinguishable
         # without changing product identity or pretending an unchanged code hash
         # proves permission retention across an upgrade.
@@ -252,7 +289,7 @@ def _install_development_locked(products: Path) -> None:
         for role, relative in {
             "app": "Contents/MacOS/Blocks", "cli": "Contents/Resources/CLI/blocks",
             "broker": "Contents/MacOS/BlocksActionBroker",
-            "helper": "Contents/Helpers/Blocks Selection Helper.app/Contents/MacOS/Blocks Selection Helper",
+            "helper": "Contents/Helpers/blocksHelper.app/Contents/MacOS/blocksHelper",
         }.items():
             identity = signature(staged / relative)
             expected_identifier = {
@@ -273,6 +310,7 @@ def _install_development_locked(products: Path) -> None:
             if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
                 raise RuntimeError("Existing development manifest is not a private owned regular file.")
             shutil.copy2(MANIFEST, previous_manifest)
+        ensure_action_broker_unregistered()
         if running_local_processes():
             raise RuntimeError("Blocks started during staging; refusing replacement.")
         if path_identity(DESTINATION) != destination_identity or path_identity(MANIFEST) != manifest_identity or (existing is not None and path_identity(existing) != original_identity):
@@ -331,7 +369,7 @@ def test() -> None:
     sys.path.insert(0, str(ROOT / "tools/verification"))
     from verification_build_helpers import isolated_build_registration
     derived = DERIVED / "Tests"
-    with isolated_build_registration(derived, "DebugTesting", ("Blocks.app", "Blocks Selection Helper.app")):
+    with isolated_build_registration(derived, "DebugTesting", ("Blocks.app", "blocksHelper.app")):
         result = run_isolated_tests(derived)
     print("PASS: isolated XCTest completed; " + json.dumps(result.get("process_cleanup", {}), sort_keys=True))
 

@@ -720,7 +720,7 @@ struct TranslationFloatingPanelView: View {
             LazyVStack(spacing: BlocksVisualTokens.Spacing.sm) {
                 ForEach(
                     Array(resultStates.enumerated()),
-                    id: \.element.id
+                    id: \.element.serviceID
                 ) { index, resultState in
                     TranslationPanelResultStateReader(
                         state: resultState

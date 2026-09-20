@@ -65,7 +65,7 @@ sign "$sparkle_framework"
 # main bundle. Do not re-sign it with the main app's entitlements: retain its
 # narrow, shared-Keychain entitlement contract and let the outer signature
 # seal this nested code object.
-helper_bundle="$app_bundle/Contents/Helpers/Blocks Selection Helper.app"
+helper_bundle="$app_bundle/Contents/Helpers/blocksHelper.app"
 [[ -d "$helper_bundle" ]] || { echo "error: embedded Selection Helper is missing before main-app signing." >&2; exit 1; }
 codesign --verify --deep --strict --verbose=2 "$helper_bundle"
 sign "$app_bundle" \

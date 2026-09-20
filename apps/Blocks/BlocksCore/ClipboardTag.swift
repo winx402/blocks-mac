@@ -1,5 +1,23 @@
 import Foundation
 
+public enum ClipboardTagColorPalette {
+    public static let tokens = ["blue", "green", "purple", "orange", "pink", "gray", "cyan", "mint"]
+
+    public static func token(at index: Int) -> String {
+        tokens[index % tokens.count]
+    }
+
+    public static func isValidPaletteToken(_ token: String) -> Bool {
+        tokens.contains(token)
+    }
+
+    /// Uses each available palette token before falling back to the stable
+    /// creation-order rotation used by the settings UI.
+    public static func nextToken(usedTokens: Set<String>, tagCount: Int) -> String {
+        tokens.first(where: { !usedTokens.contains($0) }) ?? token(at: tagCount)
+    }
+}
+
 public enum ClipboardTagBuiltInKind: String, Codable, CaseIterable, Sendable {
     case none
     case favorite

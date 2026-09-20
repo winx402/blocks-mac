@@ -5,6 +5,22 @@ import XCTest
 @testable import BlocksCore
 
 final class ClipboardManagementTests: XCTestCase {
+    func testTagPaletteExhaustionRotatesAndExplicitColorIsPreserved() throws {
+        let fixture = try Fixture(); defer { fixture.close() }
+        let tags = ClipboardTagRepository(repository: fixture.repository)
+        _ = try tags.createTag(displayName: "Explicit", colorToken: "pink")
+        for index in 0..<12 {
+            let before = try tags.loadTags().filter { !$0.isFavorite && $0.isEnabled }
+            let used = Set(before.map(\.colorToken))
+            let palette = ["blue", "green", "purple", "orange", "pink", "gray", "cyan", "mint"]
+            let expected = palette.first { !used.contains($0) } ?? palette[before.count % palette.count]
+            let name = "Palette \(index)"
+            _ = try tags.createTag(displayName: name)
+            XCTAssertEqual(try tags.loadTags().first { $0.displayName == name }?.colorToken, expected)
+        }
+        XCTAssertEqual(try tags.loadTags().first { $0.displayName == "Explicit" }?.colorToken, "pink")
+    }
+
     func testVersionedDocumentRejectsUnknownFieldsWrongTypesAndKindsBeforeWriting() throws {
         let fixture = try Fixture(); defer { fixture.close() }
         for json in [
@@ -321,6 +337,61 @@ final class ClipboardManagementTests: XCTestCase {
         let reexported = try XCTUnwrap(target.repository.executeManagement(.init(operation: "export", all: true)).document)
         XCTAssertEqual(reexported.records.first?.pinboard, "A")
         XCTAssertEqual(reexported.records.first?.isFavorite, false)
+    }
+
+    func testImportAndTagAddUseRotatingDefaultColorsWithoutChangingExistingTags() throws {
+        let fixture = try Fixture(); defer { fixture.close() }
+        let imported = try fixture.repository.executeManagement(.init(
+            operation: "import",
+            document: .init(records: [
+                .init(kind: "text", text: "palette fixture", tags: ["Alpha", "Beta"])
+            ])
+        ))
+        let recordID = try XCTUnwrap(imported.records.first?.id)
+        XCTAssertTrue(imported.warnings.contains("unprotected_imports_follow_normal_retention"))
+        let tags = ClipboardTagRepository(repository: fixture.repository)
+        func color(_ name: String) throws -> String {
+            try XCTUnwrap(try tags.loadTags().first { $0.displayName == name }).colorToken
+        }
+        XCTAssertEqual(try color("Alpha"), "blue")
+        XCTAssertEqual(try color("Beta"), "green")
+
+        _ = try fixture.repository.executeManagement(.init(
+            operation: "tag_add",
+            recordIDs: [recordID],
+            tag: "Gamma"
+        ))
+        XCTAssertEqual(try color("Gamma"), "purple")
+
+        _ = try fixture.repository.executeManagement(.init(
+            operation: "tag_add",
+            recordIDs: [recordID],
+            tag: "Alpha"
+        ))
+        XCTAssertEqual(try color("Alpha"), "blue")
+    }
+
+    func testExplicitManagementDeleteStillRemovesTaggedAndGroupedRecord() throws {
+        let fixture = try Fixture(); defer { fixture.close() }
+        let imported = try fixture.repository.executeManagement(.init(
+            operation: "import",
+            document: .init(records: [
+                .init(kind: "text", text: "explicit delete", pinboard: "A", tags: ["Keep"])
+            ])
+        ))
+        let recordID = try XCTUnwrap(imported.records.first?.id)
+        let preview = try fixture.repository.executeManagement(.init(
+            operation: "delete",
+            recordIDs: [recordID]
+        ))
+        XCTAssertTrue(preview.dryRun)
+        let deleted = try fixture.repository.executeManagement(.init(
+            operation: "delete",
+            recordIDs: [recordID],
+            confirmationToken: preview.confirmationToken
+        ))
+        XCTAssertEqual(deleted.mutatedRecordIDs, [recordID])
+        XCTAssertNil(try fixture.repository.loadRecord(recordID: recordID))
     }
 
     private func assertCode(_ code: String, file: StaticString = #filePath, line: UInt = #line, _ body: () throws -> Void) {

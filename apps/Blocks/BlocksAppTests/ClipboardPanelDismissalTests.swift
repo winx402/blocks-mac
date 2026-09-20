@@ -66,7 +66,10 @@ final class ClipboardPanelDismissalTests: XCTestCase {
         let favorite = BlocksCompactIconButton(systemImage: "star", label: "Favorite", emphasis: .accent,
                                               tint: Color.yellow.opacity(0.95), action: {})
         XCTAssertNil(ordinary.tint)
+        XCTAssertFalse(ordinary.isBorderless)
         XCTAssertEqual(favorite.tint, Color.yellow.opacity(0.95))
+        let borderless = BlocksCompactIconButton(systemImage: "star", label: "Favorite", isBorderless: true, action: {})
+        XCTAssertTrue(borderless.isBorderless)
     }
 
     private func present(_ presenter: ClipboardHistoryPanelPresenter,

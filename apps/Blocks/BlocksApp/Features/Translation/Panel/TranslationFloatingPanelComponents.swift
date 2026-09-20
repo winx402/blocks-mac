@@ -185,6 +185,11 @@ final class TranslationServiceOrderDragCoordinator:
         target = nil
     }
 
+    func endSession(generation expected: UInt64) {
+        guard expected == generation else { return }
+        endSession()
+    }
+
     func updateTarget(_ proposedTarget: TranslationResultOrderDragTarget?) {
         guard let proposedTarget else {
             target = nil
@@ -341,6 +346,7 @@ struct TranslationServiceOrderNativeDragSource: NSViewRepresentable {
         var onMoveDown: (() -> Void)?
         private var mouseDownLocation: NSPoint?
         private var draggingSessionStarted = false
+        private var dragGeneration: UInt64?
 
         override init(frame frameRect: NSRect) {
             super.init(frame: frameRect)
@@ -473,7 +479,7 @@ struct TranslationServiceOrderNativeDragSource: NSViewRepresentable {
                 contents: preview
             )
             draggingSessionStarted = true
-            dragCoordinator.begin(serviceID: serviceID)
+            dragGeneration = dragCoordinator.begin(serviceID: serviceID)
             translationOrderDragLogger.debug(
                 "source began service=\(self.serviceID, privacy: .public)"
             )
@@ -501,7 +507,10 @@ struct TranslationServiceOrderNativeDragSource: NSViewRepresentable {
             translationOrderDragLogger.debug(
                 "source ended service=\(self.serviceID, privacy: .public) point=\(NSStringFromPoint(screenPoint), privacy: .public) operation=\(operation.rawValue)"
             )
-            dragCoordinator?.endSession()
+            if let dragGeneration {
+                dragCoordinator?.endSession(generation: dragGeneration)
+            }
+            dragGeneration = nil
         }
 
         override func draggingEntered(

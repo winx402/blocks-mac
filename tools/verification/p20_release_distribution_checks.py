@@ -70,7 +70,7 @@ def verify_selection_helper_scheme(project: str, build_script: str) -> None:
         raise AssertionError(f"shared BlocksSelectionHelper scheme is invalid XML: {error}") from error
 
     target_id = "T27X00000000000000000001"
-    target_name = "BlocksSelectionHelper"
+    target_name = "blocksHelper"
     target_match = re.search(
         rf"{re.escape(target_id)} /\* {re.escape(target_name)} \*/ = \{{\n\s*isa = PBXNativeTarget;",
         project,
@@ -229,7 +229,7 @@ def verify_unexpected_bundle_members_are_rejected() -> None:
             if not include_helper:
                 return
             helper_info = (
-                contents / "Helpers/Blocks Selection Helper.app/Contents/Info.plist"
+                contents / "Helpers/blocksHelper.app/Contents/Info.plist"
             )
             helper_info.write_bytes(
                 plistlib.dumps(
@@ -292,7 +292,7 @@ def verify_unexpected_bundle_members_are_rejected() -> None:
         (shims / "file").write_text(
             "#!/usr/bin/env bash\n"
             "case \"$2\" in\n"
-            "  */Contents/MacOS/Blocks|*/Contents/MacOS/BlocksClipboardBroker|*/BlocksPluginRunner.xpc/Contents/MacOS/BlocksPluginRunner|*/Contents/MacOS/BlocksActionBroker|*/Contents/Resources/CLI/blocks|*/Contents/Helpers/Blocks\\ Selection\\ Helper.app/Contents/MacOS/Blocks\\ Selection\\ Helper|*/Sparkle.framework/Versions/B/Sparkle|*/Sparkle.framework/Versions/B/Autoupdate|*/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater|*/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer|*/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc/Contents/MacOS/Downloader|*Unexpected.framework/*) echo Mach-O ;;\n"
+            "  */Contents/MacOS/Blocks|*/Contents/MacOS/BlocksClipboardBroker|*/BlocksPluginRunner.xpc/Contents/MacOS/BlocksPluginRunner|*/Contents/MacOS/BlocksActionBroker|*/Contents/Resources/CLI/blocks|*/Contents/Helpers/blocksHelper.app/Contents/MacOS/blocksHelper|*/Sparkle.framework/Versions/B/Sparkle|*/Sparkle.framework/Versions/B/Autoupdate|*/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater|*/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer|*/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc/Contents/MacOS/Downloader|*Unexpected.framework/*) echo Mach-O ;;\n"
             "  *) echo data ;;\n"
             "esac\n",
             encoding="utf-8",
@@ -417,7 +417,7 @@ def verify_unexpected_bundle_members_are_rejected() -> None:
             "MacOS/BlocksActionBroker",
             "Resources/CLI/blocks",
             "Library/LaunchAgents/app.blocks.action-broker.plist",
-            "Helpers/Blocks Selection Helper.app/Contents/MacOS/Blocks Selection Helper",
+            "Helpers/blocksHelper.app/Contents/MacOS/blocksHelper",
             "Frameworks/Sparkle.framework/Versions/B/Sparkle",
             "Frameworks/Sparkle.framework/Versions/B/Autoupdate",
             "Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater",
@@ -455,7 +455,7 @@ def verify_unexpected_bundle_members_are_rejected() -> None:
         expected_direct_architecture_paths = expected_architecture_paths + [
             str(contents / "MacOS/BlocksActionBroker"),
             str(contents / "Resources/CLI/blocks"),
-            str(contents / "Helpers/Blocks Selection Helper.app/Contents/MacOS/Blocks Selection Helper"),
+            str(contents / "Helpers/blocksHelper.app/Contents/MacOS/blocksHelper"),
             str(contents / "Frameworks/Sparkle.framework/Versions/B/Sparkle"),
             str(contents / "Frameworks/Sparkle.framework/Versions/B/Autoupdate"),
             str(contents / "Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater"),
@@ -702,7 +702,7 @@ def verify_direct_signature_audit_is_hermetic() -> None:
             "MacOS/BlocksActionBroker",
             "Resources/CLI/blocks",
             "Library/LaunchAgents/app.blocks.action-broker.plist",
-            "Helpers/Blocks Selection Helper.app/Contents/MacOS/Blocks Selection Helper",
+            "Helpers/blocksHelper.app/Contents/MacOS/blocksHelper",
             "Frameworks/Sparkle.framework/Versions/B/Sparkle",
             "Frameworks/Sparkle.framework/Versions/B/Autoupdate",
             "Frameworks/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater",
@@ -712,7 +712,7 @@ def verify_direct_signature_audit_is_hermetic() -> None:
             path = contents / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.touch()
-        helper_info = contents / "Helpers/Blocks Selection Helper.app/Contents/Info.plist"
+        helper_info = contents / "Helpers/blocksHelper.app/Contents/Info.plist"
         helper_info.write_bytes(plistlib.dumps({
             "LSMinimumSystemVersion": "14.0",
             "BLOCKS_DISTRIBUTION_CHANNEL": "direct-beta",
@@ -722,7 +722,7 @@ def verify_direct_signature_audit_is_hermetic() -> None:
             "CFBundleVersion": "1",
             "BLOCKS_RELEASE_NAME": "0.1.0-beta.1",
         }))
-        (contents / "Helpers/Blocks Selection Helper.app/Contents/MacOS/Blocks Selection Helper").chmod(0o755)
+        (contents / "Helpers/blocksHelper.app/Contents/MacOS/blocksHelper").chmod(0o755)
         return app
 
     def run_fixture(
@@ -891,7 +891,7 @@ def verify_direct_signature_audit_is_hermetic() -> None:
                 "#!/usr/bin/env bash\n"
                 "[[ \"$1\" == -b ]] || exit 2\n"
                 "case \"$2\" in\n"
-                "  */Contents/MacOS/Blocks|*/Contents/MacOS/BlocksClipboardBroker|*/BlocksPluginRunner.xpc/Contents/MacOS/BlocksPluginRunner|*/Contents/MacOS/BlocksActionBroker|*/Contents/Resources/CLI/blocks|*/Contents/Helpers/Blocks\\ Selection\\ Helper.app/Contents/MacOS/Blocks\\ Selection\\ Helper|*/Sparkle.framework/Versions/B/Sparkle|*/Sparkle.framework/Versions/B/Autoupdate|*/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater|*/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer|*/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc/Contents/MacOS/Downloader) printf '%s\\n' Mach-O ;;\n"
+                "  */Contents/MacOS/Blocks|*/Contents/MacOS/BlocksClipboardBroker|*/BlocksPluginRunner.xpc/Contents/MacOS/BlocksPluginRunner|*/Contents/MacOS/BlocksActionBroker|*/Contents/Resources/CLI/blocks|*/Contents/Helpers/blocksHelper.app/Contents/MacOS/blocksHelper|*/Sparkle.framework/Versions/B/Sparkle|*/Sparkle.framework/Versions/B/Autoupdate|*/Sparkle.framework/Versions/B/Updater.app/Contents/MacOS/Updater|*/Sparkle.framework/Versions/B/XPCServices/Installer.xpc/Contents/MacOS/Installer|*/Sparkle.framework/Versions/B/XPCServices/Downloader.xpc/Contents/MacOS/Downloader) printf '%s\\n' Mach-O ;;\n"
                 "  *) printf '%s\\n' data ;;\n"
                 "esac\n",
                 encoding="utf-8",
@@ -901,7 +901,7 @@ def verify_direct_signature_audit_is_hermetic() -> None:
             newline = chr(10)
             codesign_source = codesign_source.replace(
                 "    *.app) printf '%s' main ;" + newline,
-                "    */Helpers/Blocks\\ Selection\\ Helper.app) printf '%s' helper ;" + newline +
+                "    */Helpers/blocksHelper.app) printf '%s' helper ;" + newline +
                 "    */Frameworks/Sparkle.framework) printf '%s' sparkle-framework ;" + newline +
                 "    */Sparkle.framework/Versions/B/Updater.app) printf '%s' sparkle-updater ;" + newline +
                 "    */Sparkle.framework/Versions/B/XPCServices/Installer.xpc) printf '%s' sparkle-installer ;" + newline +
@@ -913,7 +913,7 @@ def verify_direct_signature_audit_is_hermetic() -> None:
                 "role() {" + newline,
                 "role() {" + newline
                 + "  case \"$1\" in" + newline
-                + "    */Helpers/Blocks\\ Selection\\ Helper.app) printf '%s' helper; return ;;" + newline
+                + "    */Helpers/blocksHelper.app) printf '%s' helper; return ;;" + newline
                 + "    */Frameworks/Sparkle.framework) printf '%s' sparkle-framework; return ;;" + newline
                 + "    */Sparkle.framework/Versions/B/Updater.app) printf '%s' sparkle-updater; return ;;" + newline
                 + "    */Sparkle.framework/Versions/B/XPCServices/Installer.xpc) printf '%s' sparkle-installer; return ;;" + newline
@@ -1572,9 +1572,9 @@ def verify_selection_helper_signature_audit_is_hermetic() -> None:
         path.chmod(0o755)
 
     def write_bundle(temporary_root: Path, nested_mach_o: bool) -> Path:
-        app = temporary_root / "Blocks Selection Helper.app"
+        app = temporary_root / "blocksHelper.app"
         contents = app / "Contents"
-        executable = contents / "MacOS/Blocks Selection Helper"
+        executable = contents / "MacOS/blocksHelper"
         executable.parent.mkdir(parents=True)
         executable.touch()
         executable.chmod(0o755)
@@ -1622,7 +1622,7 @@ def verify_selection_helper_signature_audit_is_hermetic() -> None:
                 "#!/usr/bin/env bash\n"
                 "[[ \"$1\" == -b ]] || exit 2\n"
                 "case \"$2\" in\n"
-                "  */Contents/MacOS/Blocks\\ Selection\\ Helper|*/Contents/Resources/InjectedMachO) printf '%s\\n' Mach-O ;;\n"
+                "  */Contents/MacOS/blocksHelper|*/Contents/Resources/InjectedMachO) printf '%s\\n' Mach-O ;;\n"
                 "  *) printf '%s\\n' data ;;\n"
                 "esac\n",
             )
@@ -1854,9 +1854,9 @@ def verify_selection_helper_bundle_members_are_rejected() -> None:
     audit_script = ROOT / "script/release/audit_selection_helper_bundle.sh"
     with tempfile.TemporaryDirectory() as temporary_directory:
         temporary_root = Path(temporary_directory)
-        app = temporary_root / "Blocks Selection Helper.app"
+        app = temporary_root / "blocksHelper.app"
         contents = app / "Contents"
-        executable = contents / "MacOS/Blocks Selection Helper"
+        executable = contents / "MacOS/blocksHelper"
         executable.parent.mkdir(parents=True)
         executable.touch()
         executable.chmod(0o755)
@@ -1873,13 +1873,13 @@ def verify_selection_helper_bundle_members_are_rejected() -> None:
         shims.mkdir()
         (shims / "lipo").write_text(
             "#!/usr/bin/env bash\n"
-            "[[ \"$2\" == *\"Blocks Selection Helper\" ]] && echo arm64\n",
+            "[[ \"$2\" == *\"blocksHelper\" ]] && echo arm64\n",
             encoding="utf-8",
         )
         (shims / "file").write_text(
             "#!/usr/bin/env bash\n"
             "case \"$2\" in\n"
-            "  */Contents/MacOS/Blocks\\ Selection\\ Helper|*InjectedMachO) echo Mach-O ;;\n"
+            "  */Contents/MacOS/blocksHelper|*InjectedMachO) echo Mach-O ;;\n"
             "  *) echo data ;;\n"
             "esac\n",
             encoding="utf-8",
@@ -1960,7 +1960,7 @@ def verify_selection_helper_release_identity() -> None:
         )
         profile.write_text(profile_text)
         app = root / "Helper.app"
-        executable = app / "Contents/MacOS/Blocks Selection Helper"
+        executable = app / "Contents/MacOS/blocksHelper"
         executable.parent.mkdir(parents=True)
         executable.touch()
         executable.chmod(0o755)

@@ -143,9 +143,9 @@
     },
     "selectionHelper.title" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Blocks Selection Helper" } },
-        "ja" : { "stringUnit" : { "state" : "translated", "value" : "Blocks 選択翻訳アシスタント" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "积木工具划词翻译助手" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "blocksHelper" } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "blocksHelper" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "blocksHelper" } }
       }
     }
   },
