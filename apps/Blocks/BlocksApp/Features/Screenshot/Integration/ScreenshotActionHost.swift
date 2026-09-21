@@ -170,6 +170,9 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
         moduleAccess: moduleAccess
     )
     private var brokerConnection: NSXPCConnection?
+    #if BLOCKS_LOCAL_DEVELOPMENT
+    private let localActionServer = LocalActionTransport.Server()
+    #endif
     private var activeRequestID: ActionRequestID?
     private let connectionLifecycle: ActionBrokerHostConnectionLifecycle
 
@@ -184,9 +187,13 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
     }
 
     @MainActor func resumeAfterCancelledApplicationUpdate() {
+        #if BLOCKS_LOCAL_DEVELOPMENT
+        exportedService.resumeAfterCancelledApplicationUpdate()
+        #else
         if connectionLifecycle.requestServiceResume() {
             exportedService.resumeAfterCancelledApplicationUpdate()
         }
+        #endif
     }
 
     @MainActor func prepareBrokerForApplicationUpdate(token: String) async throws -> Int32 {
@@ -280,12 +287,54 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
         self.connectionLifecycle = connectionLifecycle
         super.init()
         listener.delegate = self
+        #if BLOCKS_LOCAL_DEVELOPMENT
+        exportedService.setIntegrationEnabled(false)
+        _ = startLocalActionServer()
+        #endif
+    }
+
+    #if BLOCKS_LOCAL_DEVELOPMENT
+    @MainActor private func startLocalActionServer() -> Bool {
+        let service = exportedService
+        return localActionServer.start { operation, data, outputFile, reply in
+            switch operation {
+            case .probe: reply(Data("ready".utf8))
+            case .list: service.listActions(withReply: reply)
+            case .submit: service.execute(data, outputFile: outputFile, withReply: reply)
+            case .cancel:
+                guard let requestID = String(data: data, encoding: .utf8), UUID(uuidString: requestID) != nil else {
+                    reply(Data("false".utf8)); return
+                }
+                service.cancel(requestID) { cancelled in
+                    reply(Data((cancelled ? "true" : "false").utf8))
+                }
+            }
+        }
+    }
+    #endif
+
+    deinit {
+        #if BLOCKS_LOCAL_DEVELOPMENT
+        localActionServer.stop()
+        #endif
     }
 
     @MainActor func start(
         completion: @escaping (Result<Void, Error>) -> Void,
         onInvalidated: @escaping () -> Void
     ) {
+        #if BLOCKS_LOCAL_DEVELOPMENT
+        exportedService.setIntegrationEnabled(true)
+        let started = startLocalActionServer()
+        if started {
+            exportedService.resumeAfterCancelledApplicationUpdate()
+            completion(.success(()))
+        } else {
+            exportedService.setIntegrationEnabled(false)
+            completion(.failure(ScreenshotActionHostError.brokerProxyUnavailable))
+        }
+        return
+        #else
         exportedService.setIntegrationEnabled(true)
         let previousConnection = brokerConnection
         let connectionStart = connectionLifecycle.beginConnection()
@@ -359,11 +408,14 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
                     : completion(.failure(ScreenshotActionHostError.registrationRejected(message)))
             }
         }
+        #endif
     }
 
     @MainActor func stop() {
         for module in CLIModule.allCases { revokeModule(module) }
         exportedService.setIntegrationEnabled(false)
+        // The private development endpoint remains bound while disabled, so
+        // authenticated clients receive integration_disabled instead of hanging.
         let shouldSuspendListener = connectionLifecycle.stop()
         brokerConnection?.invalidate()
         brokerConnection = nil

@@ -41,6 +41,18 @@ struct ActionBrokerEmbeddedServiceValidator {
 
 @MainActor
 struct ActionBrokerServiceControl {
+    static let appOwnedPreferenceKey = "blocks.dev.cli.appOwnedEnabled"
+
+    static func appOwned(defaults: UserDefaults = .standard, inheritedIntent: Bool) -> Self {
+        if defaults.object(forKey: appOwnedPreferenceKey) == nil {
+            defaults.set(inheritedIntent, forKey: appOwnedPreferenceKey)
+        }
+        return Self(
+            status: { defaults.bool(forKey: appOwnedPreferenceKey) ? .enabled : .notRegistered },
+            register: { defaults.set(true, forKey: appOwnedPreferenceKey) },
+            unregister: { defaults.set(false, forKey: appOwnedPreferenceKey) }
+        )
+    }
     let status: () -> SMAppService.Status
     let register: () throws -> Void
     let unregister: () throws -> Void
@@ -120,6 +132,11 @@ final class ActionBrokerServiceManager: ObservableObject {
     }
 
     private let service: ActionBrokerServiceControl
+    let usesAppOwnedService: Bool
+    private let legacyServiceStatus: () -> SMAppService.Status
+    var hasLegacyServiceRegistration: Bool {
+        usesAppOwnedService && (legacyServiceStatus() == .enabled || legacyServiceStatus() == .requiresApproval)
+    }
     private let host: any ActionBrokerHosting
     private let embeddedServiceAvailable: Bool
     private let retryPolicy: ActionBrokerRetryPolicy
@@ -157,6 +174,9 @@ final class ActionBrokerServiceManager: ObservableObject {
     }
 
     func prepareForApplicationUpdate(stopService: Bool = true) async throws {
+        // Migrating an old registered LaunchAgent still needs an authenticated
+        // drain. A socket timeout or missing PID is not authority to kill it.
+        if stopService, hasLegacyServiceRegistration { throw ActionBrokerUpdateError.legacyRegistrationRequiresMigration }
         // The update coordinator must not resume or consume an explicit
         // disable transaction that is currently awaiting the remote peer.
         if stopService, serviceChangeTask != nil { throw ActionBrokerUpdateError.invalidRecoveryState }
@@ -169,6 +189,11 @@ final class ActionBrokerServiceManager: ObservableObject {
         applicationUpdatePaused = true
         try await host.pauseAndDrainForApplicationUpdate()
         guard stopService else { return }
+        if usesAppOwnedService {
+            cancelReconnectAndStopHost()
+            isServiceRegistered = false
+            return
+        }
         guard updateRecoveryStorageAvailable else { throw ActionBrokerUpdateError.invalidRecoveryState }
         guard try updateRecoveryJournal.load() == nil else { throw ActionBrokerUpdateError.invalidRecoveryState }
         guard service.status() == .enabled else {
@@ -217,10 +242,22 @@ final class ActionBrokerServiceManager: ObservableObject {
         let moduleAccess = CLIModuleAccessPolicy()
         self.moduleAccess = moduleAccess
         enabledModules = Set(CLIModule.allCases.filter(moduleAccess.isEnabled))
-        service = ActionBrokerServiceControl(
-            service: SMAppService.agent(plistName: BlocksActionBrokerXPC.launchAgentPlistName)
-        )
+        let legacy = SMAppService.agent(plistName: BlocksActionBrokerXPC.launchAgentPlistName)
+        #if BLOCKS_LOCAL_DEVELOPMENT
+        usesAppOwnedService = true
+        legacyServiceStatus = { legacy.status }
+        let storageForIntent = try? StorageEnvironment.appSupport()
+        let oldJournal = ActionBrokerUpdateRecoveryJournal(url: storageForIntent?.rootDirectory
+            .appendingPathComponent("ActionBrokerUpdateRecovery.json"))
+        service = .appOwned(inheritedIntent: legacy.status == .enabled || legacy.status == .requiresApproval
+            || (try? oldJournal.load()) != nil)
+        embeddedServiceAvailable = true
+        #else
+        usesAppOwnedService = false
+        legacyServiceStatus = { .notRegistered }
+        service = ActionBrokerServiceControl(service: legacy)
         embeddedServiceAvailable = ActionBrokerEmbeddedServiceValidator().isAvailable()
+        #endif
         host = ScreenshotActionHost(
             screenshotStore: screenshotStore,
             historyService: historyService,
@@ -251,7 +288,9 @@ final class ActionBrokerServiceManager: ObservableObject {
         updateRecoveryJournal: ActionBrokerUpdateRecoveryJournal = .init(),
         runningBrokerProcessIDs: @escaping () throws -> [Int32] = { [] },
         processHasExited: @escaping (Int32) -> Bool = { _ in true },
-        moduleAccess: CLIModuleAccessPolicy? = nil
+        moduleAccess: CLIModuleAccessPolicy? = nil,
+        usesAppOwnedService: Bool = false,
+        legacyServiceStatus: @escaping () -> SMAppService.Status = { .notRegistered }
     ) {
         // Isolated tests may inject their own policy through the additional
         // initializer argument; no module defaults are written by this path.
@@ -259,6 +298,8 @@ final class ActionBrokerServiceManager: ObservableObject {
         self.moduleAccess = policy
         enabledModules = Set(CLIModule.allCases.filter(policy.isEnabled))
         self.service = service
+        self.usesAppOwnedService = usesAppOwnedService
+        self.legacyServiceStatus = legacyServiceStatus
         self.host = host
         self.embeddedServiceAvailable = embeddedServiceAvailable
         self.retryPolicy = retryPolicy
@@ -276,9 +317,17 @@ final class ActionBrokerServiceManager: ObservableObject {
 
     /// Temporary update unregistration must not turn the user's enabled
     /// preference off. The journal preserves that intent across app relaunch.
-    var isEnabled: Bool { isServiceRegistered || updateRecoveryTicket != nil }
+    var isEnabled: Bool {
+        usesAppOwnedService ? service.status() == .enabled : isServiceRegistered || updateRecoveryTicket != nil
+    }
 
     private func beginStartupUpdateRecoveryIfNeeded() -> Bool {
+        if usesAppOwnedService {
+            // Intent was imported once into the local preference. Never resume
+            // an obsolete Broker just to bring up the new in-process endpoint.
+            if !hasLegacyServiceRegistration { try? updateRecoveryJournal.clear() }
+            return false
+        }
         do {
             guard let ticket = try updateRecoveryJournal.load() else { return false }
             updateRecoveryTicket = ticket
@@ -298,6 +347,16 @@ final class ActionBrokerServiceManager: ObservableObject {
 
     private func restoreServiceAfterUpdate() async {
         guard !isQuitting else { return }
+        if usesAppOwnedService {
+            applicationUpdatePaused = false
+            applicationManagementGate.resume()
+            // A busy drain has not stopped the host. Stopping it here would
+            // revoke the very work that made disabling unsafe. If preparation
+            // did stop it, refresh() observes hostIsActive == false and restarts.
+            host.resumeAfterCancelledApplicationUpdate()
+            refresh()
+            return
+        }
         let generation = recoveryGeneration
         do {
             let recoveredTicket: ActionBrokerUpdateRecoveryTicket?
@@ -390,6 +449,16 @@ final class ActionBrokerServiceManager: ObservableObject {
             try await prepareServiceRemoval()
             guard !isQuitting, generation == recoveryGeneration else { return }
             try Task.checkCancellation()
+            if usesAppOwnedService {
+                try await service.unregisterAndWait()
+                cancelReconnectAndStopHost()
+                isServiceRegistered = false
+                applicationUpdatePaused = false
+                applicationManagementGate.resume()
+                host.resumeAfterCancelledApplicationUpdate()
+                state = .disabled
+                return
+            }
             if service.status() == .requiresApproval {
                 // Cancelling a pending registration is an explicit user action.
                 // It has no runnable job, but a lingering old binary still makes

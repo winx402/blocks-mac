@@ -16,7 +16,6 @@ enum ClipboardFilterBarLayout {
     static let filterHitHeight: CGFloat = 34
     static let filterHitHorizontalPadding: CGFloat = 2
     static let tagDropIndicatorHitWidth: CGFloat = 14
-    static let tagBlankCreateTargetMinWidth: CGFloat = 120
     static let tagDragActivationDistance: CGFloat = 3
 
     static func filterGroupFixedWidth(for group: ClipboardFilterGroup) -> CGFloat {
@@ -47,5 +46,35 @@ enum ClipboardFilterBarLayout {
     static func sideFilterGroupFixedWidth(for group: ClipboardFilterGroup, showsIcon: Bool) -> CGFloat {
         filterGroupFixedWidth(for: group)
             - (showsIcon ? 0 : islandIconSize + islandContentSpacing)
+    }
+}
+
+enum ClipboardTagCreateTargetViewportLayout {
+    /// Returns the unoccupied portion of a tag filter viewport. This target is
+    /// deliberately an overlay rather than scroll content: adding a flexible
+    /// empty view to the chip HStack makes that empty space horizontally
+    /// scrollable once the chips overflow.
+    static func frame(
+        viewportWidth: CGFloat,
+        scrollContentWidth: CGFloat,
+        tagChipsTrailingX: CGFloat
+    ) -> CGRect? {
+        guard viewportWidth.isFinite,
+              scrollContentWidth.isFinite,
+              tagChipsTrailingX.isFinite,
+              viewportWidth > 0,
+              scrollContentWidth > 0,
+              scrollContentWidth <= viewportWidth,
+              tagChipsTrailingX > 0,
+              tagChipsTrailingX < viewportWidth else {
+            return nil
+        }
+
+        return CGRect(
+            x: tagChipsTrailingX,
+            y: 0,
+            width: viewportWidth - tagChipsTrailingX,
+            height: ClipboardFilterBarLayout.chipMinHeight
+        )
     }
 }

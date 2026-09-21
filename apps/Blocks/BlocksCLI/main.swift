@@ -3,6 +3,9 @@ import Darwin
 import Dispatch
 import Foundation
 import Security
+#if BLOCKS_LOCAL_DEVELOPMENT
+import AppKit
+#endif
 
 private final class LocalBrokerProbe: @unchecked Sendable {
     let ready = DispatchSemaphore(value: 0)
@@ -107,6 +110,87 @@ struct ActionListOutput: Codable {
     let actions: [ActionDescriptor]
 }
 
+#if BLOCKS_LOCAL_DEVELOPMENT
+/// The source-installed CLI never starts a LaunchAgent.  It first probes the
+/// authenticated App socket so a submit has exactly one possible delivery.
+/// Only an unavailable preflight can be retried after a verified App launch;
+/// an action request is never replayed.
+private func prepareLocalActionHost() throws {
+    do {
+        _ = try LocalActionTransport.request(operation: .probe, timeout: 2)
+        return
+    } catch let error as LocalActionTransport.Error {
+        guard case .unavailable = error else { throw localTransportError(error) }
+    }
+
+    guard launchVerifiedLocalAppIfNeeded() else {
+        throw BlocksCLITransportError.localAppUnavailable
+    }
+
+    for _ in 0..<20 {
+        Thread.sleep(forTimeInterval: 0.1)
+        do {
+            _ = try LocalActionTransport.request(operation: .probe, timeout: 1)
+            return
+        } catch let error as LocalActionTransport.Error {
+            guard case .unavailable = error else { throw localTransportError(error) }
+        }
+    }
+    throw BlocksCLITransportError.localAppUnavailable
+}
+
+/// `open` is deliberately restricted to the manifest-pinned App executable.
+/// If that evidence is absent, the CLI asks the user to open Blocks instead of
+/// choosing an application by bundle identifier or a guessed path.
+private func launchVerifiedLocalAppIfNeeded() -> Bool {
+    guard let home = getpwuid(getuid())?.pointee.pw_dir else { return false }
+    let appURL = URL(fileURLWithPath: String(cString: home), isDirectory: true)
+        .appendingPathComponent("Applications/Blocks.app", isDirectory: true)
+    let executableURL = appURL.appendingPathComponent("Contents/MacOS/Blocks", isDirectory: false)
+    guard BlocksLocalBuildTrust.accepts(executableURL: executableURL, role: "app") else { return false }
+
+    let alreadyRunning = NSRunningApplication
+        .runningApplications(withBundleIdentifier: BlocksRuntimeIdentity.applicationBundleIdentifier)
+        .contains { $0.bundleURL?.standardizedFileURL == appURL.standardizedFileURL }
+    guard !alreadyRunning else { return true }
+
+    let launch = Process()
+    launch.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+    launch.arguments = ["-g", appURL.path]
+    do {
+        try launch.run()
+        launch.waitUntilExit()
+        return launch.terminationStatus == 0
+    } catch {
+        return false
+    }
+}
+
+private func localTransportError(_ error: LocalActionTransport.Error) -> BlocksCLITransportError {
+    switch error {
+    case .unavailable: return .localAppUnavailable
+    case .untrustedPeer: return .untrustedPeer
+    case .timedOut: return .localTimedOut
+    case .invalidFrame: return .localInvalidResponse
+    }
+}
+
+private func localTimeoutResponse<Payload: Codable, Result: Codable>(
+    request: ActionBrokerRequest<Payload>
+) -> ActionBrokerTerminalResponse<Result> {
+    .failed(
+        requestID: request.requestID,
+        actionID: request.actionID,
+        error: ActionBrokerError(
+            category: .timeout,
+            code: "broker_response_timeout",
+            message: "The action broker did not return a terminal response before the deadline.",
+            retryable: true
+        )
+    )
+}
+#endif
+
 private final class ActionListReply: @unchecked Sendable {
     let ready = DispatchSemaphore(value: 0)
     private let lock = NSLock()
@@ -134,6 +218,19 @@ private final class ActionListReply: @unchecked Sendable {
 }
 
 private func liveActionList() -> CLIActionListResponse {
+#if BLOCKS_LOCAL_DEVELOPMENT
+    do {
+        try prepareLocalActionHost()
+        let data = try LocalActionTransport.request(operation: .list)
+        return try JSONDecoder().decode(CLIActionListResponse.self, from: data)
+    } catch let error as BlocksCLITransportError {
+        return .init(error: error.brokerError)
+    } catch let error as LocalActionTransport.Error {
+        return .init(error: localTransportError(error).brokerError)
+    } catch {
+        return .init(error: BlocksCLITransportError.localInvalidResponse.brokerError)
+    }
+#else
     let result = ActionListReply()
     guard let requirement = brokerConnectionRequirement() else {
         return .init(error: ActionBrokerError(category: .availability, code: "local_identity_unavailable",
@@ -164,6 +261,7 @@ private func liveActionList() -> CLIActionListResponse {
         result.finish(CLIActionListResponse.failure("upgrade_required", "Restart or upgrade Blocks and its Action Broker to load module authorization."))
     }
     return result.wait()
+#endif
 }
 
 struct HelpOutput: Codable {
@@ -876,6 +974,34 @@ func submitToBroker<Payload: Codable, Result: Codable>(
     timeout: TimeInterval,
     resultType _: Result.Type
 ) throws -> ActionBrokerTerminalResponse<Result> {
+#if BLOCKS_LOCAL_DEVELOPMENT
+    let requestData = try JSONEncoder().encode(request)
+    try prepareLocalActionHost()
+    do {
+        let data = try LocalActionTransport.request(
+            operation: .submit,
+            payload: requestData,
+            outputFile: outputFile,
+            timeout: timeout
+        )
+        return try JSONDecoder().decode(ActionBrokerTerminalResponse<Result>.self, from: data)
+    } catch let error as LocalActionTransport.Error {
+        if case .timedOut = error {
+            // Cancellation is a fresh authenticated connection and carries
+            // only the UTF-8 request ID. Do not replay the timed-out submit:
+            // a peer may have already accepted and started it.
+            _ = try? LocalActionTransport.request(
+                operation: .cancel,
+                payload: Data(request.requestID.rawValue.utf8),
+                timeout: 5
+            )
+            return localTimeoutResponse(request: request)
+        }
+        throw localTransportError(error)
+    } catch {
+        throw BlocksCLITransportError.localInvalidResponse
+    }
+#else
     let requestData = try JSONEncoder().encode(request)
     let connection = NSXPCConnection(machServiceName: BlocksActionBrokerXPC.machServiceName)
     guard let requirement = brokerConnectionRequirement() else {
@@ -944,6 +1070,7 @@ func submitToBroker<Payload: Codable, Result: Codable>(
     }
     connection.invalidate()
     return terminal
+#endif
 }
 
 private final class BrokerReplyBox<Result: Codable>: @unchecked Sendable {
@@ -992,6 +1119,9 @@ enum BlocksCLITransportError: Error {
     case proxyUnavailable
     case localIdentityUnavailable
     case untrustedPeer
+    case localAppUnavailable
+    case localTimedOut
+    case localInvalidResponse
 
     // XPC failure does not reveal module authorization or establish that the
     // peer's signing identity was rejected. Keep both possibilities explicit.
@@ -1020,13 +1150,35 @@ enum BlocksCLITransportError: Error {
                 message: "The BlocksActionBroker identity could not be verified.",
                 retryable: false
             )
+        case .localAppUnavailable:
+            return ActionBrokerError(
+                category: .availability,
+                code: "broker_unavailable",
+                message: "Unable to connect to the verified local Blocks App. Open Blocks and retry.",
+                retryable: true
+            )
+        case .localTimedOut:
+            return ActionBrokerError(
+                category: .timeout,
+                code: "broker_response_timeout",
+                message: "The local Blocks App did not return a terminal response before the deadline.",
+                retryable: true
+            )
+        case .localInvalidResponse:
+            return ActionBrokerError(
+                category: .transport,
+                code: "invalid_broker_response",
+                message: "The local Blocks App returned an invalid response.",
+                retryable: false
+            )
         }
     }
 
     var exitCode: Int32 {
         switch self {
-        case .proxyUnavailable: return 5
+        case .proxyUnavailable, .localAppUnavailable: return 5
         case .localIdentityUnavailable, .untrustedPeer: return 4
+        case .localTimedOut, .localInvalidResponse: return 1
         }
     }
 }

@@ -70,11 +70,18 @@ enum ClipboardPanelToolbarLayout {
 }
 
 struct ClipboardPanelHeader: View {
+    fileprivate static let tagFilterViewportCoordinateSpace = "ClipboardPanelHeaderTagFilterViewport"
+
     @Binding var query: String
     let searchFocused: FocusState<Bool>.Binding
     let values: ClipboardPanelHeaderValues
     let actions: ClipboardPanelHeaderActions
     let pluginActions: AnyView?
+    var onTagChipFramesChanged: (([String: CGRect]) -> Void)? = nil
+
+    @State private var tagFilterScrollContentFrame: CGRect = .zero
+    @State private var tagFilterChipsFrame: CGRect = .zero
+    @State private var tagCreateRequestID = UUID()
 
     @ViewBuilder
     var body: some View {
@@ -267,7 +274,7 @@ struct ClipboardPanelHeader: View {
     }
 
     private var filterStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
+        tagFilterViewport { scrollToNewTagEditor in
             HStack(spacing: BlocksVisualTokens.Spacing.xs) {
                 ForEach(ClipboardFilterGroup.nonTagCases) { group in
                     ClipboardFilterMenuGroup(
@@ -284,8 +291,10 @@ struct ClipboardPanelHeader: View {
                         onClearGroup: { actions.onClearFilterGroup(group) }
                     )
                 }
-                tagFilterChips
+                tagFilterChips(onNewTagEditorAppeared: scrollToNewTagEditor)
+                    .background(ClipboardTagFilterViewportFrameReporter(key: .chips))
             }
+            .background(ClipboardTagFilterViewportFrameReporter(key: .scrollContent))
         }
         .anchorPreference(
             key: ClipboardNotificationAnchorPreferenceKey.self,
@@ -330,10 +339,12 @@ struct ClipboardPanelHeader: View {
     }
 
     private var tagFilterStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
+        tagFilterViewport { scrollToNewTagEditor in
             HStack(spacing: 6) {
-                tagFilterChips
+                tagFilterChips(onNewTagEditorAppeared: scrollToNewTagEditor)
+                    .background(ClipboardTagFilterViewportFrameReporter(key: .chips))
             }
+            .background(ClipboardTagFilterViewportFrameReporter(key: .scrollContent))
         }
         .anchorPreference(
             key: ClipboardNotificationAnchorPreferenceKey.self,
@@ -341,11 +352,16 @@ struct ClipboardPanelHeader: View {
         ) { $0 }
     }
 
-    private var tagFilterChips: some View {
+    private func tagFilterChips(
+        onNewTagEditorAppeared: @escaping (String) -> Void
+    ) -> some View {
         ClipboardFlatTagFilterChips(
             favoriteTag: values.favoriteTag,
             tags: values.tags,
             selectedTagID: values.selectedTagID,
+            createRequestID: tagCreateRequestID,
+            onTagChipFramesChanged: onTagChipFramesChanged,
+            onNewTagEditorAppeared: onNewTagEditorAppeared,
             operationErrorMessage: values.tagOperationErrorMessage,
             tagUseCount: values.tagUseCount,
             onSelectTag: actions.onSelectTag,
@@ -354,5 +370,107 @@ struct ClipboardPanelHeader: View {
             onDeleteTag: actions.onDeleteTag,
             onMoveTag: actions.onMoveTag
         )
+    }
+
+    private func tagFilterViewport<Content: View>(
+        @ViewBuilder content: @escaping (@escaping (String) -> Void) -> Content
+    ) -> some View {
+        GeometryReader { viewport in
+            ScrollViewReader { scrollProxy in
+                let blankCreateTargetFrame = ClipboardTagCreateTargetViewportLayout.frame(
+                    viewportWidth: viewport.size.width,
+                    scrollContentWidth: tagFilterScrollContentFrame.width,
+                    tagChipsTrailingX: tagFilterChipsFrame.maxX
+                )
+
+                ZStack(alignment: .topLeading) {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        content { scrollTarget in
+                            scrollProxy.scrollTo(scrollTarget, anchor: .trailing)
+                        }
+                    }
+
+                    if let blankCreateTargetFrame {
+                        tagCreateTarget
+                            .frame(
+                                width: blankCreateTargetFrame.width,
+                                height: blankCreateTargetFrame.height
+                            )
+                            .offset(x: blankCreateTargetFrame.minX)
+                    }
+                }
+                .coordinateSpace(name: Self.tagFilterViewportCoordinateSpace)
+                .onPreferenceChange(ClipboardTagFilterViewportScrollContentFramePreferenceKey.self) {
+                    tagFilterScrollContentFrame = $0
+                }
+                .onPreferenceChange(ClipboardTagFilterViewportChipsFramePreferenceKey.self) {
+                    tagFilterChipsFrame = $0
+                }
+                // When the chips overflow there is no remaining viewport space for
+                // the transparent target. Keep New Tag reachable from the viewport
+                // itself without adding a hit-testing overlay over real controls.
+                .contextMenu {
+                    if blankCreateTargetFrame == nil {
+                        newTagMenuItem
+                    }
+                }
+            }
+        }
+    }
+
+    private var tagCreateTarget: some View {
+        Color.clear
+            .contentShape(Rectangle())
+            .contextMenu { newTagMenuItem }
+    }
+
+    private var newTagMenuItem: some View {
+        Button {
+            tagCreateRequestID = UUID()
+        } label: {
+            Label(L10n.string("clipboard.tags.new"), systemImage: "plus")
+        }
+    }
+}
+
+private enum ClipboardTagFilterViewportFrameKind {
+    case scrollContent
+    case chips
+}
+
+private struct ClipboardTagFilterViewportFrameReporter: View {
+    let key: ClipboardTagFilterViewportFrameKind
+
+    var body: some View {
+        GeometryReader { proxy in
+            switch key {
+            case .scrollContent:
+                Color.clear.preference(
+                    key: ClipboardTagFilterViewportScrollContentFramePreferenceKey.self,
+                    value: proxy.frame(in: .named(ClipboardPanelHeader.tagFilterViewportCoordinateSpace))
+                )
+            case .chips:
+                Color.clear.preference(
+                    key: ClipboardTagFilterViewportChipsFramePreferenceKey.self,
+                    value: proxy.frame(in: .named(ClipboardPanelHeader.tagFilterViewportCoordinateSpace))
+                )
+            }
+        }
+    }
+}
+
+private struct ClipboardTagFilterViewportScrollContentFramePreferenceKey: PreferenceKey {
+    static var defaultValue = CGRect.zero
+
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        value = nextValue()
+    }
+}
+
+private struct ClipboardTagFilterViewportChipsFramePreferenceKey: PreferenceKey {
+    static var defaultValue = CGRect.zero
+
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        value = nextValue()
     }
 }

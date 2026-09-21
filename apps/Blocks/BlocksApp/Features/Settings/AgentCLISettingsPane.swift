@@ -2913,16 +2913,22 @@ private struct ActionBrokerSettingsSection: View {
         SettingsSection(title: L10n.string("settings.agentCLI.actionBroker")) {
             SettingsStatusRow(
                 title: L10n.string("settings.agentCLI.actionBroker.enable"),
-                detail: L10n.string("settings.agentCLI.actionBroker.detail"),
+                detail: L10n.string(manager.usesAppOwnedService
+                    ? "settings.agentCLI.appOwned.detail" : "settings.agentCLI.actionBroker.detail"),
                 status: SettingsRowStatus(
                     kind: ActionBrokerSettingsStatePresentation.feedbackKind(for: manager.state),
-                    message: ActionBrokerSettingsStatePresentation.detail(for: manager.state)
+                    message: manager.usesAppOwnedService && manager.state == .enabled
+                        ? L10n.string("settings.agentCLI.appOwned.ready")
+                        : ActionBrokerSettingsStatePresentation.detail(for: manager.state)
                 )
             ) {
                 SettingsBooleanSwitch(L10n.string("settings.agentCLI.actionBroker.enable"), isOn: Binding(
                     get: { manager.isEnabled },
                     set: manager.setEnabled
                 ))
+            }
+            if manager.hasLegacyServiceRegistration {
+                SettingsSectionNote(text: L10n.string("settings.agentCLI.appOwned.legacy"))
             }
         }
         .onAppear { manager.refresh() }

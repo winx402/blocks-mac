@@ -34,6 +34,7 @@ public enum ActionBrokerUpdateError: Error, LocalizedError {
     case invalidRecoveryState
     case requiresApproval
     case serviceDidNotStop
+    case legacyRegistrationRequiresMigration
 
     public var errorDescription: String? {
         switch self {
@@ -44,6 +45,8 @@ public enum ActionBrokerUpdateError: Error, LocalizedError {
         case .invalidRecoveryState: return "Action Broker update recovery state is invalid; the enabled preference was not discarded."
         case .requiresApproval: return "Action Broker requires approval in System Settings > Login Items. The enabled preference has been retained."
         case .serviceDidNotStop: return "Action Broker service shutdown could not be confirmed. The application will not be replaced."
+        case .legacyRegistrationRequiresMigration:
+            return "An older development CLI LaunchAgent is still registered. Finish its work and remove that legacy registration before updating. The new App-owned CLI does not use it; no service was forcibly stopped."
         }
     }
 }

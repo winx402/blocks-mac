@@ -58,6 +58,9 @@ struct ClipboardFlatTagFilterChips: View {
     let favoriteTag: ClipboardTag?
     let tags: [ClipboardTag]
     let selectedTagID: String?
+    let createRequestID: UUID
+    let onTagChipFramesChanged: (([String: CGRect]) -> Void)?
+    let onNewTagEditorAppeared: (String) -> Void
     let operationErrorMessage: String?
     let tagUseCount: (String) -> Int
     let onSelectTag: (String?) -> Void
@@ -112,12 +115,12 @@ struct ClipboardFlatTagFilterChips: View {
                 editingChip()
             }
 
-            blankCreateTarget
         }
         .padding(.leading, ClipboardFilterBarLayout.tagGroupLeadingSpacing)
         .coordinateSpace(name: Self.tagDropCoordinateSpace)
         .onPreferenceChange(ClipboardTagFramePreferenceKey.self) { frames in
             tagFrames = frames
+            onTagChipFramesChanged?(frames)
         }
         .overlay(alignment: .leading) {
             panelTagInsertionCursor
@@ -146,6 +149,12 @@ struct ClipboardFlatTagFilterChips: View {
         }
         .onChange(of: tags) { _, _ in
             clearLocalTagDragState()
+        }
+        .onChange(of: createRequestID) { _, _ in
+            beginCreating(afterTagID: nil)
+            // If an editor already exists, onAppear does not run again. The
+            // first creation is also revealed by the editor's appearance hook.
+            onNewTagEditorAppeared(ClipboardTagFilterEditorScrollTarget.newTagEditor)
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { _ in
             clearLocalTagDragState()
@@ -338,19 +347,6 @@ struct ClipboardFlatTagFilterChips: View {
         }
     }
 
-    private var blankCreateTarget: some View {
-        Color.clear
-            .frame(minWidth: ClipboardFilterBarLayout.tagBlankCreateTargetMinWidth, maxWidth: .infinity, minHeight: ClipboardFilterBarLayout.chipMinHeight)
-            .contentShape(Rectangle())
-            .contextMenu {
-                Button {
-                    beginCreating(afterTagID: nil)
-                } label: {
-                    Label(L10n.string("clipboard.tags.new"), systemImage: "plus")
-                }
-            }
-    }
-
     private func insertionIndicator(afterTagID: String?) -> some View {
         ClipboardTagDropInsertionIndicator(isVisible: isDropInsertionTargetVisible(afterTagID: afterTagID))
             .frame(width: ClipboardFilterBarLayout.tagDropIndicatorHitWidth, height: ClipboardFilterBarLayout.chipMinHeight)
@@ -536,6 +532,15 @@ struct ClipboardFlatTagFilterChips: View {
             .onExitCommand {
                 cancelEditing()
             }
+            .id(ClipboardTagFilterEditorScrollTarget.newTagEditor)
+            .onAppear {
+                guard let scrollTarget = ClipboardTagFilterEditorScrollTarget.target(
+                    isCreatingNewTag: editingTagID == Self.newTagDraftID
+                ) else {
+                    return
+                }
+                onNewTagEditorAppeared(scrollTarget)
+            }
     }
 
     private func beginRenaming(_ tag: ClipboardTag) {
@@ -658,4 +663,12 @@ private struct ClipboardTagFramePreferenceKey: PreferenceKey {
 
 private struct ClipboardTagReorderTarget {
     let afterTagID: String?
+}
+
+enum ClipboardTagFilterEditorScrollTarget {
+    static let newTagEditor = "ClipboardTagFilterNewTagEditor"
+
+    static func target(isCreatingNewTag: Bool) -> String? {
+        isCreatingNewTag ? newTagEditor : nil
+    }
 }

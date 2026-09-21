@@ -46,6 +46,7 @@ jobs:
           python3 tools/verification/development_entry_self_test.py
           python3 tools/verification/source_upgrade_installer_self_test.py
           bash script/test_source_upgrade_transport.sh
+          bash script/test_local_action_transport.sh
           python3 tools/verification/development_signing_self_test.py
           python3 tools/verification/local_development_security_self_test.py
           ./script/test_ui_design_system.sh

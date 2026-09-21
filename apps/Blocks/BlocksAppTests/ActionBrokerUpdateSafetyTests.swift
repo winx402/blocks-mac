@@ -6,6 +6,167 @@ import XCTest
 
 @MainActor
 final class ActionBrokerUpdateSafetyTests: XCTestCase {
+    func testAppOwnedPreferenceImportsIntentOnlyOnce() throws {
+        let suite = "AppOwnedCLI.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let control = ActionBrokerServiceControl.appOwned(defaults: defaults, inheritedIntent: true)
+        XCTAssertEqual(control.status(), .enabled)
+        try control.unregister()
+        let relaunched = ActionBrokerServiceControl.appOwned(defaults: defaults, inheritedIntent: true)
+        XCTAssertEqual(relaunched.status(), .notRegistered)
+        try relaunched.register()
+        XCTAssertEqual(control.status(), .enabled)
+    }
+
+    func testAppOwnedDisableDoesNotContactLegacyBroker() async {
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.host.prepareError = ActionBrokerUpdateError.untrustedPeer
+        let manager = fixture.makeManager(appOwned: true, legacyStatus: .enabled)
+        manager.setEnabled(false)
+        await manager.serviceChangeTask?.value
+        XCTAssertEqual(manager.state, .disabled)
+        XCTAssertFalse(manager.isEnabled)
+        XCTAssertEqual(fixture.host.drainCount, 1)
+        XCTAssertTrue(fixture.host.prepareTokens.isEmpty)
+        XCTAssertTrue(fixture.host.resumeTokens.isEmpty)
+        XCTAssertEqual(fixture.unregisterCount, 1, "only the injected logical preference changes")
+    }
+
+    func testAppOwnedUpdatePreservesIntentWithoutRegistrationRPC() async throws {
+        let fixture = BrokerServiceUpdateFixture()
+        let manager = fixture.makeManager(appOwned: true)
+        try await manager.prepareForApplicationUpdate()
+        XCTAssertTrue(manager.isEnabled)
+        XCTAssertEqual(fixture.host.drainCount, 1)
+        XCTAssertEqual(fixture.unregisterCount, 0)
+        XCTAssertTrue(fixture.host.prepareTokens.isEmpty)
+        await manager.resumeAfterCancelledApplicationUpdate()
+        XCTAssertEqual(manager.state, .enabled)
+        XCTAssertEqual(fixture.registerCount, 0)
+        XCTAssertTrue(fixture.host.resumeTokens.isEmpty)
+    }
+
+    func testAppOwnedUpdateRefusesLegacyRegistrationButOrdinaryQuitCanDrain() async throws {
+        let fixture = BrokerServiceUpdateFixture()
+        let manager = fixture.makeManager(appOwned: true, legacyStatus: .enabled)
+        do {
+            try await manager.prepareForApplicationUpdate()
+            XCTFail("legacy registration must be migrated before replacement")
+        } catch { }
+        XCTAssertEqual(fixture.host.drainCount, 0)
+        XCTAssertEqual(fixture.unregisterCount, 0)
+        try await manager.prepareForApplicationUpdate(stopService: false)
+        XCTAssertEqual(fixture.host.drainCount, 1)
+        XCTAssertTrue(fixture.host.prepareTokens.isEmpty)
+    }
+
+    func testAppOwnedBusyWorkPreventsDisableAndRecoversAdmission() async {
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.host.drainError = ActionBrokerUpdateError.busy
+        let manager = fixture.makeManager(appOwned: true)
+        manager.setEnabled(false)
+        await manager.serviceChangeTask?.value
+        XCTAssertTrue(manager.isEnabled)
+        XCTAssertEqual(fixture.unregisterCount, 0)
+        XCTAssertGreaterThan(fixture.host.localResumeCount, 0)
+        XCTAssertEqual(fixture.host.stopCount, 0, "failed drain must not revoke active work")
+        guard case .failed = manager.state else { return XCTFail("busy must remain visible") }
+    }
+
+    func testAppOwnedBusyDisablePreservesActualInFlightHostServiceRequest() async throws {
+        let suite = "AppOwnedBusyHostService.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let handlerStarted = expectation(description: "host service handler suspended")
+        let suspension = SuspendedHostServiceHandler(started: handlerStarted)
+        let service = ScreenshotActionHostService(
+            executeHandler: { data, _ in
+                let request = try! JSONDecoder().decode(
+                    ActionBrokerRequest<JSONValue>.self,
+                    from: data
+                )
+                await suspension.waitForRelease()
+                return try! JSONEncoder().encode(
+                    ActionBrokerTerminalResponse<JSONValue>.completed(
+                        requestID: request.requestID,
+                        actionID: request.actionID,
+                        result: .object([:])
+                    )
+                )
+            },
+            cancelHandler: { _ in suspension.recordCancellation(); return true }
+        )
+        let host = AppOwnedHostServiceAdapter(service: service)
+        let manager = ActionBrokerServiceManager(
+            service: .appOwned(defaults: defaults, inheritedIntent: true),
+            host: host,
+            retryScheduler: { _, _ in AnyCancellable {} },
+            updateRecoveryJournal: .init(),
+            usesAppOwnedService: true
+        )
+        let request = ActionBrokerRequest(
+            requestID: ActionRequestID.make(),
+            actionID: BlocksAction.screenshotCapture.actionID,
+            payload: JSONValue.null
+        )
+        let data = try JSONEncoder().encode(request)
+        let response = Task {
+            await withCheckedContinuation { continuation in
+                service.execute(data, outputFile: nil) { continuation.resume(returning: $0) }
+            }
+        }
+
+        await fulfillment(of: [handlerStarted], timeout: 1)
+        manager.setEnabled(false)
+        await manager.serviceChangeTask?.value
+
+        XCTAssertTrue(manager.isEnabled)
+        XCTAssertEqual(host.stopCount, 0, "a busy app-owned disable must not stop the actual host")
+        XCTAssertEqual(host.integrationDisableCount, 0, "stop is the only adapter path that revokes requests")
+        XCTAssertEqual(suspension.cancellationCount, 0)
+
+        suspension.release()
+        let terminal = try JSONDecoder().decode(
+            ActionBrokerTerminalResponse<JSONValue>.self,
+            from: await response.value
+        )
+        XCTAssertEqual(terminal.status, .completed)
+        XCTAssertEqual(terminal.requestID, request.requestID)
+        XCTAssertFalse(suspension.handlerWasCancelled)
+        XCTAssertEqual(suspension.cancellationCount, 0)
+    }
+
+    func testAppOwnedPreparedUpdateCancelRestartsActualHostService() async throws {
+        let suite = "AppOwnedPreparedHostService.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let service = ScreenshotActionHostService(
+            executeHandler: { _, _ in Data() },
+            cancelHandler: { _ in false }
+        )
+        let host = AppOwnedHostServiceAdapter(service: service)
+        let manager = ActionBrokerServiceManager(
+            service: .appOwned(defaults: defaults, inheritedIntent: true),
+            host: host,
+            retryScheduler: { _, _ in AnyCancellable {} },
+            updateRecoveryJournal: .init(),
+            usesAppOwnedService: true
+        )
+        XCTAssertEqual(host.startCount, 1)
+
+        try await manager.prepareForApplicationUpdate()
+        XCTAssertEqual(host.stopCount, 1)
+        XCTAssertEqual(host.integrationDisableCount, 1)
+
+        await manager.resumeAfterCancelledApplicationUpdate()
+        XCTAssertEqual(host.startCount, 2)
+        XCTAssertEqual(host.stopCount, 1)
+        XCTAssertEqual(manager.state, .enabled)
+    }
+
     func testEnabledRegistrationWithFailedHandshakeNeverAutomaticallyUnregisters() {
         let fixture = BrokerServiceUpdateFixture()
         fixture.host.startError = ActionBrokerUpdateError.untrustedPeer
@@ -362,7 +523,8 @@ private final class BrokerServiceUpdateFixture {
     let host = BrokerServiceUpdateHost()
     let journal = ActionBrokerUpdateRecoveryJournal()
 
-    func makeManager(moduleAccess: CLIModuleAccessPolicy? = nil) -> ActionBrokerServiceManager {
+    func makeManager(moduleAccess: CLIModuleAccessPolicy? = nil, appOwned: Bool = false,
+                     legacyStatus: SMAppService.Status = .notRegistered) -> ActionBrokerServiceManager {
         let control = ActionBrokerServiceControl(status: { self.status }, register: {
             self.registerCount += 1
             if self.registrationRequiresApproval {
@@ -383,12 +545,15 @@ private final class BrokerServiceUpdateFixture {
         return ActionBrokerServiceManager(service: control, host: host,
             retryScheduler: { _, _ in AnyCancellable {} }, updateRecoveryJournal: journal,
             runningBrokerProcessIDs: { self.processes }, processHasExited: { !self.processes.contains($0) },
-            moduleAccess: moduleAccess)
+            moduleAccess: moduleAccess, usesAppOwnedService: appOwned, legacyServiceStatus: { legacyStatus })
     }
 }
 
 @MainActor
 private final class BrokerServiceUpdateHost: ActionBrokerHosting {
+    var stopCount = 0
+    var drainCount = 0
+    var drainError: Error?
     var onPrepare: (() async -> Void)?
     var startError: Error?
     var onResume: (() async throws -> Void)?
@@ -402,8 +567,11 @@ private final class BrokerServiceUpdateHost: ActionBrokerHosting {
     func start(completion: @escaping (Result<Void, Error>) -> Void, onInvalidated: @escaping () -> Void) {
         completion(startError.map { .failure($0) } ?? .success(())); didStart?()
     }
-    func stop() {}
-    func pauseAndDrainForApplicationUpdate() async throws {}
+    func stop() { stopCount += 1 }
+    func pauseAndDrainForApplicationUpdate() async throws {
+        drainCount += 1
+        if let drainError { throw drainError }
+    }
     func resumeAfterCancelledApplicationUpdate() { localResumeCount += 1 }
     func prepareBrokerForApplicationUpdate(token: String) async throws -> Int32 {
         prepareTokens.append(token)
@@ -416,5 +584,73 @@ private final class BrokerServiceUpdateHost: ActionBrokerHosting {
         try await onResume?()
         if let resumeError { throw resumeError }
         successfulResumeCount += 1
+    }
+}
+
+@MainActor
+private final class SuspendedHostServiceHandler {
+    private let started: XCTestExpectation
+    private var continuation: CheckedContinuation<Void, Never>?
+    private(set) var handlerWasCancelled = false
+    private(set) var cancellationCount = 0
+
+    init(started: XCTestExpectation) {
+        self.started = started
+    }
+
+    func waitForRelease() async {
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            started.fulfill()
+        }
+        handlerWasCancelled = Task.isCancelled
+    }
+
+    func release() {
+        let continuation = self.continuation
+        self.continuation = nil
+        continuation?.resume()
+    }
+
+    func recordCancellation() {
+        cancellationCount += 1
+    }
+}
+
+/// Deliberately models the dangerous old stop path: stopping the host disables
+/// the actual service and revokes its requests. A busy app-owned disable must
+/// never reach this adapter method.
+@MainActor
+private final class AppOwnedHostServiceAdapter: ActionBrokerHosting {
+    private let service: ScreenshotActionHostService
+    private(set) var startCount = 0
+    private(set) var stopCount = 0
+    private(set) var integrationDisableCount = 0
+
+    init(service: ScreenshotActionHostService) {
+        self.service = service
+    }
+
+    func start(
+        completion: @escaping (Result<Void, Error>) -> Void,
+        onInvalidated _: @escaping () -> Void
+    ) {
+        startCount += 1
+        service.setIntegrationEnabled(true)
+        completion(.success(()))
+    }
+
+    func stop() {
+        stopCount += 1
+        integrationDisableCount += 1
+        service.setIntegrationEnabled(false)
+    }
+
+    func pauseAndDrainForApplicationUpdate() async throws {
+        try service.pauseForApplicationUpdate()
+    }
+
+    func resumeAfterCancelledApplicationUpdate() {
+        service.resumeAfterCancelledApplicationUpdate()
     }
 }

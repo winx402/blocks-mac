@@ -874,6 +874,117 @@ final class AppAppearanceTests: XCTestCase {
         )
     }
 
+    func testClipboardTagCreateTargetUsesOnlyRemainingViewportForFewTags() throws {
+        let frame = try XCTUnwrap(
+            ClipboardTagCreateTargetViewportLayout.frame(
+                viewportWidth: 400,
+                scrollContentWidth: 184,
+                tagChipsTrailingX: 184
+            )
+        )
+
+        XCTAssertEqual(frame, CGRect(x: 184, y: 0, width: 216, height: 24))
+    }
+
+    func testClipboardTagNewEditorScrollTargetExcludesRenameEditor() {
+        XCTAssertEqual(
+            ClipboardTagFilterEditorScrollTarget.target(isCreatingNewTag: true),
+            ClipboardTagFilterEditorScrollTarget.newTagEditor
+        )
+        XCTAssertNil(ClipboardTagFilterEditorScrollTarget.target(isCreatingNewTag: false))
+    }
+
+    func testClipboardTagCreateTargetPreservesNarrowRemainingViewportForManyFittingTags() throws {
+        let frame = try XCTUnwrap(
+            ClipboardTagCreateTargetViewportLayout.frame(
+                viewportWidth: 400,
+                scrollContentWidth: 392,
+                tagChipsTrailingX: 392
+            )
+        )
+
+        XCTAssertEqual(frame, CGRect(x: 392, y: 0, width: 8, height: 24))
+    }
+
+    func testClipboardTagCreateTargetIsAbsentAtExactFit() {
+        XCTAssertNil(
+            ClipboardTagCreateTargetViewportLayout.frame(
+                viewportWidth: 400,
+                scrollContentWidth: 400,
+                tagChipsTrailingX: 400
+            )
+        )
+    }
+
+    func testClipboardTagCreateTargetIsAbsentWhenTagsOverflowViewport() {
+        XCTAssertNil(
+            ClipboardTagCreateTargetViewportLayout.frame(
+                viewportWidth: 400,
+                scrollContentWidth: 548,
+                tagChipsTrailingX: 548
+            )
+        )
+    }
+
+    func testClipboardTagCreateTargetFailsClosedBeforeGeometryIsMeasured() {
+        XCTAssertNil(
+            ClipboardTagCreateTargetViewportLayout.frame(
+                viewportWidth: 400,
+                scrollContentWidth: 0,
+                tagChipsTrailingX: 0
+            )
+        )
+        XCTAssertNil(
+            ClipboardTagCreateTargetViewportLayout.frame(
+                viewportWidth: 400,
+                scrollContentWidth: .nan,
+                tagChipsTrailingX: 120
+            )
+        )
+    }
+
+    func testRenderedOverflowingTagStripEndsAtLastChipWithoutBlankScrollWidth() throws {
+        let capture = ClipboardTagFilterChipFrameCapture()
+        let hostingView = NSHostingView(rootView: ClipboardTagFilterOverflowHostingFixture(capture: capture))
+        let window = NSWindow(
+            contentRect: NSRect(x: -4_000, y: -4_000, width: 260, height: ClipboardPanelToolbarLayout.sideHeaderHeight),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.animationBehavior = .none
+        window.isReleasedWhenClosed = false
+        window.contentView = hostingView
+        hostingView.frame = window.contentView!.bounds
+        window.orderFront(nil)
+        defer {
+            window.orderOut(nil)
+            window.close()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+
+        hostingView.layoutSubtreeIfNeeded()
+        let deadline = Date().addingTimeInterval(1)
+        while capture.frames?["overflow-tag-15"] == nil, Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+
+        let tagScrollView = try XCTUnwrap(
+            descendants(of: NSScrollView.self, in: hostingView).max { lhs, rhs in
+                (lhs.documentView?.bounds.width ?? 0) < (rhs.documentView?.bounds.width ?? 0)
+            }
+        )
+        let documentView = try XCTUnwrap(tagScrollView.documentView)
+        let tagChipTrailingX = try XCTUnwrap(capture.frames?["overflow-tag-15"]?.maxX)
+
+        XCTAssertGreaterThan(documentView.bounds.width, tagScrollView.contentView.bounds.width)
+        XCTAssertLessThanOrEqual(
+            documentView.bounds.width - tagChipTrailingX,
+            ClipboardFilterBarLayout.tagDropIndicatorHitWidth + 1,
+            "the scroll document may retain only the existing final reorder indicator, never a blank create target"
+        )
+    }
+
     func testSharedSurfacesAdaptToContrastAndWindowActivityWithoutGeometryChanges() {
         for role in BlocksSurfaceRole.allCases {
             let normalBorder = role.borderOpacity(
@@ -3716,6 +3827,69 @@ private struct SettingsScrollBridgeHostingFixture: View {
     }
 }
 
+private struct ClipboardTagFilterOverflowHostingFixture: View {
+    let capture: ClipboardTagFilterChipFrameCapture
+    @FocusState private var searchFocused: Bool
+
+    private let tags = (0..<16).map { index in
+        ClipboardTag(
+            id: "overflow-tag-\(index)",
+            displayName: "Overflow tag \(index)",
+            normalizedName: "overflow tag \(index)",
+            colorToken: "blue",
+            sortOrder: index,
+            builtInKind: .none,
+            createdAt: .distantPast,
+            updatedAt: .distantPast
+        )
+    }
+
+    var body: some View {
+        ClipboardPanelHeader(
+            query: .constant(""),
+            searchFocused: $searchFocused,
+            values: ClipboardPanelHeaderValues(
+                position: .left,
+                hasActiveFilters: false,
+                filterState: ClipboardFilterState(),
+                sourceOptions: [],
+                favoriteTag: nil,
+                tags: tags,
+                selectedTagID: nil,
+                tagOperationErrorMessage: nil,
+                recorderPaused: false,
+                isPinned: false,
+                activeTitle: { _ in nil },
+                tagUseCount: { _ in 0 }
+            ),
+            actions: ClipboardPanelHeaderActions(
+                onSubmitSearch: {},
+                onFocusSearch: {},
+                onClearAllFilters: {},
+                onOpenSettings: {},
+                onTogglePin: {},
+                onSelectFormat: { _ in },
+                onSelectTime: { _ in },
+                onSelectSource: { _ in },
+                onSelectTag: { _ in },
+                onClearFilterGroup: { _ in },
+                onCreateTag: { _, _ in nil },
+                onRenameTag: { _, _ in false },
+                onDeleteTag: { _ in false },
+                onMoveTag: { _, _ in false }
+            ),
+            pluginActions: nil,
+            onTagChipFramesChanged: { capture.frames = $0 }
+        )
+        .frame(width: 260, height: ClipboardPanelToolbarLayout.sideHeaderHeight)
+    }
+}
+
+@MainActor
+private final class ClipboardTagFilterChipFrameCapture {
+    var frames: [String: CGRect]?
+}
+
 private struct SettingsAlignmentTestFixture: View {
     @State private var first = true
     @State private var second = false
@@ -3811,6 +3985,10 @@ private func firstDescendant<T: NSView>(of type: T.Type, in view: NSView) -> T? 
         if let result = firstDescendant(of: type, in: child) { return result }
     }
     return nil
+}
+
+private func descendants<T: NSView>(of type: T.Type, in view: NSView) -> [T] {
+    ([view as? T].compactMap { $0 } + view.subviews.flatMap { descendants(of: type, in: $0) })
 }
 
 @MainActor

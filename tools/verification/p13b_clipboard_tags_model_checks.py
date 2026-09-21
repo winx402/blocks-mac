@@ -440,10 +440,21 @@ def main() -> int:
     require(
         failures,
         "ui_filter_tag_blank_context_area_too_small",
-        "tagBlankCreateTargetMinWidth: CGFloat = 120" in filter_bar
-        and "blankCreateTarget" in filter_bar
-        and ".contextMenu" in block(filter_bar, "private var blankCreateTarget"),
-        "filter tag blank area must be large enough to create a tag from the empty strip region",
+        contains_all(
+            filter_bar + panel,
+            [
+                "ClipboardTagCreateTargetViewportLayout",
+                "scrollContentWidth.isFinite",
+                "scrollContentWidth <= viewportWidth",
+                "tagChipsTrailingX > 0",
+                "tagFilterViewport",
+                "tagCreateTarget",
+                "tagCreateRequestID",
+                ".contextMenu",
+            ],
+        )
+        and "tagBlankCreateTargetMinWidth" not in filter_bar + panel,
+        "filter tag blank area must remain a viewport-only context target without becoming scrollable content",
         FILTER_BAR,
     )
     require(
