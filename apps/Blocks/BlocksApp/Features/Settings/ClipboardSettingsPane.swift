@@ -291,16 +291,6 @@ struct ClipboardSettingsPane: View {
             spacing: BlocksVisualTokens.Spacing.xl
         ) {
         if showsTagManagement {
-            SettingsSecondaryPageHeader(
-                title: L10n.string("settings.clipboardTags"),
-                backTitle: L10n.string("common.back")
-            ) {
-                setTagManagementVisible(false)
-                routeStateStore.restoreSecondaryRoute(
-                    for: .clipboard,
-                    anchorID: SettingsSecondaryRouteAnchor.clipboardTags
-                )
-            }
             ClipboardTagManagementSection(
                 tagStore: clipboardStore.tagStore,
                 onOpenScreenshotSettings: appModel.openScreenshotTagSettings,
@@ -466,7 +456,7 @@ struct ClipboardSettingsPane: View {
             }
         }
 
-        SettingsSection(title: L10n.string("settings.clipboardTags")) {
+        SettingsSection(title: "") {
             SettingsNavigationRow(
                 title: L10n.string("settings.clipboardTags"),
                 detail: L10n.string("settings.clipboardTags.detail"),
@@ -476,9 +466,7 @@ struct ClipboardSettingsPane: View {
             .id(SettingsSecondaryRouteAnchor.clipboardTags)
         }
 
-        SettingsSection(
-            title: L10n.string("settings.clipboardPrivacyEntry")
-        ) {
+        SettingsSection(title: "") {
             SettingsNavigationRow(
                 title: L10n.string("menu.clipboardPrivacy"),
                 detail: L10n.string("settings.clipboardPrivacyEntryNote"),

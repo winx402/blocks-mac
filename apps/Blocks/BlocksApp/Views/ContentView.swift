@@ -33,7 +33,9 @@ struct ContentView: View {
 
 struct SettingsNavigationShell: View {
     @EnvironmentObject private var appModel: AppModel
+    @EnvironmentObject private var pluginManager: BlocksNativePluginManager
     @StateObject private var routeStateStore = SettingsRouteStateStore()
+    @State private var sidebarVisibility: NavigationSplitViewVisibility = .all
 
     let initialSection: AppSection?
 
@@ -42,7 +44,7 @@ struct SettingsNavigationShell: View {
     }
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $sidebarVisibility) {
             SettingsNativeSidebar(
                 selection: sidebarSelection,
                 navigationGeneration: appModel.mainWindowNavigationGeneration,
@@ -52,6 +54,8 @@ struct SettingsNavigationShell: View {
                     )
                 }
             )
+                .toolbar(removing: .sidebarToggle)
+                .frame(minWidth: 208, idealWidth: 224, maxWidth: 248)
                 .navigationSplitViewColumnWidth(min: 208, ideal: 224, max: 248)
         } detail: {
             ZStack(alignment: .topLeading) {
@@ -62,6 +66,17 @@ struct SettingsNavigationShell: View {
             .modifier(BlocksSettingsDetailBacking())
         }
         .navigationSplitViewStyle(.balanced)
+        .focusedSceneValue(\.settingsSidebarVisibility, $sidebarVisibility)
+        .focusedSceneValue(\.settingsNavigationActions, navigationCommandActions)
+        .toolbar(removing: .sidebarToggle)
+        .toolbar {
+            ToolbarItemGroup(placement: .navigation) {
+                SettingsNavigationToolbar(store: routeStateStore) { section in
+                    appModel.selectedSection = section
+                }
+            }
+        }
+        .environment(\.blocksSettingsPresentation, true)
         .modifier(BlocksSettingsWindowBacking())
         .background {
             AppleTranslationPreparationHost(
@@ -71,8 +86,11 @@ struct SettingsNavigationShell: View {
             )
         }
         .onAppear {
-            guard let initialSection else { return }
-            appModel.selectedSection = initialSection
+            if let initialSection { appModel.selectedSection = initialSection }
+            routeStateStore.recordSectionSelection(appModel.selectedSection)
+        }
+        .onChange(of: appModel.selectedSection) { _, section in
+            routeStateStore.recordSectionSelection(section)
         }
     }
 
@@ -85,6 +103,52 @@ struct SettingsNavigationShell: View {
             guard let section else { return }
             guard appModel.selectedSection != section else { return }
             appModel.selectedSection = section
+        }
+    }
+
+    private var navigationCommandActions: SettingsNavigationCommandActions {
+        SettingsNavigationCommandActions(
+            canGoBack: !routeStateStore.historyIndices(backward: true, validating: isNavigationLocationAvailable).isEmpty,
+            canGoForward: !routeStateStore.historyIndices(backward: false, validating: isNavigationLocationAvailable).isEmpty,
+            navigate: { backward in
+                if let section = routeStateStore.navigate(backward: backward, validating: isNavigationLocationAvailable) {
+                    appModel.selectedSection = section
+                }
+            }
+        )
+    }
+
+    private func isNavigationLocationAvailable(_ location: SettingsNavigationLocation) -> Bool {
+        if location.section == .hooks,
+           case .installed(let id) = PluginCenterRoute(token: location.routeToken) {
+            return pluginManager.plugins.contains { $0.id == id }
+        }
+        return location.isAvailable(appModel: appModel)
+    }
+}
+
+private struct SettingsSidebarVisibilityKey: FocusedValueKey {
+    typealias Value = Binding<NavigationSplitViewVisibility>
+}
+
+extension FocusedValues {
+    var settingsSidebarVisibility: Binding<NavigationSplitViewVisibility>? {
+        get { self[SettingsSidebarVisibilityKey.self] }
+        set { self[SettingsSidebarVisibilityKey.self] = newValue }
+    }
+}
+
+struct SettingsSidebarCommands: Commands {
+    @FocusedValue(\.settingsSidebarVisibility) private var visibility
+    private var isVisible: Bool { visibility?.wrappedValue != .detailOnly }
+
+    var body: some Commands {
+        CommandGroup(before: .toolbar) {
+            Button(L10n.string(isVisible ? "settings.sidebar.hide" : "settings.sidebar.show")) {
+                visibility?.wrappedValue = isVisible ? .detailOnly : .all
+            }
+            .keyboardShortcut("s", modifiers: [.command, .option])
+            .disabled(visibility == nil)
         }
     }
 }
@@ -100,7 +164,7 @@ private struct SettingsNativeSidebar: View {
             navigationGeneration: navigationGeneration,
             onUserSelection: onUserSelection
         )
-        .blocksBackground(.sidebar)
+        .modifier(BlocksSettingsSidebarBacking())
     }
 }
 
@@ -409,8 +473,8 @@ final class SettingsSourceListNativeView: NSView {
         outlineView.floatsGroupRows = false
         outlineView.rowSizeStyle = .medium
         outlineView.rowHeight = 30
-        outlineView.intercellSpacing = NSSize(width: 0, height: 1)
-        outlineView.indentationPerLevel = 8
+        outlineView.intercellSpacing = .zero
+        outlineView.indentationPerLevel = 0
         outlineView.autoresizesOutlineColumn = false
         outlineView.columnAutoresizingStyle = .noColumnAutoresizing
         outlineView.allowsEmptySelection = false
@@ -644,7 +708,9 @@ private final class SettingsSourceListDataController: NSObject,
     }
 
     func outlineView(_ outlineView: NSOutlineView, isGroupItem item: Any) -> Bool {
-        item is SettingsSidebarGroupNode
+        // Explicit spacer rows own grouping; Source List group styling would
+        // add a second, system-controlled gap above each hidden heading.
+        false
     }
 
     func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
@@ -667,7 +733,10 @@ private final class SettingsSourceListDataController: NSObject,
         _ outlineView: NSOutlineView,
         heightOfRowByItem item: Any
     ) -> CGFloat {
-        item is SettingsSidebarGroupNode ? 24 : 30
+        if let group = item as? SettingsSidebarGroupNode {
+            return group === groupNodes.first ? 0.01 : 10
+        }
+        return 30
     }
 
     func outlineView(
@@ -708,8 +777,6 @@ private final class SettingsSourceListDataController: NSObject,
 
 @MainActor
 private final class SettingsSidebarGroupCell: NSTableCellView {
-    private let titleLabel = NSTextField(labelWithString: "")
-
     init(identifier: NSUserInterfaceItemIdentifier) {
         super.init(frame: .zero)
         self.identifier = identifier
@@ -721,32 +788,19 @@ private final class SettingsSidebarGroupCell: NSTableCellView {
         configure()
     }
 
-    func update(title: String) {
-        titleLabel.stringValue = title
-        setAccessibilityLabel(title)
-    }
+    func update(title: String) {}
 
     private func configure() {
-        setAccessibilityElement(true)
-        setAccessibilityRole(NSAccessibility.Role(rawValue: "AXHeading"))
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        titleLabel.font = .systemFont(ofSize: 11, weight: .semibold)
-        titleLabel.textColor = .secondaryLabelColor
-        titleLabel.lineBreakMode = .byTruncatingTail
-        titleLabel.setAccessibilityElement(false)
-        addSubview(titleLabel)
-        NSLayoutConstraint.activate([
-            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
-            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -8),
-            titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
+        setAccessibilityElement(false)
     }
 }
 
 @MainActor
 private final class SettingsSidebarRouteCell: NSTableCellView {
+    private let iconBadge = NSView()
     private let symbolView = NSImageView()
     private let titleLabel = NSTextField(labelWithString: "")
+    private var section: AppSection?
 
     init(identifier: NSUserInterfaceItemIdentifier) {
         super.init(frame: .zero)
@@ -760,18 +814,24 @@ private final class SettingsSidebarRouteCell: NSTableCellView {
     }
 
     func update(section: AppSection) {
+        self.section = section
         symbolView.image = NSImage(
-            systemSymbolName: section.systemImage,
+            systemSymbolName: section.settingsIconSystemImage,
             accessibilityDescription: nil
         )?.withSymbolConfiguration(
-            NSImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+            NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
         )
-        symbolView.contentTintColor = NSColor(section.iconColor)
+        symbolView.contentTintColor = .white
+        updateBadgeColor()
         titleLabel.stringValue = section.title
         titleLabel.setAccessibilityLabel(section.title)
     }
 
     private func configure() {
+        iconBadge.translatesAutoresizingMaskIntoConstraints = false
+        iconBadge.wantsLayer = true
+        iconBadge.layer?.cornerRadius = 4
+        iconBadge.setAccessibilityElement(false)
         symbolView.translatesAutoresizingMaskIntoConstraints = false
         symbolView.imageScaling = .scaleProportionallyDown
         symbolView.setAccessibilityElement(false)
@@ -782,19 +842,35 @@ private final class SettingsSidebarRouteCell: NSTableCellView {
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.maximumNumberOfLines = 1
 
-        imageView = symbolView
         textField = titleLabel
-        addSubview(symbolView)
+        addSubview(iconBadge)
+        iconBadge.addSubview(symbolView)
         addSubview(titleLabel)
         NSLayoutConstraint.activate([
-            symbolView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
-            symbolView.centerYAnchor.constraint(equalTo: centerYAnchor),
-            symbolView.widthAnchor.constraint(equalToConstant: 16),
-            symbolView.heightAnchor.constraint(equalToConstant: 16),
-            titleLabel.leadingAnchor.constraint(equalTo: symbolView.trailingAnchor, constant: 8),
+            iconBadge.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+            iconBadge.centerYAnchor.constraint(equalTo: centerYAnchor),
+            iconBadge.widthAnchor.constraint(equalToConstant: 20),
+            iconBadge.heightAnchor.constraint(equalToConstant: 20),
+            symbolView.centerXAnchor.constraint(equalTo: iconBadge.centerXAnchor),
+            symbolView.centerYAnchor.constraint(equalTo: iconBadge.centerYAnchor),
+            symbolView.widthAnchor.constraint(equalToConstant: 12),
+            symbolView.heightAnchor.constraint(equalToConstant: 12),
+            titleLabel.leadingAnchor.constraint(equalTo: iconBadge.trailingAnchor, constant: 8),
             titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateBadgeColor()
+    }
+
+    private func updateBadgeColor() {
+        guard let section else { return }
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            iconBadge.layer?.backgroundColor = NSColor(section.settingsIconColor).cgColor
+        }
     }
 }
 

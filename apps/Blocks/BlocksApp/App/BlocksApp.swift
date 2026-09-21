@@ -42,6 +42,8 @@ struct BlocksApp: App {
         }
         .defaultSize(width: 980, height: 680)
         .commands {
+            SettingsSidebarCommands()
+            SettingsNavigationCommands()
             CommandGroup(replacing: .newItem) {}
             CommandGroup(after: .appInfo) {
                 Button(appUpdates.checkButtonTitle) {

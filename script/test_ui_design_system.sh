@@ -138,9 +138,9 @@ if rg -q '\.tag\((true|false)\)|\.tag\(Bool\.' \
   fail "boolean settings must not be represented by picker, radio, or segmented tags"
 fi
 
-rg -q 'settingsFormContentMaxWidth: CGFloat = 820' \
+rg -q 'settingsFormContentMaxWidth: CGFloat = 760' \
   "$app_root/Support/DesignSystemFoundation.swift" \
-  || fail "form settings width must use the canonical 820pt token"
+  || fail "form settings width must use the canonical 760pt token"
 rg -q 'settingsCollectionContentMaxWidth: CGFloat = 1120' \
   "$app_root/Support/DesignSystemFoundation.swift" \
   || fail "content settings width must use the canonical 1120pt token"

@@ -46,17 +46,6 @@ private struct ScreenshotSettingsWorkbench: View {
             spacing: BlocksVisualTokens.Spacing.xl
         ) {
             if showsWatermarkLibrary {
-                SettingsSecondaryPageHeader(
-                    title: L10n.string("settings.screenshot.watermarks"),
-                    backTitle: L10n.string("common.back"),
-                    backAction: {
-                        setWatermarkLibraryVisible(false)
-                        routeStateStore.restoreSecondaryRoute(
-                            for: .screenshot,
-                            anchorID: SettingsSecondaryRouteAnchor.screenshotWatermarks
-                        )
-                    }
-                )
                 ScreenshotWatermarkSettingsLibrary(store: store)
             } else {
                 SettingsSection(title: L10n.string("settings.screenshot.feature")) {

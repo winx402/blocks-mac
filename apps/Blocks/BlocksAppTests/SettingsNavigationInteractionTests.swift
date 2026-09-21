@@ -5,6 +5,187 @@ import XCTest
 
 @MainActor
 final class SettingsNavigationInteractionTests: XCTestCase {
+    func testHistoryContextClickRoutingIsLimitedToOwnEnabledButtonAndWindow() throws {
+        let window = NSWindow(contentRect: NSRect(x: -4_000, y: -4_000, width: 200, height: 100), styleMask: [.titled], backing: .buffered, defer: false)
+        let otherWindow = NSWindow(contentRect: NSRect(x: -4_000, y: -4_000, width: 200, height: 100), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        otherWindow.isReleasedWhenClosed = false
+        defer { window.close(); otherWindow.close() }
+        let group = SettingsHistoryButtonGroup(frame: NSRect(x: 10, y: 10, width: 58, height: 28))
+        let button = SettingsHistoryButton(backward: true)
+        button.frame = NSRect(x: 0, y: 0, width: 28, height: 28)
+        button.configure(entries: [.init(index: 0, title: "General")], primaryAction: {}, jump: { _ in })
+        group.addArrangedSubview(button)
+        XCTAssertFalse(group.isMonitoringContextClicks)
+        window.contentView?.addSubview(group)
+        window.orderFront(nil)
+        otherWindow.orderFront(nil)
+        window.contentView?.layoutSubtreeIfNeeded()
+        XCTAssertTrue(group.isMonitoringContextClicks)
+
+        let center = button.convert(NSPoint(x: button.bounds.midX, y: button.bounds.midY), to: nil)
+        func event(in target: NSWindow, at point: NSPoint, type: NSEvent.EventType = .rightMouseDown) throws -> NSEvent {
+            try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: 0, windowNumber: target.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+        }
+        XCTAssertTrue(group.historyButton(for: try event(in: window, at: center)) === button)
+        XCTAssertNil(group.historyButton(for: try event(in: otherWindow, at: center)))
+        XCTAssertNil(group.historyButton(for: try event(in: window, at: NSPoint(x: 190, y: 90))))
+        XCTAssertNil(group.historyButton(for: try event(in: window, at: center, type: .leftMouseDown)))
+        button.isEnabled = false
+        XCTAssertNil(group.historyButton(for: try event(in: window, at: center)))
+        group.removeFromSuperview()
+        XCTAssertFalse(group.isMonitoringContextClicks)
+    }
+
+    func testNativeHistoryButtonsExposeMenuEntriesAndKeepPrimaryActionSeparate() throws {
+        let button = SettingsHistoryButton(backward: true)
+        var primaryCount = 0
+        var selectedIndex: Int?
+        button.configure(
+            entries: [.init(index: 4, title: "Watermarks"), .init(index: 1, title: "General")],
+            primaryAction: { primaryCount += 1 },
+            jump: { selectedIndex = $0 }
+        )
+        XCTAssertEqual(button.keyEquivalent, "", "Scene commands exclusively own keyboard shortcuts.")
+        XCTAssertEqual(button.imagePosition, .imageOnly)
+        XCTAssertTrue(button.isEnabled)
+        XCTAssertEqual(button.menu?.items.map(\.title), ["Watermarks", "General"])
+        button.performClick(nil)
+        XCTAssertEqual(primaryCount, 1)
+        XCTAssertNil(selectedIndex)
+        let item = try XCTUnwrap(button.menu?.items.last)
+        XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(item.action), to: item.target, from: item))
+        XCTAssertEqual(selectedIndex, 1)
+        XCTAssertEqual(primaryCount, 1)
+    }
+
+    func testNativeForwardButtonDisablesWhenHistoryIsEmpty() {
+        let button = SettingsHistoryButton(backward: false)
+        var actionCount = 0
+        button.configure(entries: [], primaryAction: { actionCount += 1 }, jump: { _ in actionCount += 1 })
+        XCTAssertEqual(button.keyEquivalent, "", "Scene commands exclusively own keyboard shortcuts.")
+        XCTAssertFalse(button.isEnabled)
+        XCTAssertTrue(button.menu?.items.isEmpty == true)
+        button.performClick(nil)
+        XCTAssertEqual(actionCount, 0)
+    }
+
+    func testHistoryRecordsRootAndNestedPagesAndReplaysActualRouteBindings() {
+        let store = SettingsRouteStateStore()
+        store.recordSectionSelection(.settings)
+        store.recordSectionSelection(.screenshot)
+        let screenshot = store.secondaryRouteBinding(for: .screenshot, default: "root")
+        screenshot.wrappedValue = "watermarks"
+        store.recordSectionSelection(.translationSettings)
+        let translation = store.secondaryRouteBinding(for: .translation, default: "root")
+        translation.wrappedValue = "services"
+
+        XCTAssertEqual(store.history.count, 5)
+        XCTAssertEqual(store.navigate(backward: true), .translationSettings)
+        XCTAssertEqual(translation.wrappedValue, "root")
+        XCTAssertEqual(store.navigate(backward: true), .screenshot)
+        XCTAssertEqual(screenshot.wrappedValue, "watermarks")
+        XCTAssertEqual(store.navigate(backward: true), .screenshot)
+        XCTAssertEqual(screenshot.wrappedValue, "root")
+        XCTAssertEqual(store.navigate(backward: false), .screenshot)
+        XCTAssertEqual(screenshot.wrappedValue, "watermarks")
+    }
+
+    func testHistoryDeduplicatesSelectionAndClearsOnlyForwardBranch() {
+        let store = SettingsRouteStateStore()
+        store.recordSectionSelection(.settings)
+        store.recordSectionSelection(.settings)
+        store.secondaryRouteBinding(for: .general, default: "root").wrappedValue = "root"
+        XCTAssertEqual(store.history.count, 1)
+        store.recordSectionSelection(.screenshot)
+        store.recordSectionSelection(.permissions)
+        XCTAssertEqual(store.navigate(backward: true), .screenshot)
+        // The app-model onChange echo must not append or clear the branch.
+        store.recordSectionSelection(.screenshot)
+        XCTAssertEqual(store.history.count, 3)
+        store.recordSectionSelection(.shortcuts)
+        XCTAssertEqual(store.history.map(\.section), [.settings, .screenshot, .shortcuts])
+        XCTAssertNil(store.navigate(backward: false))
+    }
+
+    func testHistorySkipsRemovedPluginAndSupportsMenuJumpsBothDirections() {
+        let store = SettingsRouteStateStore()
+        store.recordSectionSelection(.hooks)
+        let plugin = store.secondaryRouteBinding(for: .hooks, default: "catalog")
+        plugin.wrappedValue = "installed:deleted-plugin"
+        store.recordSectionSelection(.permissions)
+        let valid: (SettingsNavigationLocation) -> Bool = { $0.routeToken != "installed:deleted-plugin" }
+        XCTAssertEqual(store.historyIndices(backward: true, validating: valid), [0])
+        XCTAssertEqual(store.navigate(backward: true, validating: valid), .hooks)
+        XCTAssertEqual(plugin.wrappedValue, "catalog")
+        XCTAssertEqual(store.historyIndices(backward: false, validating: valid), [2])
+        XCTAssertNil(store.navigate(toHistoryIndex: 1, validating: valid))
+        XCTAssertEqual(store.navigate(toHistoryIndex: 2, validating: valid), .permissions)
+    }
+
+    func testHistoryPreservesIndependentScrollDraftAndFocusState() {
+        let store = SettingsRouteStateStore()
+        store.recordSectionSelection(.providers)
+        let provider = store.secondaryRouteBinding(for: .providers, default: "overview")
+        provider.wrappedValue = "details"
+        store.scrollOffsetBinding(for: .providers).wrappedValue = 183
+        store.recordFocusTarget("model", for: .providers, routeToken: "details")
+        let draft = ProviderDetailsRouteDraft(apiBaseURLDraft: "https://example.test", accountAliasDraft: "alias", modelNameDraft: "unsaved-model", baseURLValidationFailed: false)
+        store.updateProviderDetailsDraft(draft, for: "details")
+        store.recordSectionSelection(.settings)
+        XCTAssertEqual(store.navigate(backward: true), .providers)
+        XCTAssertEqual(provider.wrappedValue, "details")
+        XCTAssertEqual(store.scrollOffsetBinding(for: .providers).wrappedValue, 183)
+        XCTAssertEqual(store.providerDetailsDraft(for: "details"), draft)
+        XCTAssertEqual(store.focusRestorationRequest?.target, "model")
+        XCTAssertEqual(store.currentLocation, SettingsNavigationLocation(section: .providers, routeToken: "details"))
+    }
+
+    func testPluginCatalogIsRootAndOverviewExistsOnlyForMainCategories() {
+        let store = SettingsRouteStateStore()
+        store.recordSectionSelection(.hooks)
+        XCTAssertEqual(store.currentLocation?.routeToken, "catalog")
+        XCTAssertFalse(store.isSecondaryPage(for: .hooks))
+        XCTAssertTrue(SettingsViewMode.general.showsRootOverview)
+        XCTAssertTrue(SettingsViewMode.screenshot.showsRootOverview)
+        XCTAssertTrue(SettingsViewMode.clipboard.showsRootOverview)
+        XCTAssertTrue(SettingsViewMode.translation.showsRootOverview)
+        for mode in [SettingsViewMode.hooks, .providers, .permissions, .shortcuts, .agentCLI, .dataAudit, .translationFavorites, .clipboardPrivacy] {
+            XCTAssertFalse(mode.showsRootOverview)
+        }
+    }
+
+    func testDelayedOffscreenRouteChangesCannotHijackCurrentHistory() {
+        let store = SettingsRouteStateStore()
+        store.recordSectionSelection(.hooks)
+        store.recordSectionSelection(.settings)
+        store.secondaryRouteBinding(for: .hooks, default: "catalog").wrappedValue = "installed:example"
+        XCTAssertEqual(store.history.count, 2)
+        XCTAssertEqual(store.currentLocation?.section, .settings)
+        store.recordSectionSelection(.hooks)
+        XCTAssertEqual(store.currentLocation?.routeToken, "installed:example")
+    }
+
+    func testAsyncNavigationGenerationRejectsSameSectionHistoryChanges() {
+        let store = SettingsRouteStateStore()
+        store.recordSectionSelection(.hooks)
+        let route = store.secondaryRouteBinding(for: .hooks, default: "catalog")
+        route.wrappedValue = "builtin:example"
+        let installationGeneration = store.navigationGeneration
+        store.recordSectionSelection(.hooks)
+        XCTAssertTrue(store.isCurrentNavigation(generation: installationGeneration, section: .hooks), "Selection echoes do not invalidate an otherwise current completion.")
+
+        XCTAssertEqual(store.navigate(backward: true), .hooks)
+        XCTAssertFalse(store.isCurrentNavigation(generation: installationGeneration, section: .hooks))
+        XCTAssertEqual(store.navigate(backward: false), .hooks)
+        XCTAssertEqual(route.wrappedValue, "builtin:example")
+        XCTAssertFalse(store.isCurrentNavigation(generation: installationGeneration, section: .hooks), "Returning to the same route must not revive a stale completion.")
+
+        let newGeneration = store.navigationGeneration
+        route.wrappedValue = "builtin:another"
+        XCTAssertFalse(store.isCurrentNavigation(generation: newGeneration, section: .hooks))
+    }
+
     func testNativeSidebarPublishesRouteBeforeFocusRestoration() {
         var selected: AppSection? = .settings
         var selectionSeenByFocusRestoration: AppSection?

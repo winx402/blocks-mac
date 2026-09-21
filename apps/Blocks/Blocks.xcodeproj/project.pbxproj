@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B92100000000000000000001 /* SettingsNavigationControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = F92100000000000000000001; };
 		B05700000000000000000006 /* SourceUpgradeProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F05700000000000000000006; };
 		B05700000000000000000001 /* SourceUpgradeProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = F05700000000000000000001; };
 		B05700000000000000000002 /* SourceUpgradeTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = F05700000000000000000002; };
@@ -554,6 +555,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		F92100000000000000000001 /* SettingsNavigationControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Settings/SettingsNavigationControls.swift; sourceTree = "<group>"; };
 		F05700000000000000000006 /* SourceUpgradeProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceUpgradeProtocolTests.swift; sourceTree = "<group>"; };
 		F05700000000000000000001 /* SourceUpgradeProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceUpgradeProtocol.swift; sourceTree = "<group>"; };
 		F05700000000000000000002 /* SourceUpgradeTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceUpgradeTransport.swift; sourceTree = "<group>"; };
@@ -1385,6 +1387,7 @@
 					F3010000000000000000003E /* ScreenshotStore.swift */,
 					F3010000000000000000003F /* ShortcutStore.swift */,
 					F30100000000000000000040 /* SettingsShellView.swift */,
+					F92100000000000000000001 /* SettingsNavigationControls.swift */,
 					F30100000000000000000041 /* SettingsSectionList.swift */,
 					F30100000000000000000042 /* GeneralSettingsPane.swift */,
 					F30100000000000000000043 /* ClipboardSettingsPane.swift */,
@@ -2072,6 +2075,7 @@
 					B0030000000000000000003F /* ScreenshotStore.swift in Sources */,
 					B00300000000000000000040 /* ShortcutStore.swift in Sources */,
 					B00300000000000000000041 /* SettingsShellView.swift in Sources */,
+					B92100000000000000000001 /* SettingsNavigationControls.swift in Sources */,
 					B00300000000000000000042 /* SettingsSectionList.swift in Sources */,
 					B00300000000000000000043 /* GeneralSettingsPane.swift in Sources */,
 					B00300000000000000000044 /* ClipboardSettingsPane.swift in Sources */,

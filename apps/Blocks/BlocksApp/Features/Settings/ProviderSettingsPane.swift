@@ -266,7 +266,9 @@ struct ProviderSettingsPane: View {
                 restoreDetailsFocusIfRequested()
             }
             .onDisappear {
-                cacheProviderDetailsDraft()
+                if route == .details {
+                    cacheProviderDetailsDraft()
+                }
                 discardSensitiveDrafts()
                 cleanupConnectionTestForRouteExit()
             }
@@ -274,19 +276,6 @@ struct ProviderSettingsPane: View {
 
     @ViewBuilder
     private var content: some View {
-        if route == .details {
-            SettingsSecondaryPageHeader(
-                title: L10n.string("settings.providerDefault"),
-                backTitle: L10n.string("common.back")
-            ) {
-                route = .overview
-                routeStateStore.restoreSecondaryRoute(
-                    for: .providers,
-                    anchorID: SettingsSecondaryRouteAnchor.providerDetails
-                )
-            }
-        }
-
         if route == .overview {
             SettingsSection(title: L10n.string("settings.providerDefault")) {
                 SettingsNavigationRow(

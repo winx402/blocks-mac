@@ -27,7 +27,7 @@ enum BlocksVisualTokens {
     static let standardHeight: CGFloat = 36
     static let compactHeight: CGFloat = 28
     static let compactIconSize: CGFloat = 13
-    static let settingsRowMinimumHeight: CGFloat = 44
+    static let settingsRowMinimumHeight: CGFloat = 40
   }
 
   enum Density: String, CaseIterable, Sendable {
@@ -83,17 +83,18 @@ enum BlocksVisualTokens {
   }
 
   enum Layout {
-    static let settingsFormContentMaxWidth: CGFloat = 820
+    static let settingsGroupCornerRadius: CGFloat = 10
+    static let settingsFormContentMaxWidth: CGFloat = 760
     static let settingsCollectionContentMaxWidth: CGFloat = 1120
     static let settingsSheetMinimumWidth: CGFloat = 560
     static let settingsSheetIdealWidth: CGFloat = 600
     static let settingsSheetCompactMinimumHeight: CGFloat = 280
     static let settingsSheetContentMaxWidth: CGFloat = 640
-    static let settingsTrailingColumnMinimumWidth: CGFloat = 220
-    static let settingsTrailingColumnWidth: CGFloat = 280
-    static let settingsTrailingColumnMaximumWidth: CGFloat = 360
-    static let settingsLabelMinimumWidth: CGFloat = 260
-    static let settingsPageHorizontalPadding: CGFloat = 28
+    static let settingsTrailingColumnMinimumWidth: CGFloat = 160
+    static let settingsTrailingColumnWidth: CGFloat = 240
+    static let settingsTrailingColumnMaximumWidth: CGFloat = 300
+    static let settingsLabelMinimumWidth: CGFloat = 180
+    static let settingsPageHorizontalPadding: CGFloat = 24
   }
 }
 

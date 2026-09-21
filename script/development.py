@@ -436,8 +436,6 @@ def _install_development_locked(products: Path) -> None:
         os.replace(manifest_stage, MANIFEST)
         committed = True
         print(f"Installed isolated local build: {DESTINATION}")
-        if previous.exists():
-            print(f"Previous development app retained for recovery: {previous}")
     except BaseException:
         # Inspect actual inodes, including an interruption immediately after a
         # rename but before its Python state flag is assigned. Never move an
@@ -462,8 +460,14 @@ def _install_development_locked(products: Path) -> None:
     finally:
         if not committed and preparation is not None:
             preparation.restore_after_failure()
-        # Never discard the only recoverable old app, even after interruption.
-        if not previous.exists() and not promoted:
+        # A committed app + matching manifest is the sole installed version.
+        # Failed/interrupted transactions still retain their recovery material.
+        if committed:
+            try:
+                shutil.rmtree(stage)
+            except OSError as cleanup_error:
+                print(f"warning: installation committed, but old bundle cleanup requires review at {stage}: {cleanup_error}", file=sys.stderr)
+        elif not previous.exists() and not promoted:
             shutil.rmtree(stage, ignore_errors=True)
     # Development entry installs but never launches as part of this transaction.
 

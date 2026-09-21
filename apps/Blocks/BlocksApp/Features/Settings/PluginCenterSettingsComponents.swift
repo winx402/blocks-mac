@@ -200,12 +200,6 @@ struct PluginCenterDetailHeader<Trailing: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: BlocksVisualTokens.Spacing.sm) {
-            SettingsSecondaryPageHeader(
-                title: name,
-                backTitle: L10n.string("plugin.center.back"),
-                backAction: backAction
-            )
-
             HStack(spacing: BlocksVisualTokens.Spacing.md) {
                 PluginCenterSymbol(
                     systemName: symbolName,

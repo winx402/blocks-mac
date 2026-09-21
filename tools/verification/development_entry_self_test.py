@@ -116,6 +116,10 @@ def main():
       assert __import__('json').loads(d.MANIFEST.read_text())["appBundlePath"]==str(d.DESTINATION)
    finally:d.DESTINATION,d.LEGACY_DESTINATION,d.MANIFEST=saved_paths
    u=os.umask(0o022);d.install_development(prod);os.umask(u);assert (d.MANIFEST.stat().st_mode&0o777)==0o600
+   # Successful upgrades retain one app, not discoverable previous.app copies.
+   d.install_development(prod)
+   assert not list((root/"Library/Caches/BlocksDev/DevelopmentInstall.noindex").glob("*/previous.app"))
+   assert (d.DESTINATION/"Contents/MacOS/Blocks").read_text()=="new"
    app(d.DESTINATION,"old");d.MANIFEST.write_text("old");
    # A dormant registered job, including one appearing during staging, must
    # block before either the bundle or identity manifest is replaced.

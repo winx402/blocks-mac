@@ -1136,11 +1136,10 @@ struct BlocksWindowGlassConfigurator: NSViewRepresentable {
 struct BlocksSettingsWindowBacking: ViewModifier {
     func body(content: Content) -> some View {
         content
-            .toolbarBackground(.hidden, for: .windowToolbar)
+            .toolbarBackground(.visible, for: .windowToolbar)
             .background {
                 ZStack {
-                    Color.clear
-                        .blocksBackground(.content)
+                    BlocksSettingsCanvas()
                         .ignoresSafeArea(.container, edges: .all)
                     BlocksWindowGlassConfigurator()
                         .allowsHitTesting(false)
@@ -1150,19 +1149,54 @@ struct BlocksSettingsWindowBacking: ViewModifier {
     }
 }
 
-/// Settings has one structural surface under both the titlebar and detail.
-/// macOS 26 adds an independent scroll-edge compositing layer in the titlebar
-/// safe area, even when NSWindow's titlebar background is transparent. Disable
-/// that extra treatment only for settings detail; do not change foreground
-/// safe areas, native sidebar material, or other floating-window chrome.
-struct BlocksSettingsDetailBacking: ViewModifier {
-    @ViewBuilder
-    func body(content: Content) -> some View {
-        if #available(macOS 26.0, *) {
-            content.scrollEdgeEffectHidden(true, for: .top)
-        } else {
-            content
+private struct BlocksSettingsCanvas: NSViewRepresentable {
+    func makeNSView(context: Context) -> BlocksSettingsCanvasView { BlocksSettingsCanvasView() }
+    func updateNSView(_ nsView: BlocksSettingsCanvasView, context: Context) { nsView.updateFill() }
+}
+
+final class BlocksSettingsCanvasView: NSView {
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        setAccessibilityElement(false)
+        updateFill()
+    }
+    required init?(coder: NSCoder) { super.init(coder: coder); wantsLayer = true; updateFill() }
+    override var isOpaque: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateFill()
+    }
+    func updateFill() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            // On recent macOS releases both window/control backgrounds are
+            // white in Aqua. A small semantic-label blend keeps grouped white
+            // surfaces visible without pinning the app to a fixed RGB theme.
+            layer?.backgroundColor = (NSColor.windowBackgroundColor.blended(
+                withFraction: dark ? 0.015 : 0.045, of: .labelColor
+            ) ?? .windowBackgroundColor).cgColor
         }
+    }
+}
+
+/// The sidebar owns one continuous native material, including behind the
+/// window controls. Only the background ignores the titlebar safe area.
+struct BlocksSettingsSidebarBacking: ViewModifier {
+    func body(content: Content) -> some View {
+        content.background {
+            BlocksStructuralBackground(role: .sidebar)
+                .ignoresSafeArea(.container, edges: .top)
+        }
+    }
+}
+
+/// Keep the system scroll-edge treatment and foreground safe area. Disabling
+/// it made scrolled headings appear to run into the toolbar title.
+struct BlocksSettingsDetailBacking: ViewModifier {
+    func body(content: Content) -> some View {
+        content.clipped()
     }
 }
 
@@ -1213,16 +1247,25 @@ private struct BlocksMaterialSurface<SurfaceShape: Shape, Content: View>: View {
     private var colorSchemeContrast
     @Environment(\.controlActiveState)
     private var controlActiveState
+    @Environment(\.blocksSettingsPresentation) private var settingsPresentation
+    @Environment(\.colorScheme) private var colorScheme
 
     @ViewBuilder
     var body: some View {
         if role == .section {
             paddedContent
-                .background(
-                    Color(nsColor: role.opaqueFallbackColor)
-                        .opacity(reduceTransparency ? 1 : 0.58),
-                    in: shape
-                )
+                .background {
+                    if settingsPresentation {
+                        shape.fill(colorScheme == .dark
+                            ? Color(nsColor: .windowBackgroundColor)
+                            : Color(nsColor: .controlBackgroundColor))
+                            .overlay {
+                                if colorScheme == .dark { shape.fill(Color.white.opacity(0.055)) }
+                            }
+                    } else {
+                        shape.fill(Color(nsColor: role.opaqueFallbackColor).opacity(reduceTransparency ? 1 : 0.58))
+                    }
+                }
                 .overlay(surfaceBorder)
         } else {
             switch role.renderingMode(

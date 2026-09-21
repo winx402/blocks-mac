@@ -50,7 +50,7 @@ struct HooksSettingsPane: View {
         ScrollView {
                 VStack(
                     alignment: .leading,
-                    spacing: BlocksVisualTokens.Spacing.xl
+                    spacing: SettingsLayout.sectionSpacing
                 ) {
                     Group {
                         switch route {
@@ -104,7 +104,7 @@ struct HooksSettingsPane: View {
                     .frame(width: 0, height: 0)
                 }
             }
-            .scrollIndicators(.hidden)
+            .scrollIndicators(.automatic)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .onChange(of: route) { _, _ in
                 errorMessage = nil
@@ -819,10 +819,18 @@ struct HooksSettingsPane: View {
     private func confirmInstallation(
         _ pending: BlocksNativePluginPendingInstallation
     ) {
+        let navigationGeneration = routeStateStore.navigationGeneration
         performOperation(scope: .installation) {
             let plugin = try await pluginManager.confirmAndInstall(
                 pendingID: pending.id
             )
+            // Installation succeeds independently of navigation. A late
+            // registry refresh must not replace a newer page/history branch.
+            guard appModel.selectedSection == .hooks,
+                  routeStateStore.isCurrentNavigation(
+                    generation: navigationGeneration,
+                    section: .hooks
+                  ) else { return }
             route = .installed(plugin.id)
         }
     }

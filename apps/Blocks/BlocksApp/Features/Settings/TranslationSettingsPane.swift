@@ -639,22 +639,8 @@ struct TranslationSettingsPane: View {
         case .services:
             serviceManagementContent
         case .languageResources:
-            SettingsSecondaryPageHeader(
-                title: L10n.string("translation.languageResources.title"),
-                backTitle: L10n.string("common.back")
-            ) {
-                route = .overview
-                restoreOverview(at: SettingsSecondaryRouteAnchor.translationLanguageResources)
-            }
             languageResourceSection
         case .compatibilitySelection:
-            SettingsSecondaryPageHeader(
-                title: L10n.string("translation.selection.compatibility.title"),
-                backTitle: L10n.string("common.back")
-            ) {
-                route = .overview
-                restoreOverview(at: SettingsSecondaryRouteAnchor.translationCompatibility)
-            }
             compatibilitySelectionSection
         }
     }
@@ -839,14 +825,6 @@ struct TranslationSettingsPane: View {
 
     @ViewBuilder
     private var serviceManagementContent: some View {
-        SettingsSecondaryPageHeader(
-            title: L10n.string("translation.services.manage"),
-            backTitle: L10n.string("translation.services.back")
-        ) {
-                route = .overview
-                restoreOverview(at: SettingsSecondaryRouteAnchor.translationServices)
-        }
-
         enabledServiceManagementSection
         freeDisabledServiceSection
         requiredConfigurationServiceSection

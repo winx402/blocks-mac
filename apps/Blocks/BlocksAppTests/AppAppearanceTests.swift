@@ -1039,7 +1039,7 @@ final class AppAppearanceTests: XCTestCase {
         )
         XCTAssertEqual(
             BlocksVisualTokens.Control.settingsRowMinimumHeight,
-            44
+            40
         )
         XCTAssertEqual(
             BlocksVisualTokens.Density.micro.controlHeight,
@@ -1051,11 +1051,11 @@ final class AppAppearanceTests: XCTestCase {
         )
         XCTAssertEqual(
             BlocksVisualTokens.Layout.settingsTrailingColumnWidth,
-            280
+            240
         )
         XCTAssertEqual(
             BlocksVisualTokens.Layout.settingsFormContentMaxWidth,
-            820
+            760
         )
         XCTAssertEqual(
             BlocksVisualTokens.Layout.settingsCollectionContentMaxWidth,
@@ -1086,16 +1086,25 @@ final class AppAppearanceTests: XCTestCase {
         )
         XCTAssertEqual(
             BlocksVisualTokens.Layout.settingsTrailingColumnMinimumWidth,
-            220
+            160
         )
         XCTAssertEqual(
             BlocksVisualTokens.Layout.settingsTrailingColumnMaximumWidth,
-            360
+            300
         )
         XCTAssertEqual(
             BlocksVisualTokens.Layout.settingsLabelMinimumWidth,
-            260
+            180
         )
+    }
+
+    func testEmptySettingsFeedbackDoesNotReserveBlankCardSpace() {
+        let host = NSHostingView(rootView: VStack(spacing: 0) {
+            Color.clear.frame(height: 20)
+            SettingsFeedbackSlot(feedback: nil)
+            Color.clear.frame(height: 20)
+        }.frame(width: 500))
+        XCTAssertEqual(host.fittingSize.height, 40, accuracy: 1)
     }
 
     func testInteractionStatesHaveStableBehaviorContracts() {
@@ -2195,7 +2204,7 @@ final class AppAppearanceTests: XCTestCase {
         }
         XCTAssertEqual(groupRows.count, 5)
         XCTAssertTrue(groupRows.allSatisfy {
-            sourceList.accessibilityRole(at: $0)?.rawValue == "AXHeading"
+            sourceList.accessibilityRole(at: $0)?.rawValue != "AXHeading"
         })
         XCTAssertEqual(sourceList.selectedSection, .settings)
         XCTAssertTrue(sourceList.selectedRowIsVisible)

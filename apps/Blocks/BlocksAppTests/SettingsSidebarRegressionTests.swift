@@ -4,6 +4,18 @@ import XCTest
 
 @MainActor
 final class SettingsSidebarRegressionTests: XCTestCase {
+    func testSidebarUsesThirtyPointRowsAndSingleTenPointGroupGaps() throws {
+        let view = SettingsSourceListNativeView(frame: NSRect(x: 0, y: 0, width: 232, height: 680))
+        view.layoutSubtreeIfNeeded()
+        let screenshot = try XCTUnwrap(view.rowFrame(for: .screenshot))
+        let clipboard = try XCTUnwrap(view.rowFrame(for: .clipboardSettings))
+        let favorites = try XCTUnwrap(view.rowFrame(for: .translationFavorites))
+        let shortcuts = try XCTUnwrap(view.rowFrame(for: .shortcuts))
+        XCTAssertEqual(screenshot.height, 30, accuracy: 0.1)
+        XCTAssertEqual(clipboard.minY - screenshot.maxY, 0, accuracy: 0.1)
+        XCTAssertEqual(shortcuts.minY - favorites.maxY, 10, accuracy: 0.1)
+    }
+
     func testSecondaryPageInsetDoesNotChangeOverviewRoutes() {
         let routes = SettingsRouteStateStore()
         for mode: SettingsViewMode in [.translation, .clipboard, .screenshot, .providers] {
@@ -65,7 +77,7 @@ final class SettingsSidebarRegressionTests: XCTestCase {
         let groupRows = (0 ..< sourceList.rowCount).filter { !sourceList.isSelectable(row: $0) }
         XCTAssertEqual(groupRows.count, 5)
         XCTAssertTrue(groupRows.allSatisfy {
-            sourceList.accessibilityRole(at: $0)?.rawValue == "AXHeading"
+            sourceList.accessibilityRole(at: $0)?.rawValue != "AXHeading"
         })
     }
 

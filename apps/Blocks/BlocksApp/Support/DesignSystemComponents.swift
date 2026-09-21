@@ -1,6 +1,34 @@
 import AppKit
 import SwiftUI
 
+/// Only the settings scene opts into grouped surfaces. Floating panels keep
+/// their independent materials and interaction treatments.
+private struct BlocksSettingsPresentationKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var blocksSettingsPresentation: Bool {
+        get { self[BlocksSettingsPresentationKey.self] }
+        set { self[BlocksSettingsPresentationKey.self] = newValue }
+    }
+}
+
+struct BlocksSettingsCategoryIcon: View {
+    let systemImage: String
+    let tint: Color
+    var size: CGFloat = 40
+
+    var body: some View {
+        Image(systemName: systemImage)
+            .font(.system(size: size * 0.55, weight: .medium))
+            .foregroundStyle(.white)
+            .frame(width: size, height: size)
+            .background(tint, in: RoundedRectangle(cornerRadius: size * 0.23, style: .continuous))
+            .accessibilityHidden(true)
+    }
+}
+
 enum BlocksActionButtonRole: Sendable {
   case primary
   case secondary

@@ -5,6 +5,23 @@ import XCTest
 
 @MainActor
 final class SettingsWindowBackingTests: XCTestCase {
+    func testSettingsSurfaceScopeDoesNotLeakIntoFloatingViews() {
+        var values = EnvironmentValues()
+        XCTAssertFalse(values.blocksSettingsPresentation)
+        values.blocksSettingsPresentation = true
+        XCTAssertTrue(values.blocksSettingsPresentation)
+        XCTAssertFalse(EnvironmentValues().blocksSettingsPresentation)
+    }
+
+    func testLightCanvasRemainsDistinctFromWhiteGroups() throws {
+        let view = BlocksSettingsCanvasView(frame: .init(x: 0, y: 0, width: 100, height: 100))
+        view.appearance = NSAppearance(named: .aqua)
+        view.updateFill()
+        let canvas = try XCTUnwrap(view.layer?.backgroundColor)
+        let color = try XCTUnwrap(NSColor(cgColor: canvas)?.usingColorSpace(.deviceRGB))
+        XCTAssertLessThan(color.redComponent, 0.99)
+        XCTAssertGreaterThan(color.redComponent, 0.9)
+    }
     func testSingleBackingSpansTitlebarAndDetailWithoutRemovingForegroundSafeArea() throws {
         for appearance in [NSAppearance.Name.aqua, .darkAqua] {
             for width: CGFloat in [820, 980, 1_440] {
@@ -38,8 +55,9 @@ final class SettingsWindowBackingTests: XCTestCase {
         root.layoutSubtreeIfNeeded()
 
         let surfaces = descendants(root).compactMap { $0 as? BlocksAppKitGlassSurfaceView }
-        let contentSurfaces = surfaces.filter { $0.blocksSurfaceConfiguration.role == .content }
-        XCTAssertEqual(contentSurfaces.count, 1, "Titlebar and detail must share one backing")
+        let contentSurfaces = descendants(root).compactMap { $0 as? BlocksSettingsCanvasView }
+        XCTAssertEqual(contentSurfaces.count, 1, "Titlebar and detail must share one opaque system canvas")
+        XCTAssertFalse(surfaces.contains { $0.blocksSurfaceConfiguration.role == .content }, "Settings must not retain the old dark material canvas")
         let backing = try XCTUnwrap(contentSurfaces.first)
         let backingFrame = backing.convert(backing.bounds, to: root)
         XCTAssertEqual(backingFrame.minX, root.bounds.minX, accuracy: 0.5)
@@ -49,9 +67,17 @@ final class SettingsWindowBackingTests: XCTestCase {
         XCTAssertGreaterThan(root.safeAreaInsets.top, 0, "Foreground still respects native titlebar")
         XCTAssertTrue(window.styleMask.contains(.fullSizeContentView))
         XCTAssertTrue(window.titlebarAppearsTransparent)
-        XCTAssertEqual(backing.blocksSurfaceConfiguration.cornerRadius, 0)
+        XCTAssertTrue(backing.isOpaque)
+        XCTAssertNil(backing.hitTest(.zero))
         XCTAssertEqual(surfaces.filter { $0.blocksSurfaceConfiguration.role == .sidebar }.count, 1)
         XCTAssertEqual(BlocksSurfaceRole.sidebar.appKitMaterial, .sidebar)
+        let sidebar = try XCTUnwrap(surfaces.first { $0.blocksSurfaceConfiguration.role == .sidebar })
+        let sidebarFrame = sidebar.convert(sidebar.bounds, to: root)
+        // macOS26 keeps its floating sidebar's native 8pt outer inset. The
+        // material must extend above the content safe area into the titlebar,
+        // not paint over that system-owned outer margin or window controls.
+        XCTAssertLessThan(sidebarFrame.minY, root.safeAreaInsets.top,
+                          "Sidebar material must extend continuously into the titlebar")
 
         let marker = try XCTUnwrap(descendants(root).first { $0.identifier?.rawValue == "settings.backing.foreground" })
         let markerFrame = marker.convert(marker.bounds, to: root)
@@ -88,7 +114,8 @@ private struct SettingsBackingFixture: View {
     var body: some View {
         NavigationSplitView {
             Text("Sidebar")
-                .blocksBackground(.sidebar)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .modifier(BlocksSettingsSidebarBacking())
                 .navigationSplitViewColumnWidth(min: 208, ideal: 224, max: 248)
         } detail: {
             ScrollView {

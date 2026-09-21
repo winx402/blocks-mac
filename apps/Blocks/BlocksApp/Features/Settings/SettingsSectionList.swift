@@ -38,7 +38,8 @@ enum SettingsLayout {
     static let trailingColumnWidth = BlocksVisualTokens.Layout.settingsTrailingColumnWidth
     static let trailingColumnMaximumWidth = BlocksVisualTokens.Layout.settingsTrailingColumnMaximumWidth
     static let labelMinimumWidth = BlocksVisualTokens.Layout.settingsLabelMinimumWidth
-    static let rowSpacing = BlocksVisualTokens.Spacing.xl
+    static let rowSpacing = BlocksVisualTokens.Spacing.md
+    static let sectionSpacing: CGFloat = 18
     static let rowMinHeight = BlocksVisualTokens.Control.settingsRowMinimumHeight
     static let rowVerticalPadding = BlocksVisualTokens.Spacing.xs
     /// The shared inset for both section headers and their row content.
@@ -119,14 +120,14 @@ struct SettingsSectionHeader<Actions: View>: View {
     var body: some View {
         HStack(alignment: .center, spacing: BlocksVisualTokens.Spacing.sm) {
             Text(title)
-                .font(.headline.weight(.semibold))
+                .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.primary)
                 .accessibilityHeading(.h2)
                 .settingsGeometryProbe("section.\(title)")
             Spacer(minLength: BlocksVisualTokens.Spacing.sm)
             actions
         }
-        .frame(maxWidth: .infinity, minHeight: 24, alignment: .leading)
+        .frame(maxWidth: .infinity, minHeight: 20, alignment: .leading)
         .padding(.horizontal, SettingsLayout.sectionContentHorizontalInset)
     }
 }
@@ -151,8 +152,10 @@ struct SettingsSection<Content: View, HeaderActions: View>: View {
         // macOS GroupBox exposes reciprocal title relationships that cause
         // some accessibility-tree readers to recurse and terminate.
         VStack(alignment: .leading, spacing: BlocksVisualTokens.Spacing.sm) {
-            SettingsSectionHeader(title: title) {
-                headerActions
+            if !title.isEmpty {
+                SettingsSectionHeader(title: title) {
+                    headerActions
+                }
             }
 
             VStack(spacing: 0) {
@@ -161,13 +164,13 @@ struct SettingsSection<Content: View, HeaderActions: View>: View {
             .padding(.horizontal, SettingsLayout.sectionContentHorizontalInset)
             .padding(.vertical, BlocksVisualTokens.Spacing.xxs)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .blocksSurface(.section)
+            .blocksSurface(.section, cornerRadius: BlocksVisualTokens.Layout.settingsGroupCornerRadius)
             // Navigation-row interaction chrome may reach the surface edge.
             // Clipping the complete section—not each row—keeps first, middle
             // and last rows continuous with the card's outer corners.
             .clipShape(
                 RoundedRectangle(
-                    cornerRadius: BlocksVisualTokens.CornerRadius.section,
+                    cornerRadius: BlocksVisualTokens.Layout.settingsGroupCornerRadius,
                     style: .continuous
                 )
             )
@@ -243,7 +246,7 @@ struct SettingsRowShell<Trailing: View>: View {
                 .settingsGeometryProbe("row.\(title)")
             if let detail, !detail.isEmpty {
                 Text(detail)
-                    .font(.footnote)
+                    .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
@@ -252,7 +255,7 @@ struct SettingsRowShell<Trailing: View>: View {
                 Group {
                     if let status {
                         Label(status.message, systemImage: status.kind.systemImage)
-                            .foregroundStyle(status.kind.color)
+                            .foregroundStyle(status.kind == .information ? Color.secondary : status.kind.color)
                             .help(status.message)
                             .accessibilityLabel(status.message)
                     } else {
@@ -260,7 +263,7 @@ struct SettingsRowShell<Trailing: View>: View {
                             .accessibilityHidden(true)
                     }
                 }
-                .font(.footnote.weight(.medium))
+                .font(.callout.weight(.medium))
                 .lineLimit(2)
                 .multilineTextAlignment(.leading)
                 .fixedSize(horizontal: false, vertical: true)
@@ -311,26 +314,21 @@ struct SettingsFeedbackDescriptor: Equatable {
     let detail: String
 }
 
-/// Reserves one stable feedback region so validation and completion messages
-/// never push the surrounding form controls.
+/// Feedback follows its operation rows. Empty groups do not reserve an opaque
+/// blank well; showing a message never replaces the control or its focus ID.
 struct SettingsFeedbackSlot: View {
     let feedback: SettingsFeedbackDescriptor?
     var minimumHeight: CGFloat = 54
 
     var body: some View {
-        Group {
-            if let feedback {
-                SettingsInlineFeedback(
-                    kind: feedback.kind,
-                    title: feedback.title,
-                    detail: feedback.detail
-                )
-            } else {
-                Color.clear
-                    .accessibilityHidden(true)
-            }
+        if let feedback {
+            SettingsInlineFeedback(
+                kind: feedback.kind,
+                title: feedback.title,
+                detail: feedback.detail
+            )
+            .frame(maxWidth: .infinity, minHeight: minimumHeight, alignment: .leading)
         }
-        .frame(maxWidth: .infinity, minHeight: minimumHeight, alignment: .leading)
     }
 }
 
@@ -407,7 +405,7 @@ struct SettingsReadOnlyRow: View {
                 .settingsGeometryProbe("row.\(title)")
             if let detail, !detail.isEmpty {
                 Text(detail)
-                    .font(.footnote)
+                    .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
@@ -425,7 +423,7 @@ struct SettingsSectionNote: View {
 
     var body: some View {
         Text(text)
-            .font(.footnote)
+            .font(.callout)
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
             .textSelection(.enabled)

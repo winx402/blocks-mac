@@ -1,4 +1,5 @@
 import AppKit
+import BlocksCore
 import SwiftUI
 
 struct SettingsShellView: View {
@@ -27,8 +28,11 @@ struct SettingsShellView: View {
                     ScrollView {
                         VStack(
                             alignment: .leading,
-                            spacing: BlocksVisualTokens.Spacing.xl
+                            spacing: SettingsLayout.sectionSpacing
                         ) {
+                            if mode.showsRootOverview, !routeStateStore.isSecondaryPage(for: mode) {
+                                SettingsPageHeader(mode: mode)
+                            }
                             settingsRoutesContent
                             BlocksPluginUISlotHost(
                                 manager: appModel.translationPluginManager,
@@ -55,13 +59,11 @@ struct SettingsShellView: View {
                             BlocksVisualTokens.Layout
                                 .settingsPageHorizontalPadding
                         )
-                        .padding(.top, routeStateStore.isSecondaryPage(for: mode)
-                            ? BlocksVisualTokens.Spacing.md
-                            : BlocksVisualTokens.Spacing.xl)
+                        .padding(.top, BlocksVisualTokens.Spacing.md)
                         .padding(.bottom, 48)
                         .frame(maxWidth: .infinity, alignment: .center)
                     }
-                    .scrollIndicators(.hidden)
+                    .scrollIndicators(.automatic)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                     .onChange(of: appModel.settingsAttentionRequest?.token) { _, _ in
                         scrollToAttentionRequest(using: proxy)
@@ -76,18 +78,7 @@ struct SettingsShellView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .navigationTitle(mode.title)
-        .toolbar {
-            if mode == .clipboardPrivacy {
-                ToolbarItem(placement: .navigation) {
-                    Button {
-                        appModel.selectedSection = .clipboardSettings
-                    } label: {
-                        Label(L10n.string("settings.backToClipboard"), systemImage: "chevron.left")
-                    }
-                }
-            }
-        }
+        .navigationTitle(routeStateStore.location(for: mode).title(appModel: appModel))
     }
 
     private func scrollToAttentionRequest(using proxy: ScrollViewProxy) {
@@ -146,14 +137,226 @@ struct SettingsShellView: View {
     }
 }
 
+extension SettingsViewMode {
+    var showsRootOverview: Bool {
+        self == .general || self == .screenshot || self == .clipboard || self == .translation
+    }
+}
+
+/// Root overview only. Navigation belongs to the window toolbar.
+struct SettingsPageHeader: View {
+    let mode: SettingsViewMode
+    var compact = false
+
+    private var summary: String { L10n.string("settings.overview.\(mode.pluginContextID)") }
+
+    var body: some View {
+        Group {
+            if compact {
+                HStack(spacing: 12) {
+                    icon
+                    VStack(alignment: .leading, spacing: 4) {
+                        title
+                        Text(summary).font(.callout).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                }
+            } else {
+                VStack(spacing: 6) {
+                    icon
+                    title
+                    Text(summary)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .padding(16)
+        .blocksSurface(.section, cornerRadius: BlocksVisualTokens.Layout.settingsGroupCornerRadius)
+        .accessibilityElement(children: .contain)
+    }
+
+    private var title: some View {
+        Text(mode.title).font(.title2.weight(.semibold)).accessibilityHeading(.h1)
+    }
+    private var icon: some View {
+        BlocksSettingsCategoryIcon(systemImage: mode.appSection?.settingsIconSystemImage ?? "gearshape",
+            tint: mode.appSection?.settingsIconColor ?? .gray, size: compact ? 32 : 40)
+    }
+}
+
+/// A visited page identity, not a snapshot of the form or its credentials.
+struct SettingsNavigationLocation: Equatable {
+    let section: AppSection
+    let routeToken: String
+
+    @MainActor
+    func isAvailable(appModel: AppModel) -> Bool {
+        switch section.settingsViewMode {
+        case .hooks:
+            switch PluginCenterRoute(token: routeToken) {
+            case .catalog: return routeToken == "catalog"
+            case .installed(let id):
+                return appModel.translationPluginManager.plugins.contains { $0.id == id }
+            case .builtIn(let id):
+                return SettingsNavigationCatalog.entries.contains { $0.id == id }
+            }
+        case .screenshot: return ["root", "watermarks"].contains(routeToken)
+        case .clipboard: return ["root", "tags"].contains(routeToken)
+        case .translation: return ["root", "services", "languageResources", "compatibilitySelection"].contains(routeToken)
+        case .providers: return ["overview", "details"].contains(routeToken)
+        default: return routeToken == "root"
+        }
+    }
+
+    @MainActor
+    func title(appModel: AppModel) -> String {
+        switch (section.settingsViewMode, routeToken) {
+        case (.screenshot, "watermarks"): return L10n.string("settings.screenshot.watermarks")
+        case (.clipboard, "tags"): return L10n.string("settings.clipboardTags")
+        case (.translation, "services"): return L10n.string("translation.services.manage")
+        case (.translation, "languageResources"): return L10n.string("translation.languageResources.title")
+        case (.translation, "compatibilitySelection"): return L10n.string("translation.selection.compatibility.title")
+        case (.providers, "details"): return L10n.string("settings.providerDefault")
+        case (.hooks, _):
+            switch PluginCenterRoute(token: routeToken) {
+            case .catalog: return section.title
+            case .installed(let id):
+                return appModel.translationPluginManager.plugins.first { $0.id == id }?.displayName ?? section.title
+            case .builtIn(let id):
+                return SettingsNavigationCatalog.entries.first { $0.id == id }?.localized().name ?? section.title
+            }
+        default: return section.title
+        }
+    }
+}
+
+@MainActor
+private enum SettingsNavigationCatalog {
+    static let entries = (try? BlocksBuiltInPluginCatalog.load())?.document.entries ?? []
+}
+
+/// Native chevrons: click to move one page, right-click for visited pages.
+/// The toolbar remains present even when either side is disabled.
+struct SettingsNavigationToolbar: View {
+    @EnvironmentObject private var appModel: AppModel
+    @EnvironmentObject private var pluginManager: BlocksNativePluginManager
+    @ObservedObject var store: SettingsRouteStateStore
+    let selectSection: (AppSection) -> Void
+
+    var body: some View {
+        SettingsNavigationButtonsBridge(
+            backEntries: historyEntries(backward: true),
+            forwardEntries: historyEntries(backward: false),
+            navigate: navigate,
+            jump: { index in
+                if let section = store.navigate(toHistoryIndex: index, validating: isValid) {
+                    selectSection(section)
+                }
+            }
+        )
+        .frame(width: 58, height: 28)
+    }
+
+    private func navigate(backward: Bool) {
+        if let section = store.navigate(backward: backward, validating: isValid) {
+            selectSection(section)
+        }
+    }
+
+    private func historyEntries(backward: Bool) -> [SettingsHistoryMenuEntry] {
+        store.historyIndices(backward: backward, validating: isValid).map { index in
+            SettingsHistoryMenuEntry(index: index, title: store.history[index].title(appModel: appModel))
+        }
+    }
+
+    private func isValid(_ location: SettingsNavigationLocation) -> Bool {
+        // Observe the registry directly; AppModel does not relay every plugin
+        // mutation, including an uninstall while another section is visible.
+        if location.section == .hooks,
+           case .installed(let id) = PluginCenterRoute(token: location.routeToken) {
+            return pluginManager.plugins.contains { $0.id == id }
+        }
+        return location.isAvailable(appModel: appModel)
+    }
+}
+
+
 @MainActor
 final class SettingsRouteStateStore: ObservableObject {
+    // History stores identities only. Scroll/focus/drafts remain independently
+    // owned by the window store and are never copied into history entries.
+    @Published private(set) var history: [SettingsNavigationLocation] = []
+    @Published private(set) var historyIndex = -1
+    private(set) var navigationGeneration: UInt64 = 0
     private var scrollOffsets: [String: CGFloat] = [:]
     @Published private var secondaryRouteTokens: [SettingsViewMode: String] = [:]
     @Published private(set) var secondaryScrollRequest: SettingsSecondaryScrollRequest?
     @Published private(set) var focusRestorationRequest: SettingsFocusRestorationRequest?
     private var focusTargets: [String: String] = [:]
     private var providerDetailsDrafts: [String: ProviderDetailsRouteDraft] = [:]
+
+    var currentLocation: SettingsNavigationLocation? {
+        history.indices.contains(historyIndex) ? history[historyIndex] : nil
+    }
+
+    func location(for mode: SettingsViewMode) -> SettingsNavigationLocation {
+        SettingsNavigationLocation(
+            section: mode.appSection ?? .settings,
+            routeToken: secondaryRouteTokens[mode] ?? defaultSecondaryRouteToken(for: mode)
+        )
+    }
+
+    func recordSectionSelection(_ section: AppSection) {
+        record(location(for: section.settingsViewMode))
+    }
+
+    /// Async work may finish normally, but may navigate only if the user has
+    /// not moved since it began, even if they subsequently returned here.
+    func isCurrentNavigation(generation: UInt64, section: AppSection) -> Bool {
+        navigationGeneration == generation && currentLocation?.section == section
+    }
+
+    private func record(_ location: SettingsNavigationLocation) {
+        guard currentLocation != location else { return }
+        navigationGeneration &+= 1
+        if historyIndex + 1 < history.count {
+            history.removeSubrange((historyIndex + 1)..<history.count)
+        }
+        history.append(location)
+        historyIndex = history.count - 1
+    }
+
+    func historyIndices(backward: Bool, validating isValid: (SettingsNavigationLocation) -> Bool) -> [Int] {
+        guard history.indices.contains(historyIndex) else { return [] }
+        let indices = backward
+            ? Array(history.indices.filter { $0 < historyIndex }.reversed())
+            : Array(history.indices.filter { $0 > historyIndex })
+        return indices.filter { isValid(history[$0]) }
+    }
+
+    @discardableResult
+    func navigate(toHistoryIndex index: Int, validating isValid: (SettingsNavigationLocation) -> Bool = { _ in true }) -> AppSection? {
+        guard history.indices.contains(index), index != historyIndex,
+              isValid(history[index]) else { return nil }
+        let destination = history[index]
+        navigationGeneration &+= 1
+        historyIndex = index
+        secondaryRouteTokens[destination.section.settingsViewMode] = destination.routeToken
+        // Cancel any old anchor request: history restores the exact saved offset.
+        secondaryScrollRequest = nil
+        requestFocusRestorationForSidebarSelection(of: destination.section.settingsViewMode)
+        return destination.section
+    }
+
+    @discardableResult
+    func navigate(backward: Bool, validating isValid: (SettingsNavigationLocation) -> Bool = { _ in true }) -> AppSection? {
+        guard let index = historyIndices(backward: backward, validating: isValid).first else { return nil }
+        return navigate(toHistoryIndex: index, validating: isValid)
+    }
 
     func isSecondaryPage(for mode: SettingsViewMode) -> Bool {
         guard let token = secondaryRouteTokens[mode] else { return false }
@@ -174,6 +377,8 @@ final class SettingsRouteStateStore: ObservableObject {
         switch mode {
         case .providers:
             "overview"
+        case .hooks:
+            "catalog"
         default:
             "root"
         }
@@ -208,6 +413,11 @@ final class SettingsRouteStateStore: ObservableObject {
                 guard let self else { return }
                 guard self.secondaryRouteTokens[mode] != token else { return }
                 self.secondaryRouteTokens[mode] = token
+                // Delayed work belonging to a page that is no longer visible
+                // may update its remembered route, but cannot hijack history.
+                if self.currentLocation == nil || self.currentLocation?.section == mode.appSection {
+                    self.record(self.location(for: mode))
+                }
             }
         )
     }

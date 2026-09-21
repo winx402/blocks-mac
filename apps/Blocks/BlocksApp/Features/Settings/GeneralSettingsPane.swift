@@ -22,8 +22,13 @@ struct GeneralSettingsPane: View {
 
     @ViewBuilder
     private var content: some View {
+        applicationSettingsSection
+        releaseSettingsSection
         FeedbackSettingsSection()
+        diagnosticsSettingsSection
+    }
 
+    private var applicationSettingsSection: some View {
         SettingsSection(
             title: L10n.string("settings.general.application")
         ) {
@@ -74,40 +79,10 @@ struct GeneralSettingsPane: View {
                 .labelsHidden()
                 .pickerStyle(.menu)
             }
-
-            SettingsRowDivider()
-
-            DisclosureGroup(isExpanded: $glassDiagnosticsExpanded) {
-                VStack(spacing: 0) {
-                    SettingsFormRow(
-                        title: L10n.string("settings.glassDiagnostics.system"),
-                        detail: SystemTransparencyDiagnostics.reduceTransparencyEnabled
-                            ? L10n.string("settings.glassDiagnostics.reduceOnDetail")
-                            : L10n.string("settings.glassDiagnostics.reduceOffDetail")
-                    ) {
-                        Text(SystemTransparencyDiagnostics.reduceTransparencyEnabled ? L10n.string("settings.glassDiagnostics.reduceOn") : L10n.string("settings.glassDiagnostics.reduceOff"))
-                            .foregroundStyle(SystemTransparencyDiagnostics.reduceTransparencyEnabled ? .orange : .secondary)
-                    }
-
-                    SettingsRowDivider()
-
-                    SettingsFormRow(
-                        title: L10n.string("settings.glassDiagnostics.materialNote"),
-                        detail: nil
-                    ) {
-                        Text("macOS")
-                            .fontDesign(.monospaced)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .padding(.top, 6)
-            } label: {
-                Label(L10n.string("settings.diagnostics.disclosure"), systemImage: "circle.lefthalf.filled")
-                    .font(.subheadline.weight(.medium))
-            }
-            .padding(.vertical, SettingsLayout.rowVerticalPadding)
         }
+    }
 
+    private var releaseSettingsSection: some View {
         SettingsSection(
             title: L10n.string("release.section.title")
         ) {
@@ -178,6 +153,42 @@ struct GeneralSettingsPane: View {
                 .disabled(!appUpdates.canChangePreferences)
                 .accessibilityLabel(L10n.string("updates.track.title"))
             }
+        }
+    }
+
+    private var diagnosticsSettingsSection: some View {
+        SettingsSection(
+            title: L10n.string("settings.general.advanced")
+        ) {
+            DisclosureGroup(isExpanded: $glassDiagnosticsExpanded) {
+                VStack(spacing: 0) {
+                    SettingsFormRow(
+                        title: L10n.string("settings.glassDiagnostics.system"),
+                        detail: SystemTransparencyDiagnostics.reduceTransparencyEnabled
+                            ? L10n.string("settings.glassDiagnostics.reduceOnDetail")
+                            : L10n.string("settings.glassDiagnostics.reduceOffDetail")
+                    ) {
+                        Text(SystemTransparencyDiagnostics.reduceTransparencyEnabled ? L10n.string("settings.glassDiagnostics.reduceOn") : L10n.string("settings.glassDiagnostics.reduceOff"))
+                            .foregroundStyle(SystemTransparencyDiagnostics.reduceTransparencyEnabled ? .orange : .secondary)
+                    }
+
+                    SettingsRowDivider()
+
+                    SettingsFormRow(
+                        title: L10n.string("settings.glassDiagnostics.materialNote"),
+                        detail: nil
+                    ) {
+                        Text("macOS")
+                            .fontDesign(.monospaced)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.top, 6)
+            } label: {
+                Label(L10n.string("settings.diagnostics.disclosure"), systemImage: "circle.lefthalf.filled")
+                    .font(.subheadline.weight(.medium))
+            }
+            .padding(.vertical, SettingsLayout.rowVerticalPadding)
         }
     }
 

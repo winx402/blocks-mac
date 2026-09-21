@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 enum AppSection: String, CaseIterable, Identifiable {
@@ -101,5 +102,41 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .settings:
             .gray
         }
+    }
+
+    /// Settings-only artwork: do not change floating-panel or menu icons.
+    var settingsIconSystemImage: String {
+        switch self {
+        case .clipboardSettings: "clipboard"
+        case .translationSettings: "character.bubble"
+        case .translationFavorites: "star"
+        case .providers: "sparkles"
+        default: systemImage
+        }
+    }
+
+    var settingsIconColor: Color {
+        let base: NSColor = switch self {
+        case .screenshot: .systemOrange
+        case .clipboardSettings: .systemTeal
+        case .clipboardPrivacy: .systemGreen
+        case .translationSettings: .systemIndigo
+        case .translationFavorites: .systemOrange
+        case .shortcuts: .systemPurple
+        case .permissions: .systemRed
+        case .providers: .systemTeal
+        case .agentCLI: .systemBlue
+        case .hooks: .systemPink
+        case .dataAudit: .systemBlue
+        case .settings: .systemGray
+        }
+        return Color(nsColor: NSColor(name: nil) { appearance in
+            var resolved = base
+            appearance.performAsCurrentDrawingAppearance {
+                let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                resolved = base.blended(withFraction: dark ? 0.24 : 0.12, of: .darkGray) ?? base
+            }
+            return resolved
+        })
     }
 }
