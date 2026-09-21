@@ -612,9 +612,9 @@ final class TranslationStoreTests: XCTestCase {
             TranslationResultHeaderStatusLayout
                 .showsRetryControl(for: .succeeded)
         )
-        XCTAssertEqual(SettingsLayout.rowMinHeight, 44)
-        XCTAssertEqual(SettingsLayout.trailingColumnWidth, 280)
-        XCTAssertEqual(SettingsLayout.trailingColumnMaximumWidth, 360)
+        XCTAssertEqual(SettingsLayout.rowMinHeight, 40)
+        XCTAssertEqual(SettingsLayout.trailingColumnWidth, 240)
+        XCTAssertEqual(SettingsLayout.trailingColumnMaximumWidth, 300)
         XCTAssertEqual(
             TranslationResultHeaderStatusLayout.hitTarget,
             TranslationPanelMetrics.compactIconHitTarget
