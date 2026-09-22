@@ -657,6 +657,62 @@ protocol SelectionHelperLoopbackConnecting: AnyObject {
     ) -> Result<Data, SelectionAgentServiceFailure>
 }
 
+/// The Network state callback can report a terminal state before an already
+/// registered receive delivers its final EOF. Once receive owns the response,
+/// only that receive (or the caller's bounded waiter) may settle the request.
+struct SelectionHelperLoopbackReceiveArbiter {
+    enum Decision: Equatable {
+        case pending
+        case resolve(Result<Data, SelectionAgentServiceFailure>)
+    }
+
+    private var awaitingReceive = false
+    private var isTerminal = false
+    private var response = Data()
+
+    @discardableResult
+    mutating func registerReceive() -> Bool {
+        guard !isTerminal else { return false }
+        awaitingReceive = true
+        return true
+    }
+
+    mutating func receive(
+        data: Data?,
+        isComplete: Bool,
+        hasTransportError: Bool
+    ) -> Decision {
+        guard !isTerminal else { return .pending }
+        awaitingReceive = false
+        if let data { response.append(data) }
+        if response.count > BlocksSelectionHelperProtocol.maximumWireBytes {
+            return finish(.failure(.invalidResponse))
+        }
+        if hasTransportError {
+            return finish(.failure(.connectionFailed))
+        }
+        guard isComplete else { return .pending }
+        guard response.last == 0x0A,
+              let newline = response.firstIndex(of: 0x0A),
+              newline == response.index(before: response.endIndex) else {
+            return finish(.failure(.invalidResponse))
+        }
+        return finish(.success(Data(response[..<newline])))
+    }
+
+    mutating func transportStateFailed() -> Decision {
+        guard !isTerminal, !awaitingReceive else { return .pending }
+        return finish(.failure(.connectionFailed))
+    }
+
+    private mutating func finish(
+        _ result: Result<Data, SelectionAgentServiceFailure>
+    ) -> Decision {
+        isTerminal = true
+        return .resolve(result)
+    }
+}
+
 final class SelectionHelperLoopbackConnection:
     @unchecked Sendable
 {
@@ -694,38 +750,23 @@ final class SelectionHelperLoopbackConnection:
             label:
                 "app.blocks.selection-helper.client"
         )
-        var response = Data()
+        var receiveArbiter = SelectionHelperLoopbackReceiveArbiter()
         func receiveNext() {
+            guard receiveArbiter.registerReceive() else { return }
             connection.receive(
                 minimumIncompleteLength: 1,
                 maximumLength: 64 * 1_024
             ) { data, _, isComplete, error in
-                if let data {
-                    response.append(data)
-                    if response.count >
-                        BlocksSelectionHelperProtocol
-                            .maximumWireBytes {
-                        waiter.resolve(.failure(.invalidResponse))
-                        connection.cancel()
-                        return
-                    }
-                }
-                if error != nil {
-                    waiter.resolve(.failure(.connectionFailed))
-                    connection.cancel()
-                } else if isComplete {
-                    guard response.last == 0x0A,
-                          let newline = response.firstIndex(of: 0x0A),
-                          newline == response.index(before: response.endIndex)
-                    else {
-                        waiter.resolve(.failure(.invalidResponse))
-                        connection.cancel()
-                        return
-                    }
-                    waiter.resolve(.success(Data(response[..<newline])))
-                    connection.cancel()
-                } else {
+                switch receiveArbiter.receive(
+                    data: data,
+                    isComplete: isComplete,
+                    hasTransportError: error != nil
+                ) {
+                case .pending:
                     receiveNext()
+                case let .resolve(result):
+                    waiter.resolve(result)
+                    connection.cancel()
                 }
             }
         }
@@ -738,9 +779,7 @@ final class SelectionHelperLoopbackConnection:
                     isComplete: true,
                     completion: .contentProcessed { error in
                         if error != nil {
-                            waiter.resolve(
-                                .failure(.connectionFailed)
-                            )
+                            waiter.resolve(.failure(.connectionFailed))
                             connection.cancel()
                             return
                         }
@@ -748,7 +787,9 @@ final class SelectionHelperLoopbackConnection:
                     }
                 )
             case .failed, .cancelled:
-                waiter.resolve(.failure(.connectionFailed))
+                if case let .resolve(result) = receiveArbiter.transportStateFailed() {
+                    waiter.resolve(result)
+                }
             default:
                 break
             }
@@ -764,46 +805,118 @@ extension SelectionHelperLoopbackConnection:
     SelectionHelperLoopbackConnecting {}
 
 final class SelectionHelperClient: @unchecked Sendable {
+    enum UpdateLifecycleDiagnosticEvent: Equatable, Sendable {
+        enum Stage: String, Sendable {
+            case localGate = "local_gate"
+            case locator
+            case helperNotRunning = "helper_not_running"
+            case pairingKey = "pairing_key"
+            case health
+            case prepare
+            case terminate
+            case processExit = "process_exit"
+        }
+
+        enum FailureCode: String, Sendable {
+            case localGateBusy = "local_gate_busy"
+            case locatorConflict = "locator_conflict"
+            case keyAbsent = "key_absent"
+            case healthTransportFailure = "health_transport_failure"
+            case updateCapabilityMissing = "update_capability_missing"
+            case prepareTransportFailure = "prepare_transport_failure"
+            case prepareRejected = "prepare_rejected"
+            case terminateTransportFailure = "terminate_transport_failure"
+            case terminateRejected = "terminate_rejected"
+            case processExitTimeout = "process_exit_timeout"
+        }
+
+        case started
+        case succeeded(Stage)
+        case failed(Stage, FailureCode)
+    }
+
+    typealias UpdateLifecycleDiagnosticRecorder = @Sendable (UpdateLifecycleDiagnosticEvent) -> Void
     private static let pairingMutationLock = NSLock()
     private let applicationUpdateGate = ApplicationOperationAdmissionGate(name: "Selection Helper client")
     private let updateStateLock = NSLock()
     private var helperWasRunningBeforeUpdate = false
     private var updatePreparationStarted = false
     private var pasteTargetInspectionApplicationLease: ApplicationOperationAdmissionGate.Lease?
+    private let updateLifecycleDiagnosticRecorder: UpdateLifecycleDiagnosticRecorder
 
     @MainActor
     func prepareForApplicationUpdate() async throws {
         try await Task.detached { [self] in
-            try applicationUpdateGate.pauseIfIdle()
+            recordUpdateLifecycle(.started)
+            do {
+                try applicationUpdateGate.pauseIfIdle()
+            } catch {
+                recordUpdateLifecycle(.failed(.localGate, .localGateBusy))
+                throw error
+            }
             guard !applicationLocator.hasConflictingRunningApplication else {
+                recordUpdateLifecycle(.failed(.locator, .locatorConflict))
                 throw SelectionAgentServiceFailure.helperInstallationConflict
             }
-            guard applicationLocator.isRunning else { return }
+            guard applicationLocator.isRunning else {
+                recordUpdateLifecycle(.succeeded(.helperNotRunning))
+                return
+            }
             updateStateLock.withLock {
                 helperWasRunningBeforeUpdate = true
             }
-            guard let key = keyStore.load() else { throw SelectionAgentServiceFailure.notPaired }
-            guard case let .success(healthResponse) = sendAuthenticated(
+            guard let key = keyStore.load() else {
+                recordUpdateLifecycle(.failed(.pairingKey, .keyAbsent))
+                throw SelectionAgentServiceFailure.notPaired
+            }
+            let healthResult = sendAuthenticated(
                 .init(kind: .health), keyData: key, timeout: 0.5, lifecycleControl: true
-            ), healthResponse.health?.capabilities.contains(BlocksSelectionHelperProtocol.updateLifecycleCapability) == true else {
+            )
+            guard case let .success(healthResponse) = healthResult else {
+                recordUpdateLifecycle(.failed(.health, .healthTransportFailure))
                 throw SelectionAgentServiceFailure.incompatibleVersion
             }
+            guard healthResponse.health?.capabilities.contains(
+                BlocksSelectionHelperProtocol.updateLifecycleCapability
+            ) == true else {
+                recordUpdateLifecycle(.failed(.health, .updateCapabilityMissing))
+                throw SelectionAgentServiceFailure.incompatibleVersion
+            }
+            recordUpdateLifecycle(.succeeded(.health))
             updateStateLock.withLock { updatePreparationStarted = true }
-            guard case let .success(preparation) = sendAuthenticated(
+            let preparationResult = sendAuthenticated(
                 .init(kind: .prepareForApplicationUpdate), keyData: key, timeout: 0.5, lifecycleControl: true
-            ), preparation.booleanValue == true else {
+            )
+            guard case let .success(preparation) = preparationResult else {
+                recordUpdateLifecycle(.failed(.prepare, .prepareTransportFailure))
                 throw ApplicationOperationAdmissionGate.AdmissionError.busy("Selection Helper")
             }
-            guard case let .success(termination) = sendAuthenticated(
+            guard preparation.booleanValue == true else {
+                recordUpdateLifecycle(.failed(.prepare, .prepareRejected))
+                throw ApplicationOperationAdmissionGate.AdmissionError.busy("Selection Helper")
+            }
+            recordUpdateLifecycle(.succeeded(.prepare))
+            let terminationResult = sendAuthenticated(
                 .init(kind: .terminateForApplicationUpdate), keyData: key, timeout: 0.5, lifecycleControl: true
-            ), termination.booleanValue == true else {
+            )
+            guard case let .success(termination) = terminationResult else {
+                recordUpdateLifecycle(.failed(.terminate, .terminateTransportFailure))
                 throw SelectionAgentServiceFailure.connectionFailed
             }
+            guard termination.booleanValue == true else {
+                recordUpdateLifecycle(.failed(.terminate, .terminateRejected))
+                throw SelectionAgentServiceFailure.connectionFailed
+            }
+            recordUpdateLifecycle(.succeeded(.terminate))
             let deadline = ProcessInfo.processInfo.systemUptime + 3
             while applicationLocator.isRunning && ProcessInfo.processInfo.systemUptime < deadline {
                 Thread.sleep(forTimeInterval: 0.025)
             }
-            guard !applicationLocator.isRunning else { throw SelectionAgentServiceFailure.timedOut }
+            guard !applicationLocator.isRunning else {
+                recordUpdateLifecycle(.failed(.processExit, .processExitTimeout))
+                throw SelectionAgentServiceFailure.timedOut
+            }
+            recordUpdateLifecycle(.succeeded(.processExit))
         }.value
     }
 
@@ -877,12 +990,26 @@ final class SelectionHelperClient: @unchecked Sendable {
         connection: any SelectionHelperLoopbackConnecting =
             SelectionHelperLoopbackConnection(),
         applicationLocator: SelectionHelperApplicationLocator =
-            SelectionHelperApplicationLocator()
+            SelectionHelperApplicationLocator(),
+        updateLifecycleDiagnosticRecorder: @escaping UpdateLifecycleDiagnosticRecorder = { _ in }
     ) {
         self.keyStore = keyStore
         self.bootstrapKeyStore = bootstrapKeyStore
         self.connection = connection
         self.applicationLocator = applicationLocator
+        self.updateLifecycleDiagnosticRecorder = updateLifecycleDiagnosticRecorder
+    }
+
+    private func recordUpdateLifecycle(_ event: UpdateLifecycleDiagnosticEvent) {
+        updateLifecycleDiagnosticRecorder(event)
+        switch event {
+        case .started:
+            Self.logger.info("update-lifecycle event=started")
+        case let .succeeded(stage):
+            Self.logger.info("update-lifecycle event=succeeded stage=\(stage.rawValue, privacy: .public)")
+        case let .failed(stage, code):
+            Self.logger.error("update-lifecycle event=failed stage=\(stage.rawValue, privacy: .public) code=\(code.rawValue, privacy: .public)")
+        }
     }
 
     var isInstalled: Bool {

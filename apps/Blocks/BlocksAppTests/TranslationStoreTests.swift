@@ -1,6 +1,7 @@
 @testable import BlocksCore
 import AppKit
 import Combine
+import OSLog
 import Security
 import XCTest
 @testable import Blocks
@@ -11,6 +12,265 @@ import Translation
 
 @MainActor
 final class TranslationStoreTests: XCTestCase {
+    private static let nativeDragAcceptanceLogger = Logger(
+        subsystem: "app.blocks.app",
+        category: "NativeDragAcceptance"
+    )
+
+    func testNativeDragAcceptancePanelPersistsExpectedOrder() async throws {
+        guard ProcessInfo.processInfo.environment[
+            "BLOCKS_NATIVE_DRAG_ACCEPTANCE"
+        ] == "1" else {
+            throw XCTSkip(
+                "Set BLOCKS_NATIVE_DRAG_ACCEPTANCE=1 to open the native "
+                    + "translation panel for CUA drag acceptance."
+            )
+        }
+        let runsWithInDragRefresh = ProcessInfo.processInfo.environment[
+            "BLOCKS_NATIVE_DRAG_ACCEPTANCE_REFRESH"
+        ] != "0"
+        let acceptanceMode = runsWithInDragRefresh ? "refresh" : "baseline"
+
+        let defaults = isolatedDefaults()
+        let frameSizeKey = "floatingPanel.translation.center.size"
+        let standardDefaults = UserDefaults.standard
+        let previousFrameSize = standardDefaults.object(forKey: frameSizeKey)
+        // The production presenter persists its native panel size in
+        // UserDefaults.standard when it closes. Register this before the
+        // presenter's close defer so the exact pre-test value is restored
+        // after forceClose performs that production persistence path.
+        defer {
+            if let previousFrameSize {
+                standardDefaults.set(previousFrameSize, forKey: frameSizeKey)
+            } else {
+                standardDefaults.removeObject(forKey: frameSizeKey)
+            }
+        }
+        let databaseFixture = try TranslationProfileDatabaseFixture()
+        defer { databaseFixture.cleanUp() }
+
+        let serviceIDs = [
+            "plugin:native-drag-alpha",
+            "plugin:native-drag-beta",
+            "plugin:native-drag-gamma",
+        ]
+        let expectedOrder = [
+            "plugin:native-drag-beta",
+            "plugin:native-drag-gamma",
+            "plugin:native-drag-alpha",
+        ]
+        let adapters = serviceIDs.map { TestTranslationAdapter(id: $0) }
+        let store = TranslationStore(
+            serviceProfileRepository: databaseFixture.repository,
+            defaults: defaults
+        )
+        store.replacePluginAdapters(adapters)
+        store.setServiceEnabled(false, serviceID: "apple-local")
+        for adapter in adapters {
+            store.setServiceEnabled(true, serviceID: adapter.descriptor.id)
+        }
+        guard store.enabledServiceIDs == serviceIDs else {
+            XCTFail("The isolated fixture did not establish its initial order.")
+            return
+        }
+
+        let model = TranslationPanelSessionModel(
+            input: TranslationInput(
+                source: .manual,
+                text: "Native drag acceptance fixture"
+            ),
+            direction: TranslationLanguageDirection(
+                target: TranslationLanguageTag("zh-Hans")!
+            ),
+            translationStore: store
+        )
+        model.runImmediately()
+        await waitUntil {
+            model.snapshot?.successfulResults.map(\.service.id) == serviceIDs
+        }
+
+        let presenter = TranslationPanelPresenter(
+            model: model,
+            actions: TranslationPanelActions(
+                copyText: { _ in .copiedAndRecorded },
+                openFavorites: {},
+                openTranslationSettings: {},
+                retakeScreenshot: {}
+            ),
+            onClose: { _ in }
+        )
+        presenter.present()
+        defer { presenter.forceClose() }
+
+        let panel = try XCTUnwrap(presenter.panelForTesting)
+        XCTAssertTrue(panel.isVisible)
+        panel.makeKeyAndOrderFront(nil)
+        panel.contentView?.layoutSubtreeIfNeeded()
+
+        func nativeDragHandles(
+            in view: NSView
+        ) -> [TranslationServiceOrderNativeDragSource.DragSourceView] {
+            ([view as? TranslationServiceOrderNativeDragSource.DragSourceView]
+                .compactMap { $0 })
+                + view.subviews.flatMap { nativeDragHandles(in: $0) }
+        }
+
+        await waitUntil {
+            guard let contentView = panel.contentView else { return false }
+            return Set(nativeDragHandles(in: contentView).map(\.serviceID))
+                == Set(serviceIDs)
+        }
+
+        let dragCoordinator = presenter.dragCoordinatorForTesting
+        let activeIDObservation = dragCoordinator.$activeServiceID
+            .dropFirst()
+            .sink { activeServiceID in
+                if let activeServiceID, serviceIDs.contains(activeServiceID) {
+                    Self.nativeDragAcceptanceLogger.info(
+                        "active service=\(activeServiceID, privacy: .public)"
+                    )
+                } else if activeServiceID == nil {
+                    Self.nativeDragAcceptanceLogger.info("active service cleared")
+                }
+            }
+        defer { activeIDObservation.cancel() }
+        let targetObservation = dragCoordinator.$target
+            .dropFirst()
+            .sink { target in
+                guard let target else {
+                    Self.nativeDragAcceptanceLogger.info("drag target cleared")
+                    return
+                }
+                guard serviceIDs.contains(target.sourceServiceID),
+                      serviceIDs.contains(target.destinationServiceID) else {
+                    return
+                }
+                Self.nativeDragAcceptanceLogger.info(
+                    "drag target source=\(target.sourceServiceID, privacy: .public) destination=\(target.destinationServiceID, privacy: .public) placement=\(String(describing: target.placement), privacy: .public)"
+                )
+            }
+        defer { targetObservation.cancel() }
+
+        let expectedOrderObserved = expectation(
+            description: "CUA moves alpha below gamma"
+        )
+        let orderObservation = store.$enabledServiceIDs
+            .dropFirst()
+            .sink { serviceOrder in
+                if serviceOrder == expectedOrder {
+                    expectedOrderObserved.fulfill()
+                }
+        }
+        defer { orderObservation.cancel() }
+
+        // `replacePluginAdapters` is the existing registry-snapshot seam. Do
+        // not refresh until the native drag coordinator has published an
+        // active source. The deferred main-actor task observes the value
+        // after @Published has committed it, then refreshes only while the
+        // real AppKit drag session is still active.
+        let refreshDuringDrag = runsWithInDragRefresh
+            ? expectation(
+                description: "fixture registry snapshot refresh occurs during drag"
+            )
+            : nil
+        var refreshTaskScheduled = false
+        var refreshOccurredDuringDrag = false
+        let dragObservation = dragCoordinator.$activeServiceID
+            .dropFirst()
+            .sink { activeServiceID in
+                guard runsWithInDragRefresh,
+                      activeServiceID != nil,
+                      !refreshTaskScheduled else {
+                    return
+                }
+                refreshTaskScheduled = true
+                Task { @MainActor in
+                    guard dragCoordinator.activeServiceID != nil else { return }
+                    store.replacePluginAdapters(adapters)
+                    refreshOccurredDuringDrag = true
+                    refreshDuringDrag?.fulfill()
+                }
+            }
+        defer { dragObservation.cancel() }
+
+        let readyHandles = nativeDragHandles(
+            in: try XCTUnwrap(panel.contentView)
+        )
+        let readyHandleFrames = readyHandles.compactMap { handle -> String? in
+            guard serviceIDs.contains(handle.serviceID) else { return nil }
+            let windowFrame = handle.convert(handle.bounds, to: nil)
+            let screenFrame = panel.convertToScreen(windowFrame)
+            return "service=\(handle.serviceID) screen_frame=\(NSStringFromRect(screenFrame)) registered_types=\(handle.registeredDraggedTypes.count)"
+        }
+        Self.nativeDragAcceptanceLogger.info(
+            "ready mode=\(acceptanceMode, privacy: .public) panel_screen_frame=\(NSStringFromRect(panel.frame), privacy: .public) handles=\(readyHandleFrames.joined(separator: " | "), privacy: .public)"
+        )
+
+        print(
+            "BLOCKS_NATIVE_DRAG_ACCEPTANCE_READY "
+                + "mode="
+                + acceptanceMode
+                + " "
+                + "drag plugin:native-drag-alpha to the lower half of "
+                + "plugin:native-drag-gamma, holding the native drag for "
+                + "at least a couple of frames; expected order: "
+                + expectedOrder.joined(separator: ",")
+        )
+        if let refreshDuringDrag {
+            await fulfillment(
+                of: [expectedOrderObserved, refreshDuringDrag],
+                timeout: 180
+            )
+        } else {
+            await fulfillment(of: [expectedOrderObserved], timeout: 180)
+        }
+
+        guard !runsWithInDragRefresh || refreshOccurredDuringDrag else {
+            XCTFail("The registry refresh did not occur while native drag was active.")
+            return
+        }
+        guard store.enabledServiceIDs == expectedOrder else {
+            XCTFail("Native drag did not produce the expected service order.")
+            return
+        }
+        guard defaults.stringArray(forKey: "translation.services.enabledIDs")
+            == expectedOrder else {
+            XCTFail("The native drag order was not persisted to isolated defaults.")
+            return
+        }
+        await Task.yield()
+        panel.contentView?.layoutSubtreeIfNeeded()
+        let refreshedHandles = nativeDragHandles(
+            in: try XCTUnwrap(panel.contentView)
+        )
+        guard Set(refreshedHandles.map(\.serviceID)) == Set(serviceIDs) else {
+            XCTFail("The production result-card drag handles disappeared.")
+            return
+        }
+        guard refreshedHandles.allSatisfy({
+            $0.dragCoordinator === dragCoordinator
+        }) else {
+            XCTFail(
+                "The production result-card drag handles lost their coordinator after the fixture run."
+            )
+            return
+        }
+        let restarted = TranslationStore(
+            serviceProfileRepository: databaseFixture.repository,
+            defaults: defaults
+        )
+        guard restarted.enabledServiceIDs == expectedOrder else {
+            XCTFail("The native drag order did not survive the isolated restart.")
+            return
+        }
+        print(
+            (runsWithInDragRefresh
+                ? "BLOCKS_NATIVE_DRAG_ACCEPTANCE_PASSED persisted order: "
+                : "BLOCKS_NATIVE_DRAG_ACCEPTANCE_BASELINE_PASSED persisted order: ")
+                + restarted.enabledServiceIDs.joined(separator: ",")
+        )
+    }
+
     func testDragPublishedWillSetImmediatelyProtectsDismissalAndClearsAfterEnd() {
         let model = TranslationPanelSessionModel(input: .init(source: .manual, text: ""),
             direction: .init(target: TranslationLanguageTag("en")!),

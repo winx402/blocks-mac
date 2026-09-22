@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 #if canImport(BlocksCore)
 import BlocksCore
 #endif
@@ -14,7 +15,36 @@ final class ApplicationLifecycleCoordinator {
     }
 
     enum State: Equatable { case active, preparing, prepared, resuming }
-    enum Intent { case update, quit }
+    enum Intent: String { case update, quit }
+    enum DiagnosticEvent: Equatable {
+        enum ParticipantState: String { case started, completed }
+        enum FailureCategory: String {
+            case missingParticipants = "missing_participants"
+            case preparationInProgress = "preparation_in_progress"
+            case globalAdmissionBusy = "global_admission_busy"
+            case globalAdmissionPaused = "global_admission_paused"
+            case participantDrainFailed = "participant_drain_failed"
+            case cancelled
+        }
+
+        case started(Intent)
+        case participant(Intent, id: String, state: ParticipantState)
+        case completed(Intent)
+        case failed(Intent, FailureCategory)
+        case recoveryStarted(Intent)
+        case recoveryCompleted(Intent)
+    }
+
+    typealias DiagnosticRecorder = (DiagnosticEvent) -> Void
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "app.blocks.app",
+        category: "application-lifecycle"
+    )
+    private static let diagnosticParticipantIDs: Set<String> = [
+        "app", "shortcuts", "cliInstallation", "helper", "actionBroker",
+        "clipboard", "translation", "provider", "screenshot", "plugins",
+        "database", "remote", "producer",
+    ]
     private(set) var intent: Intent?
     private var quitCommitted = false
     var onParticipant: ((String, Bool) -> Void)?
@@ -41,9 +71,11 @@ final class ApplicationLifecycleCoordinator {
     private var participants: [Participant] = []
     private var pausedParticipants: [Participant] = []
     private var recoveryTask: Task<Void, Never>?
+    private let diagnosticRecorder: DiagnosticRecorder
 
-    init(requiredParticipantIDs: Set<String>) {
+    init(requiredParticipantIDs: Set<String>, diagnosticRecorder: @escaping DiagnosticRecorder = { _ in }) {
         self.requiredParticipantIDs = requiredParticipantIDs
+        self.diagnosticRecorder = diagnosticRecorder
     }
 
     var hasCompleteSafetyCoverage: Bool {
@@ -72,20 +104,37 @@ final class ApplicationLifecycleCoordinator {
     }
 
     func prepare(for requestedIntent: Intent = .update) async throws {
+        record(.started(requestedIntent))
         if requestedIntent == .quit {
             beginQuit()
         } else if quitCommitted {
+            record(.failed(requestedIntent, .preparationInProgress))
             throw SafetyError.preparationInProgress
         }
         if state == .prepared {
-            guard intent == .update || requestedIntent == .quit else { throw SafetyError.preparationInProgress }
+            guard intent == .update || requestedIntent == .quit else {
+                record(.failed(requestedIntent, .preparationInProgress))
+                throw SafetyError.preparationInProgress
+            }
+            record(.completed(requestedIntent))
             return
         }
-        guard state == .active else { throw SafetyError.preparationInProgress }
+        guard state == .active else {
+            record(.failed(requestedIntent, .preparationInProgress))
+            throw SafetyError.preparationInProgress
+        }
         let missing = requiredParticipantIDs.subtracting(participants.map(\.id))
-        guard missing.isEmpty else { throw SafetyError.missingParticipants(missing.sorted()) }
+        guard missing.isEmpty else {
+            record(.failed(requestedIntent, .missingParticipants))
+            throw SafetyError.missingParticipants(missing.sorted())
+        }
         if requestedIntent == .update {
-            try ApplicationOperationAdmissionGate.pauseAllIfIdle()
+            do {
+                try ApplicationOperationAdmissionGate.pauseAllIfIdle()
+            } catch {
+                record(.failed(requestedIntent, globalAdmissionFailureCategory(for: error)))
+                throw error
+            }
         } else {
             ApplicationOperationAdmissionGate.closeAdmissionForQuit()
         }
@@ -110,14 +159,18 @@ final class ApplicationLifecycleCoordinator {
                 // Include the currently preparing participant: it may have
                 // closed admission before discovering that it cannot drain.
                 pausedParticipants.append(participant)
+                record(.participant(requestedIntent, id: participant.id, state: .started))
                 onParticipant?(participant.id, false)
                 try await participant.pauseAndDrain()
                 if requestedIntent == .update, quitCommitted { throw CancellationError() }
                 onParticipant?(participant.id, true)
+                record(.participant(requestedIntent, id: participant.id, state: .completed))
             }
             try Task.checkCancellation()
             state = .prepared
+            record(.completed(requestedIntent))
         } catch {
+            record(.failed(requestedIntent, preparationFailureCategory(for: error)))
             if requestedIntent == .update, !quitCommitted { await recoverPausedParticipants() }
             throw error
         }
@@ -141,6 +194,7 @@ final class ApplicationLifecycleCoordinator {
         }
         guard !quitCommitted else { return }
         state = .resuming
+        record(.recoveryStarted(.update))
         let task = Task { @MainActor [self] in
             await resumePausedParticipants()
             recoveryTask = nil
@@ -170,5 +224,41 @@ final class ApplicationLifecycleCoordinator {
         guard !quitCommitted else { return }
         state = .active
         intent = nil
+        record(.recoveryCompleted(.update))
+    }
+
+    private func globalAdmissionFailureCategory(for error: Error) -> DiagnosticEvent.FailureCategory {
+        guard let admissionError = error as? ApplicationOperationAdmissionGate.AdmissionError else {
+            return .globalAdmissionBusy
+        }
+        switch admissionError {
+        case .busy:
+            return .globalAdmissionBusy
+        case .paused:
+            return .globalAdmissionPaused
+        }
+    }
+
+    private func preparationFailureCategory(for error: Error) -> DiagnosticEvent.FailureCategory {
+        error is CancellationError ? .cancelled : .participantDrainFailed
+    }
+
+    private func record(_ event: DiagnosticEvent) {
+        diagnosticRecorder(event)
+        switch event {
+        case let .started(intent):
+            Self.logger.info("application-lifecycle event=started intent=\(intent.rawValue, privacy: .public)")
+        case let .participant(intent, id, state):
+            let participant = Self.diagnosticParticipantIDs.contains(id) ? id : "other"
+            Self.logger.info("application-lifecycle event=participant intent=\(intent.rawValue, privacy: .public) participant=\(participant, privacy: .public) state=\(state.rawValue, privacy: .public)")
+        case let .completed(intent):
+            Self.logger.info("application-lifecycle event=completed intent=\(intent.rawValue, privacy: .public)")
+        case let .failed(intent, category):
+            Self.logger.error("application-lifecycle event=failed intent=\(intent.rawValue, privacy: .public) category=\(category.rawValue, privacy: .public)")
+        case let .recoveryStarted(intent):
+            Self.logger.info("application-lifecycle event=recovery_started intent=\(intent.rawValue, privacy: .public)")
+        case let .recoveryCompleted(intent):
+            Self.logger.info("application-lifecycle event=recovery_completed intent=\(intent.rawValue, privacy: .public)")
+        }
     }
 }

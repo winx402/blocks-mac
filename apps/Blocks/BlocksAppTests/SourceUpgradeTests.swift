@@ -195,6 +195,67 @@ final class SourceUpgradeTests: XCTestCase {
         XCTAssertFalse(coordinator.hasTransaction)
     }
 
+    func testSourceUpgradeDiagnosticsRecordPreflightAndPreparationFailuresWithoutPayloads() async {
+        var preflightEvents: [SourceUpgradeCoordinator.DiagnosticEvent] = []
+        let preflight = SourceUpgradeCoordinator(canPrepare: { false }, prepare: {}, resume: {}, terminate: {},
+            diagnosticRecorder: { preflightEvents.append($0) })
+        let preflightResponse = await send(preflight, .prepare, session: UUID(), token: UUID())
+        XCTAssertEqual(preflightResponse.errorCode, "busy")
+        XCTAssertEqual(preflightEvents, [.started, .failed(.readinessGateDenied)])
+
+        var failureEvents: [SourceUpgradeCoordinator.DiagnosticEvent] = []
+        let coordinator = SourceUpgradeCoordinator(canPrepare: { true }, prepare: {
+            throw NSError(domain: "/Users/private/path", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "secret"])
+        }, resume: {}, terminate: {}, diagnosticRecorder: { failureEvents.append($0) })
+        _ = await send(coordinator, .prepare, session: UUID(), token: UUID())
+        XCTAssertEqual(failureEvents, [
+            .started,
+            .failed(.preparationFailed),
+            .recoveryStarted(.preparationFailed),
+            .recoveryCompleted(.preparationFailed),
+        ])
+    }
+
+    func testLifecycleDiagnosticsCoverUpdateParticipantsPreGateFailureAndRecovery() async throws {
+        defer { ApplicationOperationAdmissionGate.resumeAll() }
+        var updateEvents: [ApplicationLifecycleCoordinator.DiagnosticEvent] = []
+        let lifecycle = ApplicationLifecycleCoordinator(requiredParticipantIDs: ["remote"],
+            diagnosticRecorder: { updateEvents.append($0) })
+        try lifecycle.register(.init(id: "remote", pauseAndDrain: {}, resume: {}))
+        try await lifecycle.prepare()
+        await lifecycle.resumeAfterCancelledUpdate()
+        XCTAssertEqual(updateEvents, [
+            .started(.update),
+            .participant(.update, id: "remote", state: .started),
+            .participant(.update, id: "remote", state: .completed),
+            .completed(.update),
+            .recoveryStarted(.update),
+            .recoveryCompleted(.update),
+        ])
+
+        var missingEvents: [ApplicationLifecycleCoordinator.DiagnosticEvent] = []
+        let incomplete = ApplicationLifecycleCoordinator(requiredParticipantIDs: ["remote"],
+            diagnosticRecorder: { missingEvents.append($0) })
+        do {
+            try await incomplete.prepare()
+            XCTFail("Incomplete lifecycle must not prepare")
+        } catch {}
+        XCTAssertEqual(missingEvents, [.started(.update), .failed(.update, .missingParticipants)])
+
+        var quitEvents: [ApplicationLifecycleCoordinator.DiagnosticEvent] = []
+        let quitting = ApplicationLifecycleCoordinator(requiredParticipantIDs: ["remote"],
+            diagnosticRecorder: { quitEvents.append($0) })
+        try quitting.register(.init(id: "remote", pauseAndDrain: {}, resume: {}))
+        try await quitting.prepare(for: .quit)
+        XCTAssertEqual(quitEvents, [
+            .started(.quit),
+            .participant(.quit, id: "remote", state: .started),
+            .participant(.quit, id: "remote", state: .completed),
+            .completed(.quit),
+        ])
+    }
+
     func testCancelDuringPreparationThenLateOldMessagesCannotAffectNewOwner() async {
         var continuation: CheckedContinuation<Void, Never>?
         var prepares = 0, resumes = 0, exits = 0

@@ -1033,6 +1033,73 @@ final class TranslationEntryBridgeTests: XCTestCase {
         XCTAssertEqual(delivery.count, 0)
     }
 
+    func testSelectionHelperLoopbackReceiveArbiterPreservesPendingFINOwnership() {
+        var beforeReceive = SelectionHelperLoopbackReceiveArbiter()
+        XCTAssertEqual(
+            beforeReceive.transportStateFailed(),
+            .resolve(.failure(.connectionFailed))
+        )
+        XCTAssertFalse(beforeReceive.registerReceive())
+        XCTAssertEqual(
+            beforeReceive.receive(
+                data: Data("late-frame\n".utf8),
+                isComplete: true,
+                hasTransportError: false
+            ),
+            .pending
+        )
+
+        var finalReceive = SelectionHelperLoopbackReceiveArbiter()
+        XCTAssertTrue(finalReceive.registerReceive())
+        XCTAssertEqual(finalReceive.transportStateFailed(), .pending)
+        XCTAssertEqual(
+            finalReceive.receive(
+                data: Data("valid-frame\n".utf8),
+                isComplete: true,
+                hasTransportError: false
+            ),
+            .resolve(.success(Data("valid-frame".utf8)))
+        )
+
+        var receiveError = SelectionHelperLoopbackReceiveArbiter()
+        XCTAssertTrue(receiveError.registerReceive())
+        XCTAssertEqual(
+            receiveError.receive(
+                data: Data("valid-frame\n".utf8),
+                isComplete: true,
+                hasTransportError: true
+            ),
+            .resolve(.failure(.connectionFailed))
+        )
+
+        var trailingBytes = SelectionHelperLoopbackReceiveArbiter()
+        XCTAssertTrue(trailingBytes.registerReceive())
+        XCTAssertEqual(
+            trailingBytes.receive(
+                data: Data("valid-frame\ntrailing".utf8),
+                isComplete: true,
+                hasTransportError: false
+            ),
+            .resolve(.failure(.invalidResponse))
+        )
+
+        var noFIN = SelectionHelperLoopbackReceiveArbiter()
+        XCTAssertTrue(noFIN.registerReceive())
+        XCTAssertEqual(
+            noFIN.receive(
+                data: Data("valid-frame\n".utf8),
+                isComplete: false,
+                hasTransportError: false
+            ),
+            .pending
+        )
+        // The production caller's existing bounded BlockingHelperReply.wait
+        // supplies the timeout; this registration prevents a state callback
+        // from replacing that timeout before the next receive completes.
+        XCTAssertTrue(noFIN.registerReceive())
+        XCTAssertEqual(noFIN.transportStateFailed(), .pending)
+    }
+
     func testSelectionHelperProductionLoopbackSendClosesWriteAndReadsResponse()
         throws
     {
@@ -3956,6 +4023,117 @@ final class TranslationEntryBridgeTests: XCTestCase {
         )
 
         XCTAssertEqual(health.capabilities, [])
+    }
+
+    func testSelectionHelperUpdateLifecycleDiagnosticsDistinguishProtocolStages()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("selection-helper-update-diagnostics-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let helper = root.appendingPathComponent("Blocks Selection Helper.app")
+        try makeSelectionHelperBundle(at: helper)
+        let key = Data(repeating: 0x61, count: 32)
+        let lifecycleCapability = BlocksSelectionHelperProtocol.updateLifecycleCapability
+        let currentHealth = SelectionHelperHealth(
+            helperVersion: "fixture",
+            accessibilityTrusted: true,
+            capabilities: [lifecycleCapability]
+        )
+
+        func makeClient(
+            health: SelectionHelperHealth?,
+            responder: @escaping (SelectionHelperCommand) -> Result<
+                SelectionHelperCommandResponse,
+                SelectionAgentServiceFailure
+            >
+        ) -> (
+            SelectionHelperClient,
+            SelectionHelperUpdateLifecycleDiagnosticRecorder
+        ) {
+            let recorder = SelectionHelperUpdateLifecycleDiagnosticRecorder()
+            let client = SelectionHelperClient(
+                keyStore: SelectionHelperKeyStoreStub(key: key),
+                connection: SelectionHelperAuthenticatedConnectionStub(
+                    key: key,
+                    disconnectResult: .failure(.timedOut),
+                    health: health,
+                    authenticatedResponder: responder
+                ),
+                applicationLocator: selectionHelperFixtureLocator(
+                    candidates: [helper],
+                    running: [helper]
+                ),
+                updateLifecycleDiagnosticRecorder: { recorder.append($0) }
+            )
+            return (client, recorder)
+        }
+
+        let (healthTransportClient, healthTransportRecorder) = makeClient(
+            health: nil,
+            responder: { _ in .failure(.connectionFailed) }
+        )
+        do {
+            try await healthTransportClient.prepareForApplicationUpdate()
+            XCTFail("Health transport failure must reject the update")
+        } catch {}
+        XCTAssertEqual(healthTransportRecorder.events, [
+            .started,
+            .failed(.health, .healthTransportFailure),
+        ])
+
+        let (capabilityClient, capabilityRecorder) = makeClient(
+            health: SelectionHelperHealth(
+                helperVersion: "legacy",
+                accessibilityTrusted: true
+            ),
+            responder: { _ in .failure(.invalidResponse) }
+        )
+        do {
+            try await capabilityClient.prepareForApplicationUpdate()
+            XCTFail("Missing update capability must reject the update")
+        } catch {}
+        XCTAssertEqual(capabilityRecorder.events, [
+            .started,
+            .failed(.health, .updateCapabilityMissing),
+        ])
+
+        let (prepareClient, prepareRecorder) = makeClient(health: currentHealth, responder: { command in
+            guard command.kind == .prepareForApplicationUpdate else {
+                return .failure(.invalidResponse)
+            }
+            return .success(.init(booleanValue: false))
+        })
+        do {
+            try await prepareClient.prepareForApplicationUpdate()
+            XCTFail("Rejected prepare must reject the update")
+        } catch {}
+        XCTAssertEqual(prepareRecorder.events, [
+            .started,
+            .succeeded(.health),
+            .failed(.prepare, .prepareRejected),
+        ])
+
+        let (terminateClient, terminateRecorder) = makeClient(health: currentHealth, responder: { command in
+            switch command.kind {
+            case .prepareForApplicationUpdate:
+                return .success(.init(booleanValue: true))
+            case .terminateForApplicationUpdate:
+                return .success(.init(booleanValue: false))
+            default:
+                return .failure(.invalidResponse)
+            }
+        })
+        do {
+            try await terminateClient.prepareForApplicationUpdate()
+            XCTFail("Rejected terminate must reject the update")
+        } catch {}
+        XCTAssertEqual(terminateRecorder.events, [
+            .started,
+            .succeeded(.health),
+            .succeeded(.prepare),
+            .failed(.terminate, .terminateRejected),
+        ])
     }
 
     func testPasteTargetInspectionSkipsWireWhenNoLocalPairingKey() async {
@@ -9817,6 +9995,19 @@ private final class SelectionHelperDisconnectRecoveryStoreStub:
 
     func clear() {
         deadline = nil
+    }
+}
+
+private final class SelectionHelperUpdateLifecycleDiagnosticRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedEvents: [SelectionHelperClient.UpdateLifecycleDiagnosticEvent] = []
+
+    var events: [SelectionHelperClient.UpdateLifecycleDiagnosticEvent] {
+        lock.withLock { storedEvents }
+    }
+
+    func append(_ event: SelectionHelperClient.UpdateLifecycleDiagnosticEvent) {
+        lock.withLock { storedEvents.append(event) }
     }
 }
 

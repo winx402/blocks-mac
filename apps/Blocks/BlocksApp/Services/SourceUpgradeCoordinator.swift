@@ -1,5 +1,6 @@
 import Foundation
 import BlocksCore
+import OSLog
 
 /// A management transaction, deliberately outside business admission leases:
 /// holding one would prevent the all-application idle check from ever passing.
@@ -10,6 +11,33 @@ final class SourceUpgradeCoordinator {
     typealias Reply = @Sendable (Response) -> Void
     struct Owner: Equatable { let sessionID: UUID; let token: UUID }
     enum Phase: Equatable { case idle, preparing, prepared, committing, resuming, terminated }
+    enum DiagnosticEvent: Equatable {
+        enum Completion: String { case prepared, committed }
+        enum FailureCategory: String {
+            case quitting
+            case disconnected
+            case unsupportedVersion = "unsupported_version"
+            case coordinatorBusy = "coordinator_busy"
+            case replayedToken = "replayed_token"
+            case historyCapacity = "history_capacity"
+            case readinessGateDenied = "readiness_gate_denied"
+            case preparationFailed = "preparation_failed"
+            case cancelled
+            case timeout
+        }
+
+        case started
+        case completed(Completion)
+        case failed(FailureCategory)
+        case recoveryStarted(FailureCategory)
+        case recoveryCompleted(FailureCategory)
+    }
+
+    typealias DiagnosticRecorder = (DiagnosticEvent) -> Void
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "app.blocks.app",
+        category: "source-upgrade"
+    )
 
     private(set) var phase: Phase = .idle
     private(set) var owner: Owner?
@@ -19,6 +47,7 @@ final class SourceUpgradeCoordinator {
     private let resume: () async -> Void
     private let terminate: () -> Void
     private let timeout: Duration
+    private let diagnosticRecorder: DiagnosticRecorder
     private var quitting = false
     private var usedTokens = Set<UUID>()
     private var disconnectedSessions = Set<UUID>()
@@ -32,33 +61,44 @@ final class SourceUpgradeCoordinator {
 
     init(timeout: Duration = .seconds(30), canPrepare: @escaping () -> Bool,
          prepare: @escaping () async throws -> Void,
-         resume: @escaping () async -> Void, terminate: @escaping () -> Void) {
+         resume: @escaping () async -> Void, terminate: @escaping () -> Void,
+         diagnosticRecorder: @escaping DiagnosticRecorder = { _ in }) {
         self.timeout = timeout
         self.canPrepare = canPrepare
         self.prepare = prepare
         self.resume = resume
         self.terminate = terminate
+        self.diagnosticRecorder = diagnosticRecorder
     }
 
     func handle(sessionID: UUID, request: Request, completion: @escaping Reply) {
         let candidate = Owner(sessionID: sessionID, token: request.token)
-        func fail(_ code: String) {
+        if request.operation == .prepare { record(.started) }
+        func fail(_ code: String, category: DiagnosticEvent.FailureCategory) {
+            if request.operation == .prepare { record(.failed(category)) }
             completion(Response(token: request.token, status: .failed, errorCode: code))
         }
-        guard !quitting else { fail("quitting"); return }
-        guard !sessionHistoryExhausted, !disconnectedSessions.contains(sessionID) else {
-            fail("disconnected")
+        guard !quitting else { fail("quitting", category: .quitting); return }
+        guard !sessionHistoryExhausted else {
+            fail("disconnected", category: .historyCapacity)
             return
         }
-        guard request.version == 1 else { fail("unsupported_version"); return }
+        guard !disconnectedSessions.contains(sessionID) else {
+            fail("disconnected", category: .disconnected)
+            return
+        }
+        guard request.version == 1 else { fail("unsupported_version", category: .unsupportedVersion); return }
         switch request.operation {
         case .probe:
             completion(Response(token: request.token, status: .ready))
         case .prepare:
-            guard owner == nil else { fail("busy"); return }
-            guard !usedTokens.contains(request.token) else { fail("invalid_state"); return }
-            guard usedTokens.count < 4096, disconnectedSessions.count < 4096,
-                  canPrepare() else { fail("busy"); return }
+            guard owner == nil else { fail("busy", category: .coordinatorBusy); return }
+            guard !usedTokens.contains(request.token) else { fail("invalid_state", category: .replayedToken); return }
+            guard usedTokens.count < 4096, disconnectedSessions.count < 4096 else {
+                fail("busy", category: .historyCapacity)
+                return
+            }
+            guard canPrepare() else { fail("busy", category: .readinessGateDenied); return }
             usedTokens.insert(request.token)
             owner = candidate
             phase = .preparing
@@ -81,17 +121,19 @@ final class SourceUpgradeCoordinator {
                     phase = .prepared
                     let reply = prepareReply
                     prepareReply = nil
+                    record(.completed(.prepared))
                     reply?(Response(token: candidate.token, status: .prepared))
                 } catch {
                     preparation = nil
                     guard owner == candidate else { return }
                     cancellationCode = cancellationCode ?? "preparation_failed"
+                    record(.failed(preparationFailureCategory(for: cancellationCode)))
                     beginRecovery(candidate)
                 }
             }
         case .commit:
-            guard owner == candidate else { fail(owner == nil ? "invalid_state" : "busy"); return }
-            guard phase == .prepared else { fail("invalid_state"); return }
+            guard owner == candidate else { fail(owner == nil ? "invalid_state" : "busy", category: .coordinatorBusy); return }
+            guard phase == .prepared else { fail("invalid_state", category: .coordinatorBusy); return }
             phase = .committing
             // Once the transport owns the ACK, its bounded write/disconnect
             // arbitration is authoritative. A local deadline must not roll
@@ -102,8 +144,8 @@ final class SourceUpgradeCoordinator {
             // didCommit *after* the complete response was successfully written.
             completion(Response(token: request.token, status: .committed))
         case .cancel:
-            guard owner == candidate else { fail(owner == nil ? "invalid_state" : "busy"); return }
-            guard phase != .terminated else { fail("invalid_state"); return }
+            guard owner == candidate else { fail(owner == nil ? "invalid_state" : "busy", category: .coordinatorBusy); return }
+            guard phase != .terminated else { fail("invalid_state", category: .coordinatorBusy); return }
             cancelReplies.append(completion)
             cancel(candidate, code: "cancelled")
         }
@@ -114,6 +156,7 @@ final class SourceUpgradeCoordinator {
         deadline?.cancel()
         deadline = nil
         phase = .terminated
+        record(.completed(.committed))
         terminate()
     }
 
@@ -158,6 +201,8 @@ final class SourceUpgradeCoordinator {
     private func beginRecovery(_ expected: Owner) {
         guard owner == expected, recovery == nil else { return }
         phase = .resuming
+        let category = preparationFailureCategory(for: cancellationCode)
+        record(.recoveryStarted(category))
         // A new unstructured task does not inherit the cancelled prepare task.
         recovery = Task { [self] in
             if !quitting { await resume() }
@@ -172,11 +217,38 @@ final class SourceUpgradeCoordinator {
             recovery = nil
             owner = nil
             phase = quitting ? .terminated : .idle
+            record(.recoveryCompleted(category))
             pendingPrepare?(Response(token: expected.token, status: .failed, errorCode: code))
             for reply in pendingCancels {
                 reply(Response(token: expected.token, status: quitting ? .failed : .cancelled,
                                errorCode: quitting ? "quitting" : nil))
             }
+        }
+    }
+
+    private func preparationFailureCategory(for code: String?) -> DiagnosticEvent.FailureCategory {
+        switch code {
+        case "quitting": return .quitting
+        case "disconnected": return .disconnected
+        case "cancelled": return .cancelled
+        case "timeout": return .timeout
+        default: return .preparationFailed
+        }
+    }
+
+    private func record(_ event: DiagnosticEvent) {
+        diagnosticRecorder(event)
+        switch event {
+        case .started:
+            Self.logger.info("source-upgrade event=started")
+        case let .completed(completion):
+            Self.logger.info("source-upgrade event=completed stage=\(completion.rawValue, privacy: .public)")
+        case let .failed(category):
+            Self.logger.error("source-upgrade event=failed category=\(category.rawValue, privacy: .public)")
+        case let .recoveryStarted(category):
+            Self.logger.info("source-upgrade event=recovery_started category=\(category.rawValue, privacy: .public)")
+        case let .recoveryCompleted(category):
+            Self.logger.info("source-upgrade event=recovery_completed category=\(category.rawValue, privacy: .public)")
         }
     }
 }
