@@ -19082,3 +19082,275 @@ private final class OpenAIHeaderSessionProbe:
         return (Data(), response)
     }
 }
+
+@MainActor
+final class BlocksCLIFirstInstallBookmarkTests: XCTestCase {
+    func testLiveBookmarkRejectsMissingExecutableButAcceptsExistingDirectory() throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanUp() }
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.destination.path))
+        XCTAssertFalse(try BlocksCLIInstallationBookmarkAccess.live.make(fixture.bin).isEmpty)
+        XCTAssertThrowsError(
+            try BlocksCLIInstallationBookmarkAccess.live.make(fixture.destination)
+        )
+    }
+
+    func testFirstInstallRefreshAndUninstallWithAbsentTargetBookmarkFailure() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanUp() }
+        XCTAssertThrowsError(try fixture.bookmarks.make(fixture.destination))
+        let controller = fixture.makeController()
+
+        await controller.install(sourceURL: fixture.source, destinationURL: fixture.destination)
+
+        XCTAssertEqual(controller.state, .installedCurrent)
+        XCTAssertEqual(try Data(contentsOf: fixture.destination), Data("bundled-cli".utf8))
+        let recordData = try XCTUnwrap(fixture.defaults.data(
+            forKey: BlocksCLIInstallationController.recordKey
+        ))
+        let record = try JSONDecoder().decode(BlocksCLIInstallationRecord.self, from: recordData)
+        XCTAssertFalse(record.securityScopedBookmark.isEmpty)
+        XCTAssertFalse(try XCTUnwrap(record.directorySecurityScopedBookmark).isEmpty)
+        XCTAssertEqual(fixture.bookmarks.resolve(record.securityScopedBookmark), fixture.destination)
+        XCTAssertEqual(record.installedFileIdentity, BlocksCLIFileIdentity.resourceIdentifier(of: fixture.destination))
+        XCTAssertNil(fixture.defaults.data(forKey: BlocksCLIInstallationController.operationJournalKey))
+
+        let reopened = fixture.makeController()
+        reopened.refresh()
+        await waitForState(reopened, .installedCurrent)
+        reopened.uninstall()
+        await waitForState(reopened, .recoveryRequired)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.destination.path))
+        let quarantined = try XCTUnwrap(reopened.recoveryURL)
+        XCTAssertEqual(try Data(contentsOf: quarantined), Data("bundled-cli".utf8))
+        XCTAssertNotNil(fixture.defaults.data(forKey: BlocksCLIInstallationController.operationJournalKey))
+    }
+
+    func testRealBookmarksKeepRenamedCommandAsVerifiedUninstallRecovery() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanUp() }
+        let live = BlocksCLIInstallationBookmarkAccess.live
+        let realBookmarks = BlocksCLIInstallationBookmarkAccess(
+            make: live.make,
+            resolve: live.resolve,
+            start: { _ in true },
+            stop: { _ in }
+        )
+        let controller = fixture.makeController(bookmarkAccess: realBookmarks)
+        await controller.install(sourceURL: fixture.source, destinationURL: fixture.destination)
+        XCTAssertEqual(controller.state, .installedCurrent)
+        let recordData = try XCTUnwrap(fixture.defaults.data(
+            forKey: BlocksCLIInstallationController.recordKey
+        ))
+        let record = try JSONDecoder().decode(BlocksCLIInstallationRecord.self, from: recordData)
+
+        controller.uninstall()
+        await waitForState(controller, .recoveryRequired)
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.destination.path))
+        let quarantine = try XCTUnwrap(controller.recoveryURL)
+        XCTAssertEqual(BlocksCLIFileIdentity.resourceIdentifier(of: quarantine), record.installedFileIdentity)
+        XCTAssertEqual(BlocksCLIFileDigest.sha256(of: quarantine), record.installedSHA256)
+        XCTAssertNotNil(fixture.defaults.data(forKey: BlocksCLIInstallationController.operationJournalKey))
+        let reopened = fixture.makeController(bookmarkAccess: realBookmarks)
+        reopened.refresh()
+        await waitForState(reopened, .recoveryRequired)
+        XCTAssertEqual(reopened.recoveryURL?.standardizedFileURL, quarantine.standardizedFileURL)
+        XCTAssertEqual(BlocksCLIFileIdentity.resourceIdentifier(of: quarantine), record.installedFileIdentity)
+    }
+
+    func testPreCommitFirstInstallJournalWithoutDestinationClearsOnRefresh() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanUp() }
+        let record = try fixture.preCommitRecord(identity: Data("future-inode".utf8))
+        try fixture.saveInstallJournal(targetRecord: record, identity: record.installedFileIdentity!)
+
+        let controller = fixture.makeController()
+        controller.refresh()
+        await waitForJournalClear(fixture.defaults)
+
+        XCTAssertEqual(controller.state, .notInstalled)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.destination.path))
+        XCTAssertNil(fixture.defaults.data(forKey: BlocksCLIInstallationController.recordKey))
+        XCTAssertNil(fixture.defaults.data(forKey: BlocksCLIInstallationController.operationJournalKey))
+    }
+
+    func testPostCommitFirstInstallJournalRecoversUsingDirectoryBookmark() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanUp() }
+        try Data("bundled-cli".utf8).write(to: fixture.destination)
+        let identity = try XCTUnwrap(BlocksCLIFileIdentity.resourceIdentifier(of: fixture.destination))
+        let record = try fixture.preCommitRecord(identity: identity)
+        try fixture.saveInstallJournal(targetRecord: record, identity: identity)
+
+        let controller = fixture.makeController()
+        controller.refresh()
+        await waitForState(controller, .installedCurrent)
+
+        let recoveredData = try XCTUnwrap(fixture.defaults.data(
+            forKey: BlocksCLIInstallationController.recordKey
+        ))
+        XCTAssertEqual(
+            try JSONDecoder().decode(BlocksCLIInstallationRecord.self, from: recoveredData),
+            record
+        )
+        XCTAssertNil(fixture.defaults.data(forKey: BlocksCLIInstallationController.operationJournalKey))
+        XCTAssertEqual(try Data(contentsOf: fixture.destination), Data("bundled-cli".utf8))
+
+        // A recovered placeholder must never fall back to resolving the
+        // directory (or a pathname) as though it were a file bookmark.
+        let missingDirectoryRecord = BlocksCLIInstallationRecord(
+            securityScopedBookmark: Data(),
+            installedSHA256: record.installedSHA256,
+            installedFileIdentity: identity,
+            appVersion: record.appVersion,
+            displayPath: record.displayPath
+        )
+        fixture.defaults.set(
+            try JSONEncoder().encode(missingDirectoryRecord),
+            forKey: BlocksCLIInstallationController.recordKey
+        )
+        let withoutDirectory = fixture.makeController()
+        withoutDirectory.refresh()
+        await waitForState(withoutDirectory, .inaccessible)
+        XCTAssertEqual(try Data(contentsOf: fixture.destination), Data("bundled-cli".utf8))
+    }
+
+    func testFirstInstallRejectsFileCreatedAtCommitBoundary() async throws {
+        let fixture = try Fixture()
+        defer { fixture.cleanUp() }
+        let destination = fixture.destination
+        let controller = fixture.makeController(beforeInstallCommit: {
+            try? Data("user-owned".utf8).write(to: destination)
+        })
+
+        await controller.install(sourceURL: fixture.source, destinationURL: destination)
+
+        XCTAssertEqual(controller.state, .destinationConflict)
+        XCTAssertEqual(try Data(contentsOf: destination), Data("user-owned".utf8))
+        XCTAssertNil(fixture.defaults.data(forKey: BlocksCLIInstallationController.recordKey))
+        XCTAssertNil(fixture.defaults.data(forKey: BlocksCLIInstallationController.operationJournalKey))
+    }
+
+    private func waitForState(
+        _ controller: BlocksCLIInstallationController,
+        _ expected: BlocksCLIInstallationState
+    ) async {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(2))
+        while clock.now < deadline {
+            if controller.state == expected,
+               !controller.isRecovering, !controller.isBusy { return }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTFail("Timed out waiting for CLI state \(expected); current: \(controller.state)")
+    }
+
+    private func waitForJournalClear(_ defaults: UserDefaults) async {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(2))
+        while clock.now < deadline {
+            if defaults.data(forKey: BlocksCLIInstallationController.operationJournalKey) == nil {
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTFail("Timed out waiting for first-install journal recovery")
+    }
+
+    @MainActor
+    private final class Fixture {
+        let root: URL
+        let bin: URL
+        let source: URL
+        let destination: URL
+        let defaults: UserDefaults
+        let suiteName: String
+
+        let bookmarks = BlocksCLIInstallationBookmarkAccess(
+            make: { url in
+                guard FileManager.default.fileExists(atPath: url.path) else {
+                    throw CocoaError(.fileNoSuchFile)
+                }
+                return Data(url.path.utf8)
+            },
+            resolve: { data in
+                guard !data.isEmpty,
+                      let path = String(data: data, encoding: .utf8) else { return nil }
+                return URL(fileURLWithPath: path)
+            },
+            start: { _ in true },
+            stop: { _ in }
+        )
+
+        init() throws {
+            root = FileManager.default.temporaryDirectory.appendingPathComponent(
+                "BlocksCLIFirstInstallBookmarkTests.\(UUID().uuidString)",
+                isDirectory: true
+            )
+            bin = root.appendingPathComponent("bin", isDirectory: true)
+            source = root.appendingPathComponent("bundled-cli")
+            destination = bin.appendingPathComponent("blocks-dev")
+            suiteName = "BlocksCLIFirstInstallBookmarkTests.\(UUID().uuidString)"
+            defaults = UserDefaults(suiteName: suiteName)!
+            try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+            try Data("bundled-cli".utf8).write(to: source)
+        }
+
+        func cleanUp() {
+            try? FileManager.default.removeItem(at: root)
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+
+        func makeController(
+            bookmarkAccess: BlocksCLIInstallationBookmarkAccess? = nil,
+            beforeInstallCommit: @escaping @Sendable () -> Void = {}
+        ) -> BlocksCLIInstallationController {
+            BlocksCLIInstallationController(
+                defaults: defaults,
+                bookmarkAccess: bookmarkAccess ?? bookmarks,
+                sourceURLProvider: { [source] in source },
+                installationRecordStore: .defaults(
+                    defaults, key: BlocksCLIInstallationController.recordKey
+                ),
+                operationJournalStore: .defaults(
+                    defaults, key: BlocksCLIInstallationController.operationJournalKey
+                ),
+                operationLeaseProvider: .file(root.appendingPathComponent(".cli-operation.lock")),
+                beforeInstallCommit: beforeInstallCommit
+            )
+        }
+
+        func preCommitRecord(identity: Data) throws -> BlocksCLIInstallationRecord {
+            BlocksCLIInstallationRecord(
+                securityScopedBookmark: Data(),
+                directorySecurityScopedBookmark: try bookmarks.make(bin),
+                installedSHA256: try XCTUnwrap(BlocksCLIFileDigest.sha256(of: source)),
+                installedFileIdentity: identity,
+                appVersion: "test",
+                displayPath: destination.path
+            )
+        }
+
+        func saveInstallJournal(
+            targetRecord: BlocksCLIInstallationRecord,
+            identity: Data
+        ) throws {
+            let journal = BlocksCLIOperationJournal(
+                kind: .install,
+                destinationBookmark: Data(),
+                destinationDirectoryBookmark: try bookmarks.make(bin),
+                recoveryBookmark: nil,
+                recoveryPath: nil,
+                displayPath: destination.path,
+                expectedOldIdentity: nil,
+                expectedOldDigest: nil,
+                expectedNewIdentity: identity,
+                expectedNewDigest: targetRecord.installedSHA256,
+                targetRecord: try JSONEncoder().encode(targetRecord)
+            )
+            defaults.set(try JSONEncoder().encode(journal), forKey: BlocksCLIInstallationController.operationJournalKey)
+        }
+    }
+}

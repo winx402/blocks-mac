@@ -302,7 +302,7 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
             case .list: service.listActions(withReply: reply)
             case .submit: service.execute(data, outputFile: outputFile, withReply: reply)
             case .cancel:
-                guard let requestID = String(data: data, encoding: .utf8), UUID(uuidString: requestID) != nil else {
+                guard let requestID = Self.cancellationRequestID(from: data) else {
                     reply(Data("false".utf8)); return
                 }
                 service.cancel(requestID) { cancelled in
@@ -312,6 +312,12 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
         }
     }
     #endif
+
+    nonisolated static func cancellationRequestID(from data: Data) -> String? {
+        guard let rawValue = String(data: data, encoding: .utf8),
+              let requestID = ActionRequestID(rawValue: rawValue) else { return nil }
+        return requestID.rawValue
+    }
 
     deinit {
         #if BLOCKS_LOCAL_DEVELOPMENT

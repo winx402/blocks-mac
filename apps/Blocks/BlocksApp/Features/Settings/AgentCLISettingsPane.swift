@@ -943,6 +943,9 @@ struct BlocksCLIPreservedCleanupArtifact: Codable, Equatable {
 }
 
 struct BlocksCLIInstallationRecord: Codable, Equatable {
+    /// Empty for a first-install journal before the executable exists, and
+    /// possibly in a record recovered from that journal. In either case the
+    /// directory bookmark is required to resolve the destination.
     let securityScopedBookmark: Data
     let directorySecurityScopedBookmark: Data?
     let installedSHA256: String
@@ -980,6 +983,8 @@ struct BlocksCLIOperationJournal: Codable, Equatable {
     enum Kind: String, Codable { case install, uninstall }
 
     let kind: Kind
+    /// Empty when the target record has no file bookmark (including the
+    /// first-install pre-commit window); the directory bookmark then locates it.
     let destinationBookmark: Data
     let destinationDirectoryBookmark: Data?
     let recoveryBookmark: Data?
@@ -1076,6 +1081,10 @@ private struct BlocksCLIResolvedDestination {
     let usesDirectoryBookmark: Bool
 }
 
+/// A non-resolving placeholder preserves the existing journal/record schema
+/// without ever treating the parent directory as a bookmark to the file.
+private let uncreatedCLIDestinationBookmark = Data()
+
 private func resolveCLIRecordDestination(
     _ record: BlocksCLIInstallationRecord,
     using bookmarkAccess: BlocksCLIInstallationBookmarkAccess
@@ -1090,7 +1099,8 @@ private func resolveCLIRecordDestination(
             usesDirectoryBookmark: true
         )
     }
-    guard let destinationURL = bookmarkAccess.resolve(
+    guard record.securityScopedBookmark != uncreatedCLIDestinationBookmark,
+          let destinationURL = bookmarkAccess.resolve(
         record.securityScopedBookmark
     ) else {
         return nil
@@ -1116,7 +1126,8 @@ private func resolveCLIJournalDestination(
             usesDirectoryBookmark: true
         )
     }
-    guard let scopeURL = bookmarkAccess.resolve(journal.destinationBookmark) else {
+    guard journal.destinationBookmark != uncreatedCLIDestinationBookmark,
+          let scopeURL = bookmarkAccess.resolve(journal.destinationBookmark) else {
         return nil
     }
     return BlocksCLIResolvedDestination(
@@ -1498,12 +1509,15 @@ private actor BlocksCLIInstallationWorker {
             expectedDestinationSnapshot = nil
         }
         do {
-            let preCommitDestinationBookmark = try bookmarkAccess.make(
-                destinationURL
-            )
             let directoryBookmark = try bookmarkAccess.make(
                 destinationURL.deletingLastPathComponent()
             )
+            // A security-scoped file bookmark cannot be made for a pathname
+            // that has not been created. The directory bookmark is the durable
+            // authority until the atomic rename creates the executable.
+            let preCommitDestinationBookmark = destinationInitiallyExists
+                ? try bookmarkAccess.make(destinationURL)
+                : uncreatedCLIDestinationBookmark
             guard !Task.isCancelled else { return .failed }
             let displacedOriginalURL = try BlocksCLIInstaller.install(
                 sourceURL: sourceURL,

@@ -7,6 +7,123 @@ import XCTest
 @testable import BlocksCore
 
 final class ClipboardScreenshotHistoryRepositoryTests: XCTestCase {
+    func testClipboardSearchUsesFTSPrefixThenLiteralSubstringFallback() throws {
+        let fixture = try makeFixture()
+        defer { fixture.close() }
+        guard fixture.database.ftsEnabled else { throw XCTSkip("Clipboard FTS5 is unavailable") }
+
+        let samples = [
+            ("ali", "阿里邮箱"),
+            ("preflight", "预发推标"),
+            ("product", "StandardProductEditProcessV1"),
+            ("skey", "skeyService"),
+            ("percent", "marker%literal"),
+            ("percent-decoy", "markerXliteral"),
+            ("underscore", "marker_literal"),
+            ("underscore-decoy", "markerYliteral"),
+            ("backslash", "left\\right"),
+            ("backslash-decoy", "leftright")
+        ]
+        for (index, sample) in samples.enumerated() {
+            let signature = String(format: "%064x", index + 1)
+            _ = try fixture.repository.insert(
+                record: makeTextRecord(id: sample.0, text: sample.1, signature: signature),
+                payload: .init(recordID: sample.0, kind: .text, text: sample.1)
+            )
+        }
+        XCTAssertEqual(fixture.repository.makeFTSQuery("阿里 Stand"), "\"阿里\"* \"Stand\"*")
+        XCTAssertEqual(
+            try fixture.database.connection.firstInt(
+                "SELECT COUNT(*) FROM clipboard_fts WHERE clipboard_fts MATCH ?",
+                bindings: [.string(try XCTUnwrap(fixture.repository.makeFTSQuery("阿里")))]
+            ),
+            1,
+            "The Chinese prefix must hit the FTS index, not merely the LIKE fallback"
+        )
+
+        func ids(_ query: String) throws -> [String] {
+            try fixture.repository.search(query, limit: 10).map(\.id)
+        }
+        XCTAssertEqual(try ids("阿里"), ["ali"])
+        XCTAssertEqual(try ids("预发"), ["preflight"])
+        XCTAssertEqual(try ids("StandardProduct"), ["product"])
+        XCTAssertEqual(try ids("standardproduct"), ["product"])
+        XCTAssertEqual(try ids("Stand"), ["product"])
+        XCTAssertEqual(try ids("Product"), ["product"], "Infix needs the zero-hit LIKE path")
+        XCTAssertEqual(try ids("skey"), ["skey"])
+        XCTAssertEqual(try ids("SKEY"), ["skey"])
+        XCTAssertEqual(try ids("Stand Product"), ["product"], "LIKE keeps multi-term AND semantics")
+        XCTAssertTrue(try ids("阿里 Product").isEmpty)
+        XCTAssertEqual(try ids("%"), ["percent"])
+        XCTAssertEqual(try ids("_"), ["underscore"])
+        XCTAssertEqual(try ids("\\"), ["backslash"])
+    }
+
+    func testClipboardSearchFallbackAppliesFilterBeforeLimitAndDoesNotRevealRedactedOrDeletedText() throws {
+        let fixture = try makeFixture()
+        defer { fixture.close() }
+        guard fixture.database.ftsEnabled else { throw XCTSkip("Clipboard FTS5 is unavailable") }
+
+        let prefix = makeTextRecord(id: "prefix", text: "Product standalone", signature: String(repeating: "1", count: 64))
+        let middle = makeTextRecord(id: "middle", text: "StandardProductEditProcessV1", signature: String(repeating: "2", count: 64))
+        for (record, text) in [(prefix, "Product standalone"), (middle, "StandardProductEditProcessV1")] {
+            _ = try fixture.repository.insert(record: record, payload: .init(recordID: record.id, kind: .text, text: text))
+        }
+        let filtered = try fixture.repository.search("Product", limit: 1) { batch in
+            batch.filter { $0.id == middle.id }
+        }
+        XCTAssertEqual(filtered.map(\.id), [middle.id], "A filtered zero-hit FTS page must reach the substring fallback")
+        XCTAssertEqual(try fixture.repository.search("Product", limit: 1).map(\.id), [prefix.id], "Nonempty FTS stays preferred")
+
+        let privatePNG = pngData(seed: 102)
+        let privateRecord = makeImageRecord(
+            id: "private-product", png: privatePNG, restorable: false,
+            excluded: true, customTitle: "SecretProductFragment"
+        )
+        _ = try fixture.repository.insert(
+            record: privateRecord,
+            payload: makePayload(recordID: privateRecord.id, png: privatePNG)
+        )
+        XCTAssertTrue(try fixture.repository.search("ProductFragment", limit: 10).isEmpty)
+
+        _ = try fixture.repository.delete(recordID: middle.id)
+        XCTAssertTrue(try fixture.repository.search("EditProcess", limit: 10).isEmpty)
+    }
+
+    func testScreenshotHistoryUsesSharedFTSPrefixQueryWithCursor() throws {
+        let fixture = try makeFixture()
+        defer { fixture.close() }
+        guard fixture.database.ftsEnabled else { throw XCTSkip("Clipboard FTS5 is unavailable") }
+        let firstPNG = pngData(seed: 103)
+        let first = makeImageRecord(
+            id: "screenshot-prefix-first", png: firstPNG,
+            createdAt: Date(timeIntervalSince1970: 1_000),
+            customTitle: "阿里邮箱"
+        )
+        let secondPNG = pngData(seed: 104)
+        let second = makeImageRecord(
+            id: "screenshot-prefix-second", png: secondPNG,
+            createdAt: Date(timeIntervalSince1970: 2_000),
+            customTitle: "阿里邮箱续"
+        )
+        for (record, png) in [(first, firstPNG), (second, secondPNG)] {
+            _ = try fixture.repository.commitScreenshotHistory(
+                request: .init(record: record, pngData: png, ocrState: .notRequired)
+            )
+        }
+        let page = try fixture.repository.searchScreenshotHistory(query: "阿里", after: nil, limit: 1)
+        XCTAssertEqual(page.map(\.id), [second.id])
+        let savedSecond = try XCTUnwrap(page.first)
+        let cursor = ScreenshotHistoryCursorKey(
+            lastCopiedAt: savedSecond.lastCopiedAt, createdAt: savedSecond.createdAt,
+            changeCount: savedSecond.changeCount, recordID: savedSecond.id
+        )
+        XCTAssertEqual(
+            try fixture.repository.searchScreenshotHistory(query: "阿里", after: cursor, limit: 1).map(\.id),
+            [first.id]
+        )
+    }
+
     func testImageCustomTitleIsSearchableAndReplacingItRemovesTheOldTitleFromFTS() throws {
         let fixture = try makeFixture()
         defer { fixture.close() }

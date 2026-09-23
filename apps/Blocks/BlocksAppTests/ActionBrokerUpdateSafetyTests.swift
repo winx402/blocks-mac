@@ -6,6 +6,16 @@ import XCTest
 
 @MainActor
 final class ActionBrokerUpdateSafetyTests: XCTestCase {
+    func testLocalCancellationUsesTheActionRequestIdentifierContract() {
+        let generated = ActionRequestID.make().rawValue
+        XCTAssertTrue(generated.hasPrefix("req_"))
+        XCTAssertEqual(ScreenshotActionHost.cancellationRequestID(from: Data(generated.utf8)), generated)
+        XCTAssertEqual(ScreenshotActionHost.cancellationRequestID(from: Data("custom-action-id".utf8)), "custom-action-id")
+        for invalid in [Data(), Data(" bad-id".utf8), Data("bad id".utf8), Data([0xff])] {
+            XCTAssertNil(ScreenshotActionHost.cancellationRequestID(from: invalid))
+        }
+    }
+
     func testAppOwnedPreferenceImportsIntentOnlyOnce() throws {
         let suite = "AppOwnedCLI.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

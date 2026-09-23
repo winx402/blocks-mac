@@ -498,8 +498,9 @@ public final class ClipboardRepository: @unchecked Sendable {
         let expandedQuery = expandedRelativeDateQuery(trimmed)
 
         if database.ftsEnabled, let ftsQuery = makeFTSQuery(expandedQuery) {
+            let records: [ClipboardRecorderRecord]
             do {
-                return try querySearchRecords(
+                records = try querySearchRecords(
                     """
                     SELECT \(recordColumns)
                     FROM clipboard_fts
@@ -522,6 +523,12 @@ public final class ClipboardRepository: @unchecked Sendable {
             } catch {
                 return try fallbackSearch(expandedQuery, limit: limit, filteringBatch: filteringBatch)
             }
+            if !records.isEmpty {
+                return records
+            }
+            // A prefix only matches the start of an FTS token. Check for
+            // an infix match only when no FTS result survives filtering.
+            return try fallbackSearch(expandedQuery, limit: limit, filteringBatch: filteringBatch)
         }
 
         return try fallbackSearch(expandedQuery, limit: limit, filteringBatch: filteringBatch)
@@ -1119,19 +1126,23 @@ public final class ClipboardRepository: @unchecked Sendable {
         limit: Int,
         filteringBatch: (([ClipboardRecorderRecord]) throws -> [ClipboardRecorderRecord])?
     ) throws -> [ClipboardRecorderRecord] {
-        let like = "%\(query.lowercased())%"
+        let terms = likeSearchTerms(query)
+        let conditions = Array(repeating: "lower(coalesce(search_text, '')) LIKE ? ESCAPE '\\'", count: terms.count)
+            .joined(separator: " AND ")
+        // This is a zero-hit/error fallback, not an indexed substring search:
+        // SQLite may scan search_text, while LIMIT bounds returned records.
         return try querySearchRecords(
             """
             SELECT \(recordColumns)
             FROM clipboard_items
-            WHERE lower(coalesce(search_text, '')) LIKE ?
+            WHERE \(conditions)
             ORDER BY COALESCE(last_copied_at, created_at) DESC,
                      created_at DESC,
                      change_count DESC,
                      id DESC
             LIMIT ?
             """,
-            bindings: [.string(like), .int(filteringBatch == nil ? max(1, limit) : -1)],
+            bindings: terms.map(SQLiteBinding.string) + [.int(filteringBatch == nil ? max(1, limit) : -1)],
             limit: limit,
             filteringBatch: filteringBatch
         )
@@ -1702,7 +1713,17 @@ public final class ClipboardRepository: @unchecked Sendable {
         guard !tokens.isEmpty else {
             return nil
         }
-        return tokens.map { "\"\($0)\"" }.joined(separator: " ")
+        return tokens.map { "\"\($0)\"*" }.joined(separator: " ")
+    }
+
+    private func likeSearchTerms(_ query: String) -> [String] {
+        query.split(whereSeparator: { $0.isWhitespace }).map { token in
+            let escaped = String(token).lowercased()
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "%", with: "\\%")
+                .replacingOccurrences(of: "_", with: "\\_")
+            return "%\(escaped)%"
+        }
     }
 
     private func expandedRelativeDateQuery(_ query: String, now: Date = Date()) -> String {
