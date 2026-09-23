@@ -19,7 +19,7 @@ PROJECT = ROOT / "apps/Blocks/Blocks.xcodeproj"
 SCHEME = "BlocksAppTestsNetwork"
 TEST_SOURCE = ROOT / "apps/Blocks/BlocksAppTests/TranslationEntryBridgeTests.swift"
 TIMEOUT_SECONDS = 180
-EXPECTED_TEST_COUNT = 13
+EXPECTED_TEST_COUNT = 14
 _CONTROLLED_HOST_PROBE = (
     "BlocksAppTests/TranslationEntryBridgeTests/"
     "testControlledXCTestHostInheritsVerificationTokenWhenRequired"

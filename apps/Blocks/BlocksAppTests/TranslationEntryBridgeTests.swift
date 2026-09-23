@@ -2,6 +2,7 @@ import AppKit
 @testable import BlocksCore
 import BlocksScreenshotCore
 import CryptoKit
+import Darwin
 import Network
 import SwiftUI
 import XCTest
@@ -294,6 +295,14 @@ private final class SelectionHelperNetworkTestExpectation: @unchecked Sendable {
 
     func fulfill() {
         storedExpectation.fulfill()
+    }
+}
+
+private func openFileDescriptorCountForSelectionHelperTest() -> Int {
+    (0..<getdtablesize()).reduce(into: 0) { count, descriptor in
+        if fcntl(descriptor, F_GETFD) != -1 {
+            count += 1
+        }
     }
 }
 
@@ -1138,6 +1147,58 @@ final class TranslationEntryBridgeTests: XCTestCase {
             .completed
         )
         XCTAssertEqual(server.responseSenderFinishCount, 1)
+    }
+
+    func testSelectionHelperProductionLoopbackRepeatedExchangesReleaseDescriptors()
+        throws
+    {
+        try requireSelectionHelperReceiverNetworkTests()
+        let server = SelectionHelperProductionLoopbackTestServer(
+            responseSenderTimeout: 5
+        )
+        let port = try server.start()
+        defer { server.stop() }
+        let initialDescriptorCount =
+            openFileDescriptorCountForSelectionHelperTest()
+        let exchangeCount = 24
+
+        for index in 0..<exchangeCount {
+            let packet = SelectionHelperWirePacket(
+                kind: .pair,
+                payload: Data("repeated-exchange-\(index)".utf8)
+            )
+            let result = SelectionHelperLoopbackConnection(
+                host: "127.0.0.1",
+                port: port
+            ).send(packet, timeout: 1)
+            guard case let .success(responseData) = result else {
+                return XCTFail("Repeated loopback exchange \(index) failed.")
+            }
+            XCTAssertEqual(
+                try JSONDecoder().decode(
+                    SelectionHelperWirePacket.self,
+                    from: responseData
+                ),
+                packet
+            )
+        }
+
+        let deadline = Date().addingTimeInterval(2)
+        while server.responseSenderFinishCount < exchangeCount,
+              Date() < deadline {
+            _ = RunLoop.current.run(
+                mode: .default,
+                before: Date().addingTimeInterval(0.01)
+            )
+        }
+        XCTAssertEqual(server.responseSenderFinishCount, exchangeCount)
+        let finalDescriptorCount =
+            openFileDescriptorCountForSelectionHelperTest()
+        XCTAssertLessThanOrEqual(
+            finalDescriptorCount,
+            initialDescriptorCount + 3,
+            "Completed loopback exchanges must not retain a socket per request."
+        )
     }
 
     func testSelectionHelperProductionLoopbackWaitsForFINAfterResponseFrame()

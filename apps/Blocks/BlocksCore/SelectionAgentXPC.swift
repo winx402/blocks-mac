@@ -657,7 +657,12 @@ final class SelectionHelperRequestFrameReceiver: @unchecked Sendable {
             case .ready:
                 receiveNext()
             case .failed, .cancelled:
-                _ = finish()
+                // A terminal Network.framework state does not guarantee that
+                // the accepted socket has been released. The successful FIN
+                // path below deliberately keeps it for the response sender.
+                if finish() {
+                    connection.cancel()
+                }
             default:
                 break
             }
@@ -749,7 +754,9 @@ final class SelectionHelperResponseFrameSender: @unchecked Sendable {
             connection.stateUpdateHandler = { [weak self] state in
                 switch state {
                 case .failed, .cancelled:
-                    self?.finish(cancelConnection: false)
+                    // Even after a terminal state, explicitly cancel the
+                    // accepted connection to release its socket resources.
+                    self?.finish(cancelConnection: true)
                 default:
                     break
                 }
