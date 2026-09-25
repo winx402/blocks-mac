@@ -55,6 +55,7 @@ struct HooksSettingsPane: View {
                     Group {
                         switch route {
                         case .catalog:
+                            SettingsPageHeader(mode: .hooks)
                             pluginList
                         case let .installed(pluginID):
                             if let plugin = pluginManager.plugins.first(where: {
@@ -91,7 +92,7 @@ struct HooksSettingsPane: View {
                     .horizontal,
                     BlocksVisualTokens.Layout.settingsPageHorizontalPadding
                 )
-                .padding(.top, 20)
+                .padding(.top, BlocksVisualTokens.Spacing.md)
                 .padding(.bottom, 48)
                 .frame(maxWidth: .infinity, alignment: .center)
                 .background {

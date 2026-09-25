@@ -797,10 +797,19 @@ private final class SettingsSidebarGroupCell: NSTableCellView {
 
 @MainActor
 private final class SettingsSidebarRouteCell: NSTableCellView {
-    private let iconBadge = NSView()
-    private let symbolView = NSImageView()
+    private let iconBadge = BlocksSettingsIconView()
     private let titleLabel = NSTextField(labelWithString: "")
     private var section: AppSection?
+
+    override var backgroundStyle: NSView.BackgroundStyle {
+        didSet {
+            // Let the source list decide emphasis, but use the matching system
+            // text color explicitly. Vibrant labelColor can become blue on
+            // blue when Increase Contrast disables sidebar transparency.
+            titleLabel.textColor = backgroundStyle == .emphasized
+                ? .alternateSelectedControlTextColor : .labelColor
+        }
+    }
 
     init(identifier: NSUserInterfaceItemIdentifier) {
         super.init(frame: .zero)
@@ -815,13 +824,6 @@ private final class SettingsSidebarRouteCell: NSTableCellView {
 
     func update(section: AppSection) {
         self.section = section
-        symbolView.image = NSImage(
-            systemSymbolName: section.settingsIconSystemImage,
-            accessibilityDescription: nil
-        )?.withSymbolConfiguration(
-            NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
-        )
-        symbolView.contentTintColor = .white
         updateBadgeColor()
         titleLabel.stringValue = section.title
         titleLabel.setAccessibilityLabel(section.title)
@@ -829,12 +831,7 @@ private final class SettingsSidebarRouteCell: NSTableCellView {
 
     private func configure() {
         iconBadge.translatesAutoresizingMaskIntoConstraints = false
-        iconBadge.wantsLayer = true
-        iconBadge.layer?.cornerRadius = 4
         iconBadge.setAccessibilityElement(false)
-        symbolView.translatesAutoresizingMaskIntoConstraints = false
-        symbolView.imageScaling = .scaleProportionallyDown
-        symbolView.setAccessibilityElement(false)
 
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
         titleLabel.font = .systemFont(ofSize: NSFont.systemFontSize)
@@ -844,17 +841,12 @@ private final class SettingsSidebarRouteCell: NSTableCellView {
 
         textField = titleLabel
         addSubview(iconBadge)
-        iconBadge.addSubview(symbolView)
         addSubview(titleLabel)
         NSLayoutConstraint.activate([
             iconBadge.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
             iconBadge.centerYAnchor.constraint(equalTo: centerYAnchor),
             iconBadge.widthAnchor.constraint(equalToConstant: 20),
             iconBadge.heightAnchor.constraint(equalToConstant: 20),
-            symbolView.centerXAnchor.constraint(equalTo: iconBadge.centerXAnchor),
-            symbolView.centerYAnchor.constraint(equalTo: iconBadge.centerYAnchor),
-            symbolView.widthAnchor.constraint(equalToConstant: 12),
-            symbolView.heightAnchor.constraint(equalToConstant: 12),
             titleLabel.leadingAnchor.constraint(equalTo: iconBadge.trailingAnchor, constant: 8),
             titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
             titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -869,7 +861,9 @@ private final class SettingsSidebarRouteCell: NSTableCellView {
     private func updateBadgeColor() {
         guard let section else { return }
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            iconBadge.layer?.backgroundColor = NSColor(section.settingsIconColor).cgColor
+            iconBadge.configure(systemImage: section.settingsIconSystemImage,
+                                tint: NSColor(section.settingsIconColor),
+                                pointSize: section.settingsIconPointSize)
         }
     }
 }

@@ -84,7 +84,7 @@ enum BlocksVisualTokens {
 
   enum Layout {
     static let settingsGroupCornerRadius: CGFloat = 10
-    static let settingsFormContentMaxWidth: CGFloat = 760
+    static let settingsFormContentMaxWidth: CGFloat = 640
     static let settingsCollectionContentMaxWidth: CGFloat = 1120
     static let settingsSheetMinimumWidth: CGFloat = 560
     static let settingsSheetIdealWidth: CGFloat = 600

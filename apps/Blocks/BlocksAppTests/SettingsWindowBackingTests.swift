@@ -69,15 +69,22 @@ final class SettingsWindowBackingTests: XCTestCase {
         XCTAssertTrue(window.titlebarAppearsTransparent)
         XCTAssertTrue(backing.isOpaque)
         XCTAssertNil(backing.hitTest(.zero))
-        XCTAssertEqual(surfaces.filter { $0.blocksSurfaceConfiguration.role == .sidebar }.count, 1)
+        let customSidebarSurfaces = surfaces.filter { $0.blocksSurfaceConfiguration.role == .sidebar }
+        if #available(macOS 26.0, *) {
+            XCTAssertTrue(customSidebarSurfaces.isEmpty,
+                          "The native floating sidebar must not have a second custom material")
+        } else {
+            XCTAssertEqual(customSidebarSurfaces.count, 1)
+        }
         XCTAssertEqual(BlocksSurfaceRole.sidebar.appKitMaterial, .sidebar)
-        let sidebar = try XCTUnwrap(surfaces.first { $0.blocksSurfaceConfiguration.role == .sidebar })
-        let sidebarFrame = sidebar.convert(sidebar.bounds, to: root)
+        if let sidebar = customSidebarSurfaces.first {
+            let sidebarFrame = sidebar.convert(sidebar.bounds, to: root)
         // macOS26 keeps its floating sidebar's native 8pt outer inset. The
         // material must extend above the content safe area into the titlebar,
         // not paint over that system-owned outer margin or window controls.
         XCTAssertLessThan(sidebarFrame.minY, root.safeAreaInsets.top,
                           "Sidebar material must extend continuously into the titlebar")
+        }
 
         let marker = try XCTUnwrap(descendants(root).first { $0.identifier?.rawValue == "settings.backing.foreground" })
         let markerFrame = marker.convert(marker.bounds, to: root)

@@ -111,7 +111,18 @@ enum AppSection: String, CaseIterable, Identifiable {
         case .translationSettings: "character.bubble"
         case .translationFavorites: "star"
         case .providers: "sparkles"
+        case .permissions: "lock"
+        case .dataAudit: "list.bullet.rectangle"
         default: systemImage
+        }
+    }
+
+    /// Optical sizing, rather than stretching every SF Symbol into one box.
+    var settingsIconPointSize: CGFloat {
+        switch self {
+        case .screenshot, .shortcuts, .agentCLI, .dataAudit: 14
+        case .settings, .translationSettings, .hooks: 13
+        default: 12
         }
     }
 

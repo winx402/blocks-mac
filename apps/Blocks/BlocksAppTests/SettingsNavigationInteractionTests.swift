@@ -141,18 +141,15 @@ final class SettingsNavigationInteractionTests: XCTestCase {
         XCTAssertEqual(store.currentLocation, SettingsNavigationLocation(section: .providers, routeToken: "details"))
     }
 
-    func testPluginCatalogIsRootAndOverviewExistsOnlyForMainCategories() {
+    func testEverySidebarCategoryHasOverviewAndNestedPrivacyDoesNot() {
         let store = SettingsRouteStateStore()
         store.recordSectionSelection(.hooks)
         XCTAssertEqual(store.currentLocation?.routeToken, "catalog")
         XCTAssertFalse(store.isSecondaryPage(for: .hooks))
-        XCTAssertTrue(SettingsViewMode.general.showsRootOverview)
-        XCTAssertTrue(SettingsViewMode.screenshot.showsRootOverview)
-        XCTAssertTrue(SettingsViewMode.clipboard.showsRootOverview)
-        XCTAssertTrue(SettingsViewMode.translation.showsRootOverview)
-        for mode in [SettingsViewMode.hooks, .providers, .permissions, .shortcuts, .agentCLI, .dataAudit, .translationFavorites, .clipboardPrivacy] {
-            XCTAssertFalse(mode.showsRootOverview)
+        for section in SettingsSidebarSourceListModel.groups.flatMap(\.sections) {
+            XCTAssertTrue(section.settingsViewMode.showsRootOverview, "Missing overview for \(section)")
         }
+        XCTAssertFalse(SettingsViewMode.clipboardPrivacy.showsRootOverview)
     }
 
     func testDelayedOffscreenRouteChangesCannotHijackCurrentHistory() {

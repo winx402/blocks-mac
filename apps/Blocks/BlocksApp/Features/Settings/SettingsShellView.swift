@@ -12,15 +12,20 @@ struct SettingsShellView: View {
         let restorationID = routeStateStore.scrollRestorationID(for: mode)
         Group {
             if mode == .translationFavorites {
-                TranslationFavoritesPane { favorite in
-                    appModel.showTranslationFavorite(favorite)
+                VStack(spacing: SettingsLayout.sectionSpacing) {
+                    SettingsPageHeader(mode: mode)
+                    TranslationFavoritesPane { favorite in
+                        appModel.showTranslationFavorite(favorite)
+                    }
                 }
+                .frame(maxWidth: mode.layoutProfile.maximumWidth)
                 .padding(
                     .horizontal,
                     BlocksVisualTokens.Layout.settingsPageHorizontalPadding
                 )
-                .padding(.top, BlocksVisualTokens.Spacing.lg)
+                .padding(.top, BlocksVisualTokens.Spacing.md)
                 .padding(.bottom, BlocksVisualTokens.Spacing.xl)
+                .frame(maxWidth: .infinity, alignment: .top)
             } else if mode == .hooks {
                 HooksSettingsPane()
             } else {
@@ -139,7 +144,9 @@ struct SettingsShellView: View {
 
 extension SettingsViewMode {
     var showsRootOverview: Bool {
-        self == .general || self == .screenshot || self == .clipboard || self == .translation
+        // Every sidebar destination has the same category overview. Privacy
+        // is a nested clipboard route, not a separate sidebar category.
+        self != .clipboardPrivacy
     }
 }
 

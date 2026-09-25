@@ -210,6 +210,7 @@ struct SettingsValueColumn<Content: View>: View {
 struct SettingsRowShell<Trailing: View>: View {
     let title: String
     let detail: String?
+    let detailAccessibilityLabel: String?
     let status: SettingsRowStatus?
     let reservesStatusSpace: Bool
     let minHeight: CGFloat
@@ -218,6 +219,7 @@ struct SettingsRowShell<Trailing: View>: View {
     init(
         title: String,
         detail: String? = nil,
+        detailAccessibilityLabel: String? = nil,
         status: SettingsRowStatus? = nil,
         reservesStatusSpace: Bool = false,
         minHeight: CGFloat = SettingsLayout.rowMinHeight,
@@ -225,6 +227,7 @@ struct SettingsRowShell<Trailing: View>: View {
     ) {
         self.title = title
         self.detail = detail
+        self.detailAccessibilityLabel = detailAccessibilityLabel
         self.status = status
         self.reservesStatusSpace = reservesStatusSpace
         self.minHeight = minHeight
@@ -250,6 +253,7 @@ struct SettingsRowShell<Trailing: View>: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
+                    .accessibilityLabel(detailAccessibilityLabel ?? detail)
             }
             if reservesStatusSpace {
                 Group {

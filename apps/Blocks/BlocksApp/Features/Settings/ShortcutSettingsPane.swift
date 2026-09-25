@@ -8,6 +8,7 @@ struct ShortcutSettingsPane: View {
     @StateObject private var shortcutRecorderMonitor = ShortcutRecorderMonitorLifecycle()
     @State private var registrationFeedback: SettingsFeedbackDescriptor?
     @State private var registrationFeedbackGeneration: UInt64?
+    @State private var diagnosticsExpanded = false
 
     private var globalShortcutModifier: Binding<ShortcutModifierPreset> {
         Binding {
@@ -24,9 +25,7 @@ struct ShortcutSettingsPane: View {
 
     @ViewBuilder
     private var content: some View {
-        SettingsSection(
-            title: L10n.string("settings.shortcuts")
-        ) {
+        SettingsSection(title: "") {
             SettingsFormRow(
                 title: L10n.string("settings.shortcutGlobalModifier"),
                 detail: L10n.string("settings.shortcutGlobalModifierNote")
@@ -41,24 +40,15 @@ struct ShortcutSettingsPane: View {
                 .pickerStyle(.menu)
             }
 
-            SettingsRowDivider()
-
-            SettingsFormRow(
-                title: L10n.string("settings.shortcutDiagnosticsTitle"),
-                detail: L10n.string("settings.shortcutDiagnosticsDetail")
-            ) {
+            if shortcutStore.failedShortcutCount > 0 {
+                SettingsRowDivider()
                 Label(
-                    registrationSummary,
-                    systemImage: shortcutStore.failedShortcutCount == 0
-                        ? "checkmark.circle.fill"
-                        : "exclamationmark.triangle.fill"
+                    L10n.format("settings.shortcutFailedCount", shortcutStore.failedShortcutCount),
+                    systemImage: "exclamationmark.triangle.fill"
                 )
-                .font(.caption.weight(.medium))
-                .foregroundStyle(
-                    shortcutStore.failedShortcutCount == 0
-                        ? Color.secondary
-                        : Color.orange
-                )
+                .font(.callout.weight(.medium))
+                .foregroundStyle(.orange)
+                .frame(maxWidth: .infinity, minHeight: SettingsLayout.rowMinHeight, alignment: .leading)
             }
         }
 
@@ -107,6 +97,24 @@ struct ShortcutSettingsPane: View {
             SettingsRowDivider()
             SettingsFeedbackSlot(feedback: registrationFeedback)
         }
+        SettingsSection(title: L10n.string("settings.shortcutDiagnosticsTitle")) {
+            DisclosureGroup(isExpanded: $diagnosticsExpanded) {
+                VStack(alignment: .leading, spacing: BlocksVisualTokens.Spacing.xs) {
+                    Text(registrationSummary)
+                        .font(.callout.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    Text(L10n.string("settings.shortcutDiagnosticsDetail"))
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 6)
+            } label: {
+                Label(L10n.string("settings.shortcutDiagnosticsDisclosure"), systemImage: "waveform.path.ecg")
+                    .font(.subheadline.weight(.medium))
+            }
+            .padding(.vertical, SettingsLayout.rowVerticalPadding)
+        }
         .onChange(of: shortcutStore.registrationGeneration) { _, generation in
             guard let feedbackGeneration = registrationFeedbackGeneration,
                   feedbackGeneration != generation else {
@@ -145,11 +153,7 @@ struct ShortcutSettingsPane: View {
             return SettingsFeedbackDescriptor(
                 kind: .success,
                 title: L10n.string("settings.shortcutReregisterAcceptedTitle"),
-                detail: L10n.format(
-                    "settings.shortcutReregisterAcceptedDetail",
-                    summary.acceptedCount,
-                    summary.disabledCount
-                )
+                detail: L10n.string("settings.shortcutReregisterAcceptedBrief")
             )
         }
         let failures = summary.failedResults.map {
@@ -339,7 +343,8 @@ struct ShortcutRecorderRow: View {
     var body: some View {
         SettingsRowShell(
             title: command.localizedTitle,
-            detail: "\(binding.displayValue)\n\(L10n.format("settings.shortcutSource", bindingSource.localizedTitle))",
+            detail: "\(binding.compactDisplayValue)\n\(L10n.format("settings.shortcutSource", bindingSource.localizedTitle))",
+            detailAccessibilityLabel: "\(binding.displayValue), \(L10n.format("settings.shortcutSource", bindingSource.localizedTitle))",
             minHeight: 58
         ) {
             HStack(spacing: BlocksVisualTokens.Spacing.sm) {

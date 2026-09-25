@@ -1166,7 +1166,7 @@ final class AppAppearanceTests: XCTestCase {
         )
         XCTAssertEqual(
             BlocksVisualTokens.Layout.settingsFormContentMaxWidth,
-            760
+            640
         )
         XCTAssertEqual(
             BlocksVisualTokens.Layout.settingsCollectionContentMaxWidth,

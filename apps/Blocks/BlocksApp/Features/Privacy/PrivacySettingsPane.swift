@@ -18,7 +18,7 @@ private struct PrivacySettingsPaneContent: View {
     var body: some View {
         let visibleApps = store.visibleApps
 
-        SettingsSection(title: L10n.string("privacy.title")) {
+        SettingsSection(title: "") {
             SettingsActionRow(
                 title: L10n.string("privacy.capturePolicy.title"),
                 detail: L10n.string("privacy.capturePolicy.detail")

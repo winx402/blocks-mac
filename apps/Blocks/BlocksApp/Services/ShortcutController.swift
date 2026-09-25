@@ -297,6 +297,18 @@ struct ShortcutBinding: Codable, Equatable, Identifiable {
         return pieces.joined(separator: " + ")
     }
 
+    /// Compact visual form for settings. Keep `displayValue` for spoken text,
+    /// diagnostics, and existing callers that expect full modifier names.
+    var compactDisplayValue: String {
+        let flags = modifierFlags
+        var symbols = ""
+        if flags.contains(.control) { symbols += "⌃" }
+        if flags.contains(.option) { symbols += "⌥" }
+        if flags.contains(.shift) { symbols += "⇧" }
+        if flags.contains(.command) { symbols += "⌘" }
+        return symbols + (Self.canonicalKeyLabel(for: keyCode) ?? keyLabel.uppercased())
+    }
+
     func replacingModifierFlags(_ flags: NSEvent.ModifierFlags) -> ShortcutBinding {
         ShortcutBinding(
             command: command ?? .screenshotSmart,

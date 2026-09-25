@@ -1181,13 +1181,19 @@ final class BlocksSettingsCanvasView: NSView {
     }
 }
 
-/// The sidebar owns one continuous native material, including behind the
-/// window controls. Only the background ignores the titlebar safe area.
+/// Tahoe's split view already owns a continuous sidebar material and rim.
+/// Adding another behind-window material washes it out. Earlier systems need
+/// the explicit backing; only that background ignores the titlebar safe area.
 struct BlocksSettingsSidebarBacking: ViewModifier {
+    @ViewBuilder
     func body(content: Content) -> some View {
-        content.background {
-            BlocksStructuralBackground(role: .sidebar)
-                .ignoresSafeArea(.container, edges: .top)
+        if #available(macOS 26.0, *) {
+            content
+        } else {
+            content.background {
+                BlocksStructuralBackground(role: .sidebar)
+                    .ignoresSafeArea(.container, edges: .top)
+            }
         }
     }
 }

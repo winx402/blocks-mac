@@ -111,7 +111,10 @@ struct GeneralSettingsPane: View {
                 title: L10n.string("updates.title"),
                 detail: L10n.string("updates.detail"),
                 status: SettingsRowStatus(
-                    kind: appUpdates.isAvailable ? .information : .warning,
+                    kind: UpdateSettingsStatusPresentation.kind(
+                        unavailableReasonKey: appUpdates.unavailableReasonKey,
+                        statusKey: appUpdates.statusKey
+                    ),
                     message: appUpdates.statusText
                 )
             ) {
@@ -202,6 +205,25 @@ struct GeneralSettingsPane: View {
             L10n.string("release.channel.directBetaDetail")
         case .appStoreBeta:
             L10n.string("release.channel.appStoreBetaDetail")
+        }
+    }
+}
+
+enum UpdateSettingsStatusPresentation {
+    static func kind(unavailableReasonKey: String?, statusKey: String) -> SettingsInlineFeedbackKind {
+        if let unavailableReasonKey {
+            switch unavailableReasonKey {
+            case "updates.unavailable.distribution", "updates.unavailable.testing":
+                return .information
+            default:
+                return .warning
+            }
+        }
+        switch statusKey {
+        case "updates.status.failed", "updates.status.preparationFailed":
+            return .warning
+        default:
+            return .information
         }
     }
 }

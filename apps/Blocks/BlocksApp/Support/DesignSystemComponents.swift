@@ -20,12 +20,84 @@ struct BlocksSettingsCategoryIcon: View {
     var size: CGFloat = 40
 
     var body: some View {
-        Image(systemName: systemImage)
-            .font(.system(size: size * 0.55, weight: .medium))
-            .foregroundStyle(.white)
+        SettingsCategoryIconRepresentable(systemImage: systemImage, tint: NSColor(tint), pointSize: size * 0.60)
             .frame(width: size, height: size)
-            .background(tint, in: RoundedRectangle(cornerRadius: size * 0.23, style: .continuous))
             .accessibilityHidden(true)
+    }
+}
+
+private struct SettingsCategoryIconRepresentable: NSViewRepresentable {
+    let systemImage: String
+    let tint: NSColor
+    let pointSize: CGFloat
+
+    func makeNSView(context: Context) -> BlocksSettingsIconView { BlocksSettingsIconView() }
+    func updateNSView(_ view: BlocksSettingsIconView, context: Context) {
+        view.configure(systemImage: systemImage, tint: tint, pointSize: pointSize)
+    }
+}
+
+/// Settings-only artwork shared by the AppKit sidebar and SwiftUI overview.
+/// Native source-list selection and focus remain outside this decorative view.
+final class BlocksSettingsIconView: NSView {
+    private let symbol = NSImageView()
+    private var tint: NSColor = .systemGray
+    private var contrastObserver: NSObjectProtocol?
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        // Source-list cells are reused inside a layer-backed native sidebar.
+        // Give the artwork its own backing so an initially offscreen/reused
+        // cell does not depend on another row invalidating the ancestor.
+        wantsLayer = true
+        setAccessibilityElement(false)
+        symbol.setAccessibilityElement(false)
+        symbol.imageScaling = .scaleProportionallyDown
+        symbol.contentTintColor = .white
+        addSubview(symbol)
+        contrastObserver = NotificationCenter.default.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.needsDisplay = true }
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    deinit {
+        if let contrastObserver { NotificationCenter.default.removeObserver(contrastObserver) }
+    }
+
+    func configure(systemImage: String, tint: NSColor, pointSize: CGFloat) {
+        self.tint = tint
+        symbol.image = NSImage(systemSymbolName: systemImage, accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: pointSize, weight: .medium))
+        needsDisplay = true
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        symbol.frame = bounds.insetBy(dx: bounds.width * 0.1, dy: bounds.height * 0.1)
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let radius = bounds.width * 0.23
+        let shape = NSBezierPath(roundedRect: bounds, xRadius: radius, yRadius: radius)
+        let top = tint.blended(withFraction: 0.10, of: .white) ?? tint
+        let bottom = tint.blended(withFraction: 0.08, of: .black) ?? tint
+        NSGradient(starting: bottom, ending: top)?.draw(in: shape, angle: 90)
+        let contrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+        NSColor.white.withAlphaComponent(contrast ? 0.55 : 0.18).setStroke()
+        let outline = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5),
+                                   xRadius: radius, yRadius: radius)
+        outline.lineWidth = 0.5
+        outline.stroke()
     }
 }
 

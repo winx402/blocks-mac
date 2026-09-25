@@ -11,6 +11,21 @@ import XCTest
 
 @MainActor
 final class ScreenshotAppStateTests: XCTestCase {
+    func testShortcutCompactDisplayKeepsFullSpokenModifierNames() {
+        let binding = ShortcutBinding(
+            command: .screenshotSmart,
+            keyCode: 0,
+            keyLabel: "A",
+            modifierFlagsRawValue: UInt(NSEvent.ModifierFlags([.control, .option]).rawValue),
+            enabled: true
+        )
+        XCTAssertEqual(binding.compactDisplayValue, "⌃⌥A")
+        XCTAssertEqual(binding.displayValue, "Control + Option + A")
+
+        let allModifiers = binding.replacingModifierFlags([.control, .option, .shift, .command])
+        XCTAssertEqual(allModifiers.compactDisplayValue, "⌃⌥⇧⌘A")
+        XCTAssertEqual(allModifiers.displayValue, "Control + Option + Shift + Command + A")
+    }
     func testClipboardPendingAttachmentFeedbackUsesWarningAndLocalizedCount() {
         XCTAssertNil(ClipboardSettingsPane.pendingAttachmentCleanupFeedback(count: 0))
         let feedback = ClipboardSettingsPane.pendingAttachmentCleanupFeedback(count: 2)

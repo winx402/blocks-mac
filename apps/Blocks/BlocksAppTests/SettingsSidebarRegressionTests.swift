@@ -4,6 +4,31 @@ import XCTest
 
 @MainActor
 final class SettingsSidebarRegressionTests: XCTestCase {
+    func testSettingsArtworkUsesOpticalSizesAndKeepsSymbolsInsideBadge() throws {
+        for section in AppSection.allCases {
+            XCTAssertTrue((12...14).contains(section.settingsIconPointSize))
+            XCTAssertNotNil(NSImage(systemSymbolName: section.settingsIconSystemImage, accessibilityDescription: nil))
+            let badge = BlocksSettingsIconView(frame: NSRect(x: 0, y: 0, width: 20, height: 20))
+            XCTAssertTrue(badge.wantsLayer, "Reusable source-list artwork needs its own backing on cold launch")
+            badge.configure(systemImage: section.settingsIconSystemImage,
+                            tint: NSColor(section.settingsIconColor),
+                            pointSize: section.settingsIconPointSize)
+            badge.layoutSubtreeIfNeeded()
+            let symbol = try XCTUnwrap(badge.subviews.first as? NSImageView)
+            XCTAssertTrue(badge.bounds.contains(symbol.frame))
+            XCTAssertNotNil(symbol.image)
+            XCTAssertFalse(badge.isAccessibilityElement())
+            for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+                badge.appearance = NSAppearance(named: appearance)
+                let bitmap = try XCTUnwrap(badge.bitmapImageRepForCachingDisplay(in: badge.bounds))
+                badge.cacheDisplay(in: badge.bounds, to: bitmap)
+                XCTAssertGreaterThan(bitmap.pixelsWide, 0)
+            }
+        }
+        XCTAssertEqual(AppSection.shortcuts.settingsIconPointSize, 14)
+        XCTAssertEqual(AppSection.permissions.systemImage, "lock.shield", "Non-settings icons must not change")
+    }
+
     func testSidebarUsesThirtyPointRowsAndSingleTenPointGroupGaps() throws {
         let view = SettingsSourceListNativeView(frame: NSRect(x: 0, y: 0, width: 232, height: 680))
         view.layoutSubtreeIfNeeded()
@@ -14,6 +39,17 @@ final class SettingsSidebarRegressionTests: XCTestCase {
         XCTAssertEqual(screenshot.height, 30, accuracy: 0.1)
         XCTAssertEqual(clipboard.minY - screenshot.maxY, 0, accuracy: 0.1)
         XCTAssertEqual(shortcuts.minY - favorites.maxY, 10, accuracy: 0.1)
+    }
+
+    func testSidebarEmphasisUsesSystemSelectedTextInsteadOfVibrantLabel() throws {
+        let sidebar = SettingsSourceListNativeView(frame: NSRect(x: 0, y: 0, width: 232, height: 680))
+        sidebar.layoutSubtreeIfNeeded()
+        let outline = try XCTUnwrap(firstDescendant(of: NSOutlineView.self, in: sidebar))
+        let cell = try XCTUnwrap(outline.view(atColumn: 0, row: 1, makeIfNecessary: true) as? NSTableCellView)
+        cell.backgroundStyle = .emphasized
+        XCTAssertEqual(cell.textField?.textColor, NSColor.alternateSelectedControlTextColor)
+        cell.backgroundStyle = .normal
+        XCTAssertEqual(cell.textField?.textColor, NSColor.labelColor)
     }
 
     func testSecondaryPageInsetDoesNotChangeOverviewRoutes() {

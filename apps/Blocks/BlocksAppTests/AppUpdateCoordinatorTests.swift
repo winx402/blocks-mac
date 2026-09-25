@@ -269,3 +269,36 @@ final class AppUpdateCoordinatorTests: XCTestCase {
         XCTAssertFalse(coordinator.canRetryInstallationPreparation)
     }
 }
+
+@MainActor
+final class UpdateSettingsStatusPresentationTests: XCTestCase {
+    func testExpectedDevelopmentUnavailabilityIsNeutral() {
+        for key in ["updates.unavailable.distribution", "updates.unavailable.testing"] {
+            XCTAssertEqual(UpdateSettingsStatusPresentation.kind(
+                unavailableReasonKey: key,
+                statusKey: "updates.status.ready"
+            ), .information)
+        }
+    }
+
+    func testConfigurationAndRuntimeFailuresRemainWarnings() {
+        for key in ["updates.unavailable.feed", "updates.unavailable.key",
+                    "updates.unavailable.automaticInstallation", "updates.unavailable.lifecycle",
+                    "updates.unavailable.start"] {
+            XCTAssertEqual(UpdateSettingsStatusPresentation.kind(
+                unavailableReasonKey: key,
+                statusKey: "updates.status.ready"
+            ), .warning)
+        }
+        for key in ["updates.status.failed", "updates.status.preparationFailed"] {
+            XCTAssertEqual(UpdateSettingsStatusPresentation.kind(
+                unavailableReasonKey: nil,
+                statusKey: key
+            ), .warning)
+        }
+        XCTAssertEqual(UpdateSettingsStatusPresentation.kind(
+            unavailableReasonKey: nil,
+            statusKey: "updates.status.ready"
+        ), .information)
+    }
+}
