@@ -177,7 +177,7 @@ def main() -> None:
                 assert output.is_dir()
             else:
                 assert not output.exists(), scenario
-        print(f"CLI execution/output checks passed ({len(cases)} isolated -O cases; no XPC; Xcode 27 unverified).")
+        print(f"CLI execution/output checks passed ({len(cases)} isolated -O cases; no XPC; full-target compiler compatibility requires a separate build).")
 
 
 if __name__ == "__main__":
