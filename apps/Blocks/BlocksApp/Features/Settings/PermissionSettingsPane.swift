@@ -138,7 +138,7 @@ private struct SelectionHelperPermissionStatusRow: View {
             actions
         }
         .onAppear {
-            controller.refresh()
+            controller.refresh(allowLaunch: false)
         }
         .task {
             // Workspace notifications can be coalesced or arrive without a

@@ -2,7 +2,8 @@ import AppKit
 import BlocksCore
 
 enum PermissionRestartResult: Equatable {
-    case launched
+    /// A separate launcher has accepted the handoff. The app has not quit yet.
+    case scheduled
     case failed
 }
 
@@ -113,26 +114,32 @@ final class DefaultPermissionAssistPresenter: PermissionAssistPresenting {
 
 @MainActor
 struct DefaultPermissionSystemActions: PermissionSystemActioning {
-    private let applicationLauncher: (@escaping @Sendable (NSRunningApplication?, Error?) -> Void) -> Void
+    typealias Relauncher = @MainActor (URL, pid_t, @escaping @Sendable (pid_t?, Error?) -> Void) -> Void
+
+    private let relauncher: Relauncher
     private let applicationTerminator: @MainActor () -> Void
+    private let bundleURL: URL
+    private let processID: pid_t
+    private let restartGate = PermissionRestartGate()
 
     init(
-        applicationLauncher: @escaping (@escaping @Sendable (NSRunningApplication?, Error?) -> Void) -> Void = { completion in
-            let configuration = NSWorkspace.OpenConfiguration()
-            configuration.activates = true
-            configuration.allowsRunningApplicationSubstitution = false
-            NSWorkspace.shared.openApplication(
-                at: Bundle.main.bundleURL,
-                configuration: configuration,
-                completionHandler: completion
+        relauncher: @escaping Relauncher = { bundleURL, processID, completion in
+            PermissionRelaunchProcess.launch(
+                bundleURL: bundleURL,
+                parentProcessID: processID,
+                completion: completion
             )
         },
         applicationTerminator: @escaping @MainActor () -> Void = {
             NSApp.terminate(nil)
-        }
+        },
+        bundleURL: URL = Bundle.main.bundleURL,
+        processID: pid_t = getpid()
     ) {
-        self.applicationLauncher = applicationLauncher
+        self.relauncher = relauncher
         self.applicationTerminator = applicationTerminator
+        self.bundleURL = bundleURL
+        self.processID = processID
     }
 
     func openScreenRecordingSettings() {
@@ -149,19 +156,21 @@ struct DefaultPermissionSystemActions: PermissionSystemActioning {
     func restartForPermissionRefresh(
         completion: @escaping (PermissionRestartResult) -> Void
     ) {
+        guard restartGate.enqueue(completion) else { return }
         let restartHandler = PermissionRestartHandler(
-            completion: completion,
-            terminator: applicationTerminator
+            terminator: applicationTerminator,
+            restartGate: restartGate,
+            parentProcessID: processID
         )
-        applicationLauncher { application, error in
-            let didLaunch = error == nil && application != nil
+        relauncher(bundleURL, processID) { childProcessID, error in
+            let didStart = error == nil
             if Thread.isMainThread {
                 MainActor.assumeIsolated {
-                    restartHandler.complete(didLaunch: didLaunch)
+                    restartHandler.complete(childProcessID: childProcessID, didStart: didStart)
                 }
             } else {
                 Task { @MainActor in
-                    restartHandler.complete(didLaunch: didLaunch)
+                    restartHandler.complete(childProcessID: childProcessID, didStart: didStart)
                 }
             }
         }
@@ -169,24 +178,61 @@ struct DefaultPermissionSystemActions: PermissionSystemActioning {
 }
 
 @MainActor
-private final class PermissionRestartHandler {
-    private let completion: (PermissionRestartResult) -> Void
-    private let terminator: @MainActor () -> Void
+private final class PermissionRestartGate {
+    private var hasRequest = false
+    private var result: PermissionRestartResult?
+    private var callbacks: [(PermissionRestartResult) -> Void] = []
 
-    init(
-        completion: @escaping (PermissionRestartResult) -> Void,
-        terminator: @escaping @MainActor () -> Void
-    ) {
-        self.completion = completion
-        self.terminator = terminator
+    /// Returns true only for the first request. Concurrent taps receive the
+    /// same eventual result rather than a premature success indication.
+    func enqueue(_ completion: @escaping (PermissionRestartResult) -> Void) -> Bool {
+        if let result {
+            completion(result)
+            return false
+        }
+        callbacks.append(completion)
+        guard !hasRequest else { return false }
+        hasRequest = true
+        return true
     }
 
-    func complete(didLaunch: Bool) {
-        guard didLaunch else {
-            completion(.failed)
+    func resolve(_ result: PermissionRestartResult) {
+        self.result = result == .scheduled ? result : nil
+        hasRequest = result == .scheduled
+        let callbacks = self.callbacks
+        self.callbacks.removeAll()
+        callbacks.forEach { $0(result) }
+    }
+}
+
+@MainActor
+private final class PermissionRestartHandler {
+    private let terminator: @MainActor () -> Void
+    private let restartGate: PermissionRestartGate
+    private let parentProcessID: pid_t
+    private var hasCompleted = false
+
+    init(
+        terminator: @escaping @MainActor () -> Void,
+        restartGate: PermissionRestartGate,
+        parentProcessID: pid_t
+    ) {
+        self.terminator = terminator
+        self.restartGate = restartGate
+        self.parentProcessID = parentProcessID
+    }
+
+    func complete(childProcessID: pid_t?, didStart: Bool) {
+        guard !hasCompleted else { return }
+        hasCompleted = true
+        guard didStart,
+              let childProcessID,
+              childProcessID > 0,
+              childProcessID != parentProcessID else {
+            restartGate.resolve(.failed)
             return
         }
-        completion(.launched)
+        restartGate.resolve(.scheduled)
         terminator()
     }
 }

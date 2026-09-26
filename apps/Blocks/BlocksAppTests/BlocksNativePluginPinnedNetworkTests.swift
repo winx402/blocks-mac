@@ -245,15 +245,15 @@ final class BlocksNativePluginPinnedNetworkTests: XCTestCase {
 
     func testChunkedAndContentLengthResponsesAreParsed() throws {
         let chunked = Data(
-            (
-                "HTTP/1.1 200 OK\r\n"
-                    + "Transfer-Encoding: chunked\r\n"
-                    + "X-Fixture: chunked\r\n"
-                    + "\r\n"
-                    + "4\r\nWiki\r\n"
-                    + "5\r\npedia\r\n"
-                    + "0\r\n\r\n"
-            ).utf8
+            [
+                "HTTP/1.1 200 OK\r\n",
+                "Transfer-Encoding: chunked\r\n",
+                "X-Fixture: chunked\r\n",
+                "\r\n",
+                "4\r\nWiki\r\n",
+                "5\r\npedia\r\n",
+                "0\r\n\r\n",
+            ].joined().utf8
         )
         let chunkedResponse = try XCTUnwrap(
             BlocksNativePluginHTTP1Parser.parse(
@@ -287,15 +287,15 @@ final class BlocksNativePluginPinnedNetworkTests: XCTestCase {
 
     func testIncrementalDecoderHandlesAdversariallyFragmentedChunkedResponse() throws {
         let response = Data(
-            (
-                "HTTP/1.1 100 Continue\r\n\r\n"
-                    + "HTTP/1.1 200 OK\r\n"
-                    + "Transfer-Encoding: chunked\r\n"
-                    + "\r\n"
-                    + "4;fixture=value\r\nWiki\r\n"
-                    + "5\r\npedia\r\n"
-                    + "0\r\nX-Trailer: accepted\r\n\r\n"
-            ).utf8
+            [
+                "HTTP/1.1 100 Continue\r\n\r\n",
+                "HTTP/1.1 200 OK\r\n",
+                "Transfer-Encoding: chunked\r\n",
+                "\r\n",
+                "4;fixture=value\r\nWiki\r\n",
+                "5\r\npedia\r\n",
+                "0\r\nX-Trailer: accepted\r\n\r\n",
+            ].joined().utf8
         )
         let decoder = BlocksNativePluginHTTP1ResponseDecoder()
         var parsed: BlocksNativePluginPinnedHTTPResponse?
@@ -394,14 +394,14 @@ final class BlocksNativePluginPinnedNetworkTests: XCTestCase {
 
     func testConflictingLengthAndChunkedResponseIsRejected() {
         let response = Data(
-            (
-                "HTTP/1.1 200 OK\r\n"
-                    + "Content-Length: 4\r\n"
-                    + "Transfer-Encoding: chunked\r\n"
-                    + "\r\n"
-                    + "4\r\ntest\r\n"
-                    + "0\r\n\r\n"
-            ).utf8
+            [
+                "HTTP/1.1 200 OK\r\n",
+                "Content-Length: 4\r\n",
+                "Transfer-Encoding: chunked\r\n",
+                "\r\n",
+                "4\r\ntest\r\n",
+                "0\r\n\r\n",
+            ].joined().utf8
         )
         XCTAssertThrowsError(
             try BlocksNativePluginHTTP1Parser.parse(

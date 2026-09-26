@@ -3403,6 +3403,58 @@ final class TranslationEntryBridgeTests: XCTestCase {
         )
     }
 
+    func testClosingPermissionGuideDoesNotRelaunchAHelperQuitByUser() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let helper = root.appendingPathComponent("Blocks Selection Helper.app")
+        try makeSelectionHelperBundle(at: helper)
+        let lock = NSLock()
+        var running = true
+        var launches = 0
+        let key = Data(repeating: 0xA5, count: 32)
+        let client = SelectionHelperClient(
+            keyStore: SelectionHelperKeyStoreStub(key: key),
+            connection: SelectionHelperAuthenticatedConnectionStub(
+                key: key, disconnectResult: .success(true), authenticatedResponder: { command in
+                    guard command.kind == .health else { return .failure(.invalidResponse) }
+                    return lock.withLock {
+                        running ? .success(.init(health: .init(helperVersion: "fixture", accessibilityTrusted: false)))
+                            : .failure(.connectionFailed)
+                    }
+                }
+            ),
+            applicationLocator: SelectionHelperApplicationLocator(
+                candidateURLsProvider: { [helper] },
+                runningApplicationURLsProvider: { lock.withLock { running ? [helper] : [] } },
+                openApplication: { _, _ in lock.withLock { launches += 1; running = true } },
+                allowedApplicationURLsProvider: { [helper] },
+                identityVerifier: SelectionHelperBundleIdentityVerifierStub(teamID: "TESTTEAM01"),
+                trustedHostTeamIdentifierProvider: { "TESTTEAM01" }
+            )
+        )
+        let presenter = PermissionAssistPanelPresenter(
+            systemSettingsWindowFrame: { nil },
+            isSystemSettingsRunning: { false },
+            openSystemSettings: { _ in }
+        )
+        let controller = SelectionHelperSettingsController(
+            client: client, disconnectRecoveryStore: SelectionHelperDisconnectRecoveryStoreStub(),
+            permissionAssistPresenter: presenter
+        )
+        controller.refresh(allowLaunch: false)
+        await waitUntil { controller.state == .missingAccessibilityPermission }
+        controller.requestAccessibilityPermission()
+        lock.withLock { running = false }
+        presenter.shutdown()
+        await waitUntil { controller.state == .notRunning }
+        // Returning to either settings page is a passive refresh, too.
+        controller.refresh(allowLaunch: false)
+        await waitUntil { controller.state == .notRunning }
+        XCTAssertEqual(controller.state, .notRunning)
+        XCTAssertEqual(lock.withLock { launches }, 0)
+        XCTAssertFalse(lock.withLock { running })
+    }
+
     func testHelperPermissionPrimaryActionOpensTargetedGuideWithoutSystemRequest() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

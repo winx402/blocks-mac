@@ -180,6 +180,8 @@
 		B15E00000000000000000001 /* ClipboardRepository+ScreenshotActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = F15E00000000000000000001 /* ClipboardRepository+ScreenshotActions.swift */; };
 		B14H00000000000000000001 /* ScreenshotSettingsStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F14H00000000000000000001 /* ScreenshotSettingsStateTests.swift */; };
 		B17T00000000000000000002 /* AppAppearanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F17T00000000000000000002 /* AppAppearanceTests.swift */; };
+		B99900000000000000000001 /* PermissionRelaunchProcess.swift in Sources */ = {isa = PBXBuildFile; fileRef = F99900000000000000000001 /* PermissionRelaunchProcess.swift */; };
+		B99900000000000000000002 /* PermissionRestartTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F99900000000000000000002 /* PermissionRestartTests.swift */; };
 		B15C00000000000000000001 /* LocalVisionOCRService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F15C00000000000000000001 /* LocalVisionOCRService.swift */; };
 		B15E00000000000000000002 /* ScreenshotHistoryActionService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F15E00000000000000000002 /* ScreenshotHistoryActionService.swift */; };
 		B15C00000000000000000002 /* LocalVisionOCRServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F15C00000000000000000002 /* LocalVisionOCRServiceTests.swift */; };
@@ -658,6 +660,8 @@
 		F16A00000000000000000001 /* ScrollingScreenshotAppTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollingScreenshotAppTests.swift; sourceTree = "<group>"; };
 		F14H00000000000000000001 /* ScreenshotSettingsStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotSettingsStateTests.swift; sourceTree = "<group>"; };
 		F17T00000000000000000002 /* AppAppearanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppAppearanceTests.swift; sourceTree = "<group>"; };
+		F99900000000000000000001 /* PermissionRelaunchProcess.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Permissions/PermissionRelaunchProcess.swift; sourceTree = "<group>"; };
+		F99900000000000000000002 /* PermissionRestartTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionRestartTests.swift; sourceTree = "<group>"; };
 		F15C00000000000000000001 /* LocalVisionOCRService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/OCR/LocalVisionOCRService.swift; sourceTree = "<group>"; };
 		F15E00000000000000000002 /* ScreenshotHistoryActionService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Screenshot/Integration/ScreenshotHistoryActionService.swift; sourceTree = "<group>"; };
 		F15C00000000000000000002 /* LocalVisionOCRServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalVisionOCRServiceTests.swift; sourceTree = "<group>"; };
@@ -1138,6 +1142,7 @@
 				F16A00000000000000000001 /* ScrollingScreenshotAppTests.swift */,
 				F14H00000000000000000001 /* ScreenshotSettingsStateTests.swift */,
 				F17T00000000000000000002 /* AppAppearanceTests.swift */,
+				F99900000000000000000002 /* PermissionRestartTests.swift */,
 				F15C00000000000000000002 /* LocalVisionOCRServiceTests.swift */,
 				F15C00000000000000000003 /* TranslationStoreTests.swift */,
 				F15E00000000000000000003 /* ScreenshotHistoryActionServiceTests.swift */,
@@ -1387,6 +1392,7 @@
 					F13C0000000000000000000E /* PermissionAssistPanelView.swift */,
 					F3010000000000000000003C /* PermissionStore.swift */,
 					F3010000000000000000003D /* PermissionSystemActions.swift */,
+					F99900000000000000000001 /* PermissionRelaunchProcess.swift */,
 					F3010000000000000000003E /* ScreenshotStore.swift */,
 					F3010000000000000000003F /* ShortcutStore.swift */,
 					F30100000000000000000040 /* SettingsShellView.swift */,
@@ -2076,6 +2082,7 @@
 					B0030000000000000000005E /* PermissionFeatureCoordinator.swift in Sources */,
 					B0030000000000000000003D /* PermissionStore.swift in Sources */,
 					B0030000000000000000003E /* PermissionSystemActions.swift in Sources */,
+					B99900000000000000000001 /* PermissionRelaunchProcess.swift in Sources */,
 					B0030000000000000000003F /* ScreenshotStore.swift in Sources */,
 					B00300000000000000000040 /* ShortcutStore.swift in Sources */,
 					B00300000000000000000041 /* SettingsShellView.swift in Sources */,
@@ -2293,6 +2300,7 @@
 				B16A00000000000000000001 /* ScrollingScreenshotAppTests.swift in Sources */,
 				B14H00000000000000000001 /* ScreenshotSettingsStateTests.swift in Sources */,
 				B17T00000000000000000002 /* AppAppearanceTests.swift in Sources */,
+				B99900000000000000000002 /* PermissionRestartTests.swift in Sources */,
 				B15R00000000000000000001 /* ClipboardScreenshotHistoryRepositoryTests.swift in Sources */,
 				B04300000000000000000003 /* ClipboardManagementTests.swift in Sources */,
 				B04700000000000000000003 /* CLIModuleAccessTests.swift in Sources */,

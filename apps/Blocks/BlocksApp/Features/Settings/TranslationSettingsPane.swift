@@ -656,7 +656,7 @@ struct TranslationSettingsPane: View {
                     preferences:
                         TranslationLanguagePreferences.snapshot()
                 )
-                appModel.selectionHelperSettingsController?.refresh()
+                appModel.selectionHelperSettingsController?.refresh(allowLaunch: false)
                 refreshCompatibilitySelectionAuthorizations()
                 translationStore.refreshServiceRegistry()
                 await sourceManagementService.reloadPluginSnapshot()

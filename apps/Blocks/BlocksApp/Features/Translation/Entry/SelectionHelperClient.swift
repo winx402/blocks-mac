@@ -2165,7 +2165,9 @@ final class SelectionHelperSettingsController:
             onFlowEnded: { [weak self] in
                 self?.permissionMonitorTask?.cancel()
                 self?.permissionMonitorTask = nil
-                self?.refresh()
+                // Completing or dismissing guidance is not a launch request.
+                // Preserve an explicit Helper quit that happened during it.
+                self?.refresh(allowLaunch: false)
             }
         )
         permissionMonitorTask?.cancel()

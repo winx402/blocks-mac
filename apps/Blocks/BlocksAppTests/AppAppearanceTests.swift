@@ -3414,20 +3414,22 @@ final class AppAppearanceTests: XCTestCase {
         XCTAssertFalse(window.isVisible)
     }
 
-    func testPermissionRestartReportsFailureWithoutTerminatingUnlessLaunchSucceeds() {
+    func testPermissionRestartRequiresDistinctReadyLauncherBeforeTerminating() {
         let launchError = NSError(domain: "AppAppearanceTests", code: 1)
-        let launchResults: [(NSRunningApplication?, Error?, PermissionRestartResult)] = [
+        let parentPID = getpid()
+        let launchResults: [(pid_t?, Error?, PermissionRestartResult)] = [
             (nil, launchError, .failed),
             (nil, nil, .failed),
-            (NSRunningApplication.current, nil, .launched),
+            (parentPID, nil, .failed),
+            (parentPID + 1, nil, .scheduled),
         ]
 
-        for (application, error, expectedResult) in launchResults {
+        for (childPID, error, expectedResult) in launchResults {
             var receivedResult: PermissionRestartResult?
             var terminatorCallCount = 0
             let actions = DefaultPermissionSystemActions(
-                applicationLauncher: { completion in
-                    completion(application, error)
+                relauncher: { _, _, completion in
+                    completion(childPID, error)
                 },
                 applicationTerminator: {
                     terminatorCallCount += 1
@@ -3439,8 +3441,8 @@ final class AppAppearanceTests: XCTestCase {
             XCTAssertEqual(receivedResult, expectedResult)
             XCTAssertEqual(
                 terminatorCallCount,
-                expectedResult == .launched ? 1 : 0,
-                "The current app must terminate only after a replacement app launches."
+                expectedResult == .scheduled ? 1 : 0,
+                "The current app must terminate only after a distinct launcher accepts handoff."
             )
         }
     }
