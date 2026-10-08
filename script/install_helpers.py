@@ -398,7 +398,10 @@ def dmg_signing_details(dmg: Path, policy: Policy, work: Path) -> None:
 
 def attach_dmg(dmg: Path, work: Path) -> tuple[Path, str]:
     attached = work / "attach.plist"
-    requested_mount = work / "mounted-volume"
+    # macOS reports /private/var even when TMPDIR uses its /var alias. Pin the
+    # physical private directory before mounting; keep the exact-path check
+    # below so unrelated volumes are still rejected.
+    requested_mount = work.resolve() / "mounted-volume"
     try:
         requested_mount.mkdir()
     except OSError as error:

@@ -129,7 +129,7 @@ def fake_command(arguments, *, capture=False):
             (requested_mount / "Applications").symlink_to("/Applications")
             stdout = plistlib.dumps({"system-entities": [
                 {"dev-entry": "/dev/disk99"}, {"dev-entry": "/dev/disk99s1"},
-                {"mount-point": str(requested_mount)}
+                {"mount-point": str(requested_mount.resolve())}
             ]}).decode()
     elif name == "hdiutil" and args[1] == "detach":
         pass
@@ -220,6 +220,15 @@ def main() -> None:
             trusted = helper.load_policy(config)
             target_root = root / "installed"
             selected = helper.resolve_release(trusted, None)
+
+            physical_work = root / "physical-attach-work"
+            physical_work.mkdir()
+            aliased_work = root / "aliased-attach-work"
+            aliased_work.symlink_to(physical_work, target_is_directory=True)
+            attached_mount, _ = helper.attach_dmg(root / "fixture.dmg", aliased_work)
+            assert attached_mount == physical_work.resolve() / "mounted-volume"
+            helper.detach_dmg(attached_mount)
+            reports.append({"case": "attach_accepts_canonical_private_temp_path", "ok": True})
 
             # Sparkle uses versioned-framework relative symlinks. They remain
             # valid after the candidate is copied because each target resolves
