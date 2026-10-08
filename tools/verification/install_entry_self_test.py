@@ -192,6 +192,27 @@ def main() -> None:
             "FIXTURE_MOUNT": str(mount),
         }
         helper = load_helper()
+        # Exercise the real command wrapper, not the basename-only fakes below:
+        # those fakes cannot detect a trusted executable pinned to the wrong
+        # system directory. Never resolve security tools through caller PATH.
+        expected_tools = {
+            "spctl": "/usr/sbin/spctl",
+            **{name: f"/usr/bin/{name}" for name in
+               ("curl", "hdiutil", "lipo", "codesign", "openssl", "pgrep")},
+        }
+        invocations = []
+        def capture_system_command(arguments, **options):
+            invocations.append((arguments, options))
+            return helper.subprocess.CompletedProcess(arguments, 0, "", "")
+        with patched(helper.subprocess, "run", capture_system_command):
+            for tool, expected_path in expected_tools.items():
+                helper.command([tool, "--fixture-argument"], capture=True)
+                arguments, options = invocations[-1]
+                assert arguments == [expected_path, "--fixture-argument"]
+                assert options["timeout"] == 120 and options["check"] is False
+                if sys.platform == "darwin":
+                    assert Path(expected_path).is_file(), expected_path
+        reports.append({"case": "system_tools_use_existing_pinned_paths", "ok": True})
         old_environment = os.environ.copy()
         os.environ.clear(); os.environ.update(environment)
         try:

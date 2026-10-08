@@ -102,7 +102,9 @@ def command(arguments: Iterable[str], *, capture: bool = False) -> subprocess.Co
     command_line = list(arguments)
     # Installer trust decisions must not be redirected by a caller-controlled
     # PATH. Every tool below is supplied by macOS, not the release artifact.
-    if command_line and command_line[0] in {"curl", "hdiutil", "lipo", "codesign", "openssl", "spctl", "pgrep"}:
+    if command_line and command_line[0] == "spctl":
+        command_line[0] = "/usr/sbin/spctl"
+    elif command_line and command_line[0] in {"curl", "hdiutil", "lipo", "codesign", "openssl", "pgrep"}:
         command_line[0] = f"/usr/bin/{command_line[0]}"
     try:
         return subprocess.run(
