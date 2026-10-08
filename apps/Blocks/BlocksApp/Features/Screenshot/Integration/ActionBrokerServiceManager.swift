@@ -133,9 +133,10 @@ final class ActionBrokerServiceManager: ObservableObject {
 
     private let service: ActionBrokerServiceControl
     let usesAppOwnedService: Bool
-    private let legacyServiceStatus: () -> SMAppService.Status
+    private let legacyService: ActionBrokerServiceControl
+    private let legacyLaunchdJobsAreAbsent: () async throws -> Bool
     var hasLegacyServiceRegistration: Bool {
-        usesAppOwnedService && (legacyServiceStatus() == .enabled || legacyServiceStatus() == .requiresApproval)
+        usesAppOwnedService && (legacyService.status() == .enabled || legacyService.status() == .requiresApproval)
     }
     private let host: any ActionBrokerHosting
     private let embeddedServiceAvailable: Bool
@@ -174,9 +175,6 @@ final class ActionBrokerServiceManager: ObservableObject {
     }
 
     func prepareForApplicationUpdate(stopService: Bool = true) async throws {
-        // Migrating an old registered LaunchAgent still needs an authenticated
-        // drain. A socket timeout or missing PID is not authority to kill it.
-        if stopService, hasLegacyServiceRegistration { throw ActionBrokerUpdateError.legacyRegistrationRequiresMigration }
         // The update coordinator must not resume or consume an explicit
         // disable transaction that is currently awaiting the remote peer.
         if stopService, serviceChangeTask != nil { throw ActionBrokerUpdateError.invalidRecoveryState }
@@ -190,6 +188,7 @@ final class ActionBrokerServiceManager: ObservableObject {
         try await host.pauseAndDrainForApplicationUpdate()
         guard stopService else { return }
         if usesAppOwnedService {
+            try await retireInactiveLegacyService()
             cancelReconnectAndStopHost()
             isServiceRegistered = false
             return
@@ -243,9 +242,10 @@ final class ActionBrokerServiceManager: ObservableObject {
         self.moduleAccess = moduleAccess
         enabledModules = Set(CLIModule.allCases.filter(moduleAccess.isEnabled))
         let legacy = SMAppService.agent(plistName: BlocksActionBrokerXPC.launchAgentPlistName)
+        legacyService = ActionBrokerServiceControl(service: legacy)
+        legacyLaunchdJobsAreAbsent = Self.currentLegacyLaunchdJobsAreAbsent
         #if BLOCKS_LOCAL_DEVELOPMENT
         usesAppOwnedService = true
-        legacyServiceStatus = { legacy.status }
         let storageForIntent = try? StorageEnvironment.appSupport()
         let oldJournal = ActionBrokerUpdateRecoveryJournal(url: storageForIntent?.rootDirectory
             .appendingPathComponent("ActionBrokerUpdateRecovery.json"))
@@ -254,7 +254,6 @@ final class ActionBrokerServiceManager: ObservableObject {
         embeddedServiceAvailable = true
         #else
         usesAppOwnedService = false
-        legacyServiceStatus = { .notRegistered }
         service = ActionBrokerServiceControl(service: legacy)
         embeddedServiceAvailable = ActionBrokerEmbeddedServiceValidator().isAvailable()
         #endif
@@ -272,7 +271,10 @@ final class ActionBrokerServiceManager: ObservableObject {
         updateRecoveryStorageAvailable = storage != nil
         updateRecoveryJournal = ActionBrokerUpdateRecoveryJournal(url: storage?.rootDirectory
             .appendingPathComponent("ActionBrokerUpdateRecovery.json"))
-        runningBrokerProcessIDs = Self.currentBrokerProcessIDs
+        let processScanPolicy = Self.brokerProcessScanPolicy(
+            usesAppOwnedService: usesAppOwnedService, bundleURL: Bundle.main.bundleURL
+        )
+        runningBrokerProcessIDs = { try Self.currentBrokerProcessIDs(policy: processScanPolicy) }
         processHasExited = { kill($0, 0) != 0 && errno == ESRCH }
         if !beginStartupUpdateRecoveryIfNeeded() { refresh() }
     }
@@ -290,7 +292,8 @@ final class ActionBrokerServiceManager: ObservableObject {
         processHasExited: @escaping (Int32) -> Bool = { _ in true },
         moduleAccess: CLIModuleAccessPolicy? = nil,
         usesAppOwnedService: Bool = false,
-        legacyServiceStatus: @escaping () -> SMAppService.Status = { .notRegistered }
+        legacyService: ActionBrokerServiceControl? = nil,
+        legacyLaunchdJobsAreAbsent: @escaping () async throws -> Bool = { true }
     ) {
         // Isolated tests may inject their own policy through the additional
         // initializer argument; no module defaults are written by this path.
@@ -299,7 +302,8 @@ final class ActionBrokerServiceManager: ObservableObject {
         enabledModules = Set(CLIModule.allCases.filter(policy.isEnabled))
         self.service = service
         self.usesAppOwnedService = usesAppOwnedService
-        self.legacyServiceStatus = legacyServiceStatus
+        self.legacyService = legacyService ?? .init(status: { .notRegistered }, register: {}, unregister: {})
+        self.legacyLaunchdJobsAreAbsent = legacyLaunchdJobsAreAbsent
         self.host = host
         self.embeddedServiceAvailable = embeddedServiceAvailable
         self.retryPolicy = retryPolicy
@@ -395,21 +399,143 @@ final class ActionBrokerServiceManager: ObservableObject {
         }
     }
 
-    private static func currentBrokerProcessIDs() throws -> [Int32] {
+    enum BrokerProcessScanPolicy: Equatable {
+        case developmentMigration
+        case currentBundle(executablePath: String)
+    }
+
+    static func brokerProcessScanPolicy(usesAppOwnedService: Bool, bundleURL: URL) -> BrokerProcessScanPolicy {
+        // Production selects App-owned transport only in LocalDevelopment.
+        // A sandboxed official build must not inherit cross-install migration
+        // inspection: it already uses the authenticated drain + PID exit proof.
+        if usesAppOwnedService { return .developmentMigration }
+        return .currentBundle(executablePath: bundleURL
+            .appendingPathComponent("Contents/MacOS/BlocksActionBroker").standardizedFileURL.path)
+    }
+
+    private static func currentBrokerProcessIDs(policy: BrokerProcessScanPolicy) throws -> [Int32] {
         let count = proc_listallpids(nil, 0)
         guard count > 0 else { throw ActionBrokerUpdateError.serviceDidNotStop }
         var processes = [Int32](repeating: 0, count: Int(count) + 64)
         let received = processes.withUnsafeMutableBytes { proc_listallpids($0.baseAddress, Int32($0.count)) }
         guard received > 0, Int(received) < processes.count else { throw ActionBrokerUpdateError.serviceDidNotStop }
-        let expectedPath = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/BlocksActionBroker").standardizedFileURL.path
-        return processes.prefix(Int(received)).filter { processID in
+        return try brokerProcessIDs(in: Array(processes.prefix(Int(received))), policy: policy,
+            executablePath: processExecutablePath, kernelName: kernelProcessName,
+            hasExited: { kill($0, 0) != 0 && errno == ESRCH })
+    }
+
+    /// proc_pidpath can return ENOENT for a live executable unlinked during an
+    /// unrelated app update. proc_name reads the kernel's executable name, not
+    /// argv/ps display text. Use it only to exclude a positively different name;
+    /// missing/empty names and full or truncated Broker names still fail closed.
+    /// The managed Broker contract fixes its executable name to BlocksActionBroker.
+    static func brokerProcessIDs(
+        in processIDs: [Int32],
+        policy: BrokerProcessScanPolicy,
+        executablePath: (Int32) -> String?,
+        kernelName: (Int32) -> String?,
+        hasExited: (Int32) -> Bool
+    ) throws -> [Int32] {
+        let brokerName = "BlocksActionBroker"
+        return try processIDs.filter { processID in
             guard processID > 0 else { return false }
-            // proc_info.h defines PROC_PIDPATHINFO_MAXSIZE as 4 * MAXPATHLEN;
-            // that macro is not imported by this Swift SDK.
-            var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
-            guard proc_pidpath(processID, &buffer, UInt32(buffer.count)) > 0 else { return false }
-            return String(cString: buffer) == expectedPath
+            if case let .currentBundle(expectedPath) = policy {
+                // Preserve the official sandbox's pre-existing exact-path
+                // scan. An unreadable unrelated process is not an error here;
+                // the authenticated Broker PID is separately drained and its
+                // exit checked before removal can succeed.
+                return executablePath(processID) == expectedPath
+            }
+            if let path = executablePath(processID) {
+                // Include old/moved installations, not only the current bundle.
+                return path.hasSuffix("/Contents/MacOS/\(brokerName)")
+            }
+            if hasExited(processID) { return false }
+            guard let name = kernelName(processID), !name.isEmpty,
+                  !brokerName.hasPrefix(name), !name.hasPrefix(brokerName) else {
+                throw ActionBrokerUpdateError.serviceDidNotStop
+            }
+            return false
         }
+    }
+
+    static func processExecutablePath(_ processID: Int32) -> String? {
+        // proc_info.h defines PROC_PIDPATHINFO_MAXSIZE as 4 * MAXPATHLEN;
+        // that macro is not imported by this Swift SDK.
+        var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        guard proc_pidpath(processID, &buffer, UInt32(buffer.count)) > 0 else { return nil }
+        return String(cString: buffer)
+    }
+
+    static func kernelProcessName(_ processID: Int32) -> String? {
+        var buffer = [UInt8](repeating: 0, count: 128)
+        let count = proc_name(processID, &buffer, UInt32(buffer.count))
+        // proc_name returns the name length, excluding its trailing NUL.
+        guard count > 0, Int(count) < buffer.count,
+              let terminator = buffer.firstIndex(of: 0), terminator > 0, terminator <= Int(count) else { return nil }
+        return String(bytes: buffer.prefix(terminator), encoding: .utf8)
+    }
+
+    /// A missing PID (or an RPC timeout) is not an idle proof: an on-demand
+    /// launchd job can start between inspection and unregister, which kills it.
+    /// Only a job already absent in *both* user domains can have its stale SM
+    /// record retired. This path never bootouts, disables or kills a Broker.
+    private func retireInactiveLegacyService() async throws {
+        guard usesAppOwnedService else { return }
+        guard try await legacyLaunchdJobsAreAbsent(), try runningBrokerProcessIDs().isEmpty else {
+            throw ActionBrokerUpdateError.legacyRegistrationRequiresMigration
+        }
+        try Task.checkCancellation()
+        guard !isQuitting else { throw CancellationError() }
+        if hasLegacyServiceRegistration {
+            try await legacyService.unregisterAndWait()
+            try Task.checkCancellation()
+            guard !isQuitting else { throw CancellationError() }
+        }
+        guard legacyService.status() == .notRegistered || legacyService.status() == .notFound,
+              try await legacyLaunchdJobsAreAbsent(), try runningBrokerProcessIDs().isEmpty else {
+            throw ActionBrokerUpdateError.legacyRegistrationRequiresMigration
+        }
+        // This obsolete ticket must never cause startup to resurrect a legacy
+        // job. App-owned enabled intent is independent and remains unchanged.
+        try updateRecoveryJournal.clear()
+    }
+
+    static func legacyJobIsAbsent(exitCode: Int32, standardError: String, domain: String, uid: uid_t) -> Bool {
+        let description = domain.hasPrefix("gui/") ? "user gui: \(uid)" : "uid: \(uid)"
+        let missing = "Could not find service \"\(BlocksActionBrokerXPC.launchAgentLabel)\" in domain for \(description)"
+        return exitCode == 113 && standardError.split(separator: "\n").contains { $0 == missing }
+    }
+
+    private static func currentLegacyLaunchdJobsAreAbsent() async throws -> Bool {
+        let uid = getuid()
+        for domain in ["gui/\(uid)", "user/\(uid)"] {
+            let process = Process()
+            let errors = Pipe()
+            process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+            process.arguments = ["print", "\(domain)/\(BlocksActionBrokerXPC.launchAgentLabel)"]
+            process.environment = ["LC_ALL": "C", "LANG": "C"]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = errors
+            try process.run()
+            let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+            do {
+                while process.isRunning {
+                    guard ContinuousClock.now < deadline else { throw ActionBrokerUpdateError.serviceDidNotStop }
+                    try await Task.sleep(for: .milliseconds(20))
+                }
+                try Task.checkCancellation()
+            } catch {
+                if process.isRunning { process.terminate() } // Only our read-only diagnostic child.
+                throw error
+            }
+            let data = errors.fileHandleForReading.readDataToEndOfFile()
+            guard data.count <= 4096, let message = String(data: data, encoding: .utf8),
+                  legacyJobIsAbsent(exitCode: process.terminationStatus, standardError: message, domain: domain, uid: uid) else {
+                return false
+            }
+        }
+        return true
     }
 
     func setEnabled(_ enabled: Bool) {

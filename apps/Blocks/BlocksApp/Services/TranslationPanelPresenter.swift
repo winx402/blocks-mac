@@ -34,6 +34,7 @@ struct TranslationPanelSuspension: Equatable {
 
 @MainActor
 final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
+    static let userResizedPreferenceKey = "translation.panel.explicitUserSize.v1"
     private static let logger = Logger(
         subsystem: "app.blocks.app",
         category: "TranslationPanelFrame"
@@ -53,6 +54,7 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
     private var pinObservation: AnyCancellable?
     private var systemInteractionObservation: AnyCancellable?
     private var directInteractionObservation: AnyCancellable?
+    private var initialSelectionObservation: AnyCancellable?
     private let resultOrderDragCoordinator =
         TranslationServiceOrderDragCoordinator()
     private var isSuspended = false
@@ -86,9 +88,13 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
     func present() {
         guard !didFinishClose else { return }
         let frame = centeredFrame(
-            preferredSize: CGSize(width: 640, height: 520),
+            preferredSize: TranslationPanelGeometry.preferredOpeningSize(
+                sourceText: model.sourceText,
+                serviceCount: model.enabledServiceCount,
+                inputSource: model.inputSource
+            ),
             inputContext: model.inputContext,
-            restoresSavedSize: true
+            restoresSavedSize: UserDefaults.standard.bool(forKey: Self.userResizedPreferenceKey)
         )
         let contentView = TranslationFloatingPanelView(
             model: model,
@@ -126,6 +132,7 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
             )
         )
         self.panel = panel
+        observeInitialSelectionSize()
         dismissalController.attach(panel: panel)
         isSuspended = false
         startPinObservation()
@@ -385,8 +392,11 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
         systemInteractionObservation = nil
         directInteractionObservation?.cancel()
         directInteractionObservation = nil
+        initialSelectionObservation?.cancel()
+        initialSelectionObservation = nil
         notificationState.shutdown()
-        if let closingPanel {
+        if let closingPanel,
+           UserDefaults.standard.bool(forKey: Self.userResizedPreferenceKey) {
             savePanelFrame(closingPanel.frame)
         }
         panel = nil
@@ -403,8 +413,46 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
     }
 
     func windowDidEndLiveResize(_ notification: Notification) {
-        guard let panel = notification.object as? NSPanel else { return }
+        guard let panel = notification.object as? NSPanel,
+              panel === self.panel else { return }
+        UserDefaults.standard.set(true, forKey: Self.userResizedPreferenceKey)
+        initialSelectionObservation?.cancel()
+        initialSelectionObservation = nil
         savePanelFrame(panel.frame)
+    }
+
+    private func observeInitialSelectionSize() {
+        guard model.inputSource == .selection,
+              model.sourceText.isEmpty,
+              !UserDefaults.standard.bool(forKey: Self.userResizedPreferenceKey) else { return }
+        // AX selection arrives asynchronously after the provisional panel is
+        // shown. Only that first resolved input may finish opening adaptation.
+        // User edits, streaming, retries and subsequent results cannot resize it.
+        initialSelectionObservation = model.$sourceText.dropFirst().sink { [weak self] text in
+            guard let self else { return }
+            guard !text.isEmpty else { return }
+            guard self.model.selectionReadState == .selected,
+                  let panel = self.panel else {
+                self.initialSelectionObservation?.cancel()
+                self.initialSelectionObservation = nil
+                return
+            }
+            let size = TranslationPanelGeometry.preferredOpeningSize(
+                sourceText: text, serviceCount: self.model.enabledServiceCount,
+                inputSource: .selection
+            )
+            let visible = panel.screen?.visibleFrame ?? panel.frame
+            let width = min(size.width, visible.width)
+            let height = min(size.height, visible.height)
+            let frame = CGRect(
+                x: min(max(panel.frame.minX, visible.minX), visible.maxX - width),
+                y: max(visible.minY, min(panel.frame.maxY, visible.maxY) - height),
+                width: width, height: height
+            )
+            panel.setFrame(frame, display: true)
+            self.initialSelectionObservation?.cancel()
+            self.initialSelectionObservation = nil
+        }
     }
 
     func windowDidMove(_ notification: Notification) {
@@ -572,6 +620,26 @@ enum TranslationPanelSourceFocusPolicy {
 }
 
 enum TranslationPanelGeometry {
+    /// Decide once before presentation. Streaming and typing never resize the
+    /// window; an explicitly saved user size still takes precedence.
+    static func preferredOpeningSize(
+        sourceText: String,
+        serviceCount: Int,
+        inputSource: TranslationInputSource
+    ) -> CGSize {
+        let height: CGFloat
+        if inputSource == .screenshotOCR {
+            height = 477
+        } else if sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            height = 282
+        } else if sourceText.count > 180 || sourceText.components(separatedBy: .newlines).count > 3 {
+            height = 477
+        } else {
+            height = serviceCount > 1 ? 443 : 345
+        }
+        return CGSize(width: 520, height: height)
+    }
+
     static let screenInset: CGFloat = 12
 
     static func centeredFrame(

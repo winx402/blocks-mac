@@ -6,14 +6,14 @@ import SwiftUI
 
 enum TranslationPanelMetrics {
     static let minimumWidth: CGFloat = 420
-    static let minimumHeight: CGFloat = 320
+    static let minimumHeight: CGFloat = 282
     static let passiveContentHeight: CGFloat = 124
-    static let contentInset: CGFloat = 16
-    static let sectionSpacing: CGFloat = 14
+    static let contentInset: CGFloat = 20
+    static let sectionSpacing: CGFloat = 10
     static let compactIconHitTarget =
         BlocksVisualTokens.Control.compactHeight
     static let headerContentHeight = compactIconHitTarget
-    static let headerVerticalPadding: CGFloat = 11
+    static let headerVerticalPadding: CGFloat = 9
     static let headerTotalHeight =
         headerContentHeight + headerVerticalPadding * 2
     static let ocrStatusMinimumWidth: CGFloat = 72
@@ -206,7 +206,6 @@ struct TranslationFloatingPanelView: View {
 
     @StateObject private var preparationController = AppleTranslationPreparationController()
     @StateObject private var speechController = TranslationSpeechController()
-    @State private var collapsedServiceIDs: Set<String> = []
     @State private var sourceEditorFocused = false
     @State private var sourceEditorHasDisplayedText = false
 
@@ -246,7 +245,7 @@ struct TranslationFloatingPanelView: View {
         // This is a titled, resizable AppKit window: its system frame owns
         // the outer corners. Do not overlap it with a second glass rim whose
         // custom radius differs from the system window contour.
-        .blocksBackground(.window)
+        .background(Color(nsColor: .windowBackgroundColor))
         .background {
             ZStack {
                 AppleTranslationPreparationHost(controller: preparationController)
@@ -300,6 +299,8 @@ struct TranslationFloatingPanelView: View {
     private var translationContent: some View {
         TranslationPanelContentLayout(
             inputSource: model.inputSource,
+            sourceText: model.sourceText,
+            isInitialSelectionResolved: model.selectionReadState == .selected,
             sourceContent: { editorHeight in
                 sourceSection(editorHeight: editorHeight)
             },
@@ -315,9 +316,10 @@ struct TranslationFloatingPanelView: View {
     private var header: some View {
         HStack(spacing: 0) {
             HStack(spacing: 8) {
-                Label(sourceTitle, systemImage: sourceSystemImage)
-                    .font(.headline)
+                Label(L10n.string("translation.panel.title"), systemImage: "character.bubble")
+                    .font(.system(size: 13, weight: .medium))
                     .fixedSize()
+                    .help(sourceTitle)
 
                 Spacer(minLength: 8)
             }
@@ -445,7 +447,8 @@ struct TranslationFloatingPanelView: View {
                 spacing: TranslationPanelMetrics.sourceHeaderSpacing
             ) {
                 Text(L10n.string("translation.panel.source"))
-                    .font(.subheadline.weight(.semibold))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                     .fixedSize()
 
                 TranslationPanelInlineFeedbackView(
@@ -519,6 +522,9 @@ struct TranslationFloatingPanelView: View {
                     },
                     onDisplayedTextChange: {
                         sourceEditorHasDisplayedText = $0
+                    },
+                    onCompositionChange: {
+                        model.updateSourceCompositionState($0)
                     }
                 )
                     .frame(height: editorHeight)
@@ -534,19 +540,14 @@ struct TranslationFloatingPanelView: View {
                     Text(L10n.string("translation.panel.emptyInput"))
                         .font(.body)
                         .foregroundStyle(.tertiary)
-                        .padding(.leading, 13)
+                        .padding(.leading, 5)
                         .padding(.top, 10)
                         .allowsHitTesting(false)
                 }
             }
-            .blocksSurface(
-                .interactive,
-                cornerRadius: BlocksVisualTokens.CornerRadius.section,
-                isActive: sourceEditorFocused
-            )
             .blocksInteractionChrome(
                 sourceEditorFocused ? .focused : .idle,
-                cornerRadius: BlocksVisualTokens.CornerRadius.section
+                cornerRadius: BlocksVisualTokens.CornerRadius.control
             )
         }
     }
@@ -599,7 +600,7 @@ struct TranslationFloatingPanelView: View {
                     }
                 )
             ) {
-                Text(L10n.string("language.auto")).tag("")
+                Text(automaticSourceTitle).tag("")
                 if !sourceLanguageSections.common.isEmpty {
                     Section(
                         L10n.string("translation.language.common")
@@ -632,6 +633,8 @@ struct TranslationFloatingPanelView: View {
                 }
             }
             .pickerStyle(.menu)
+            .labelsHidden()
+            .buttonStyle(.borderless)
             .controlSize(.small)
             .frame(maxWidth: .infinity)
             .accessibilityIdentifier("translation.panel.sourceLanguage")
@@ -665,7 +668,7 @@ struct TranslationFloatingPanelView: View {
                     }
                 )
             ) {
-                Text(L10n.string("translation.language.automaticTarget"))
+                Text(automaticTargetTitle)
                     .tag(Self.automaticTargetTag)
                 if !targetLanguageSections.common.isEmpty {
                     Section(
@@ -699,17 +702,32 @@ struct TranslationFloatingPanelView: View {
                 }
             }
             .pickerStyle(.menu)
+            .labelsHidden()
+            .buttonStyle(.borderless)
             .controlSize(.small)
             .frame(maxWidth: .infinity)
             .accessibilityIdentifier("translation.panel.targetLanguage")
         }
         .fixedSize(horizontal: false, vertical: true)
-        .padding(8)
+        .padding(.horizontal, TranslationPanelMetrics.contentInset)
         .frame(height: TranslationPanelSourceLayout.languageBarHeight)
-        .blocksSurface(
-            .interactive,
-            cornerRadius: BlocksVisualTokens.CornerRadius.control
-        )
+    }
+
+    private var automaticSourceTitle: String {
+        guard model.sourceLanguage == nil,
+              let language = model.snapshot?.direction.source else {
+            return L10n.string("language.auto")
+        }
+        return TranslationLanguagePreferences.localizedName(for: language)
+            + " · " + L10n.string("language.auto")
+    }
+
+    private var automaticTargetTitle: String {
+        guard model.usesAutomaticTarget else {
+            return L10n.string("translation.language.automaticTarget")
+        }
+        return TranslationLanguagePreferences.localizedName(for: model.targetLanguage)
+            + " · " + L10n.string("language.auto")
     }
 
     @ViewBuilder
@@ -717,7 +735,7 @@ struct TranslationFloatingPanelView: View {
         if let snapshot = model.snapshot,
            !model.resultStates.isEmpty {
             let resultStates = model.resultStates
-            LazyVStack(spacing: BlocksVisualTokens.Spacing.sm) {
+            LazyVStack(spacing: 0) {
                 ForEach(
                     Array(resultStates.enumerated()),
                     id: \.element.serviceID
@@ -731,6 +749,9 @@ struct TranslationFloatingPanelView: View {
                             resultCount: resultStates.count,
                             snapshot: snapshot
                         )
+                        if index < resultStates.count - 1 {
+                            Divider()
+                        }
                     }
                 }
             }
@@ -817,19 +838,11 @@ struct TranslationFloatingPanelView: View {
 
         return TranslationResultCard(
             result: result,
-            isCollapsed: collapsedServiceIDs.contains(result.service.id),
             isSpeaking: speechController.isSpeaking(resultID: result.id),
             isPreparingLanguage:
                 recovery.shouldDownloadLanguage
                     && preparationController.isPreparing,
             canRetry: result.isRetryable ?? recovery.canRetry,
-            onToggleCollapsed: {
-                if collapsedServiceIDs.contains(result.service.id) {
-                    collapsedServiceIDs.remove(result.service.id)
-                } else {
-                    collapsedServiceIDs.insert(result.service.id)
-                }
-            },
             onCopy: {
                 await copyResultText(result.translatedText)
             },
@@ -842,10 +855,6 @@ struct TranslationFloatingPanelView: View {
             },
             onRetry: {
                 model.retry(serviceID: result.service.id)
-            },
-            onCancel: {
-                speechController.stop()
-                model.cancel(serviceID: result.service.id)
             },
             onPrepareAppleLanguage: prepareLanguage,
             onOpenSettings: openSettings,

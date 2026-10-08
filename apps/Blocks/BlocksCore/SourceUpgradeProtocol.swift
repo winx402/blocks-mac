@@ -52,5 +52,6 @@ public enum SourceUpgradeProtocol {
         "unsupported", "invalid_arguments", "unavailable", "invalid_request", "busy",
         "prepare_failed", "not_prepared", "timeout", "cancelled", "transport_failed",
         "unsupported_version", "invalid_state", "quitting", "preparation_failed", "disconnected",
+        "participant_drain_failed", "legacy_broker_requires_migration",
     ]
 }

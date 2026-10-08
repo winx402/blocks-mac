@@ -12,6 +12,35 @@ import Translation
 
 @MainActor
 final class TranslationStoreTests: XCTestCase {
+    func testTranslationOpeningSizeAdaptsWithoutWaitingForResults() {
+        XCTAssertEqual(
+            TranslationPanelGeometry.preferredOpeningSize(
+                sourceText: "", serviceCount: 3, inputSource: .manual
+            ), CGSize(width: 520, height: 282)
+        )
+        XCTAssertEqual(
+            TranslationPanelGeometry.preferredOpeningSize(
+                sourceText: "Hello", serviceCount: 1, inputSource: .selection
+            ), CGSize(width: 520, height: 345)
+        )
+        XCTAssertEqual(
+            TranslationPanelGeometry.preferredOpeningSize(
+                sourceText: "Hello", serviceCount: 2, inputSource: .clipboardRecord
+            ), CGSize(width: 520, height: 443)
+        )
+        XCTAssertEqual(
+            TranslationPanelGeometry.preferredOpeningSize(
+                sourceText: String(repeating: "a", count: 181),
+                serviceCount: 1, inputSource: .manual
+            ), CGSize(width: 520, height: 477)
+        )
+        XCTAssertEqual(
+            TranslationPanelGeometry.preferredOpeningSize(
+                sourceText: "", serviceCount: 1, inputSource: .screenshotOCR
+            ), CGSize(width: 520, height: 477)
+        )
+    }
+
     private static let nativeDragAcceptanceLogger = Logger(
         subsystem: "app.blocks.app",
         category: "NativeDragAcceptance"
@@ -829,7 +858,7 @@ final class TranslationStoreTests: XCTestCase {
                 isSuccessful: true,
                 hasDiagnostics: true
             ),
-            [.copy, .speak, .diagnostics, .expand]
+            [.copy, .speak, .diagnostics]
         )
         XCTAssertEqual(
             TranslationResultHeaderActionLayout.actions(
@@ -837,7 +866,7 @@ final class TranslationStoreTests: XCTestCase {
                 isSuccessful: true,
                 hasDiagnostics: false
             ),
-            [.copy, .speak, .expand]
+            [.copy, .speak]
         )
         XCTAssertEqual(
             TranslationResultHeaderActionLayout.actions(
@@ -845,7 +874,7 @@ final class TranslationStoreTests: XCTestCase {
                 isSuccessful: false,
                 hasDiagnostics: true
             ),
-            [.diagnostics, .expand]
+            [.diagnostics]
         )
         XCTAssertEqual(
             TranslationResultHeaderActionLayout.actions(
@@ -853,14 +882,14 @@ final class TranslationStoreTests: XCTestCase {
                 isSuccessful: false,
                 hasDiagnostics: true
             ),
-            [.cancel, .diagnostics, .expand]
+            [.diagnostics]
         )
         XCTAssertEqual(TranslationResultHeaderActionLayout.spacing, 1)
         XCTAssertEqual(
             TranslationResultHeaderActionLayout.reservedWidth,
-            115
+            86
         )
-        XCTAssertFalse(
+        XCTAssertTrue(
             TranslationResultHeaderStatusLayout
                 .showsStateTitle(for: .succeeded)
         )
@@ -3784,6 +3813,364 @@ final class TranslationStoreTests: XCTestCase {
         XCTAssertEqual(plugin.requestedTexts, ["second"])
         XCTAssertEqual(model.snapshot?.input.text, "second")
         model.cancel()
+    }
+
+    func testSourceInteractionDebounceWaits800MillisecondsAfterLatestEdit() async {
+        let (model, adapter) = sourceInteractionFixture()
+        defer { model.cancel() }
+
+        model.updateSourceTextFromUser("first")
+        try? await Task.sleep(for: .milliseconds(500))
+        XCTAssertTrue(adapter.requestedTexts.isEmpty)
+        model.updateSourceTextFromUser("latest")
+        try? await Task.sleep(for: .milliseconds(500))
+        XCTAssertTrue(adapter.requestedTexts.isEmpty)
+        XCTAssertEqual(model.runPhase, .debouncing)
+
+        await waitUntil { adapter.requestedTexts == ["latest"] }
+        XCTAssertEqual(model.snapshot?.input.text, "latest")
+    }
+
+    func testSourceInteractionCompositionSuspendsQueuedAndImmediateRuns() async {
+        let (model, adapter) = sourceInteractionFixture(text: "committed")
+        defer { model.cancel() }
+
+        model.scheduleAutomaticTranslation(delay: .milliseconds(40))
+        model.updateSourceCompositionState(true)
+        model.runImmediately()
+        try? await Task.sleep(for: .milliseconds(100))
+        XCTAssertTrue(adapter.requestedTexts.isEmpty)
+        XCTAssertNil(model.snapshot)
+        XCTAssertEqual(model.runPhase, .idle)
+
+        model.updateSourceTextFromUser("你好")
+        model.updateSourceCompositionState(false)
+        try? await Task.sleep(for: .milliseconds(200))
+        XCTAssertTrue(adapter.requestedTexts.isEmpty)
+        XCTAssertEqual(model.runPhase, .debouncing)
+        await waitUntil { adapter.requestedTexts == ["你好"] }
+    }
+
+    func testSourceInteractionCancelledCompositionResumesUnchangedCommittedText() async {
+        let (model, adapter) = sourceInteractionFixture(text: "committed")
+        defer { model.cancel() }
+
+        model.updateSourceCompositionState(true)
+        model.updateSourceCompositionState(false)
+        XCTAssertEqual(model.runPhase, .debouncing)
+        await waitUntil { adapter.requestedTexts == ["committed"] }
+    }
+
+    func testSourceInteractionSessionCancelDoesNotResumeCompositionTail() async {
+        let (model, adapter) = sourceInteractionFixture(text: "committed")
+        defer { model.cancel() }
+
+        model.updateSourceCompositionState(true)
+        model.cancel()
+        // AppKit can deliver a final commit callback after the panel closes.
+        model.updateSourceTextFromUser("你好")
+        model.updateSourceCompositionState(false)
+        try? await Task.sleep(for: .milliseconds(900))
+
+        XCTAssertTrue(adapter.requestedTexts.isEmpty)
+        XCTAssertNil(model.snapshot)
+        XCTAssertEqual(model.runPhase, .idle)
+    }
+
+    func testSourceInteractionImmediateRerunClearsResultsDuringPluginPreflight() async {
+        let (model, adapter) = sourceInteractionFixture(text: "previous")
+        defer { model.cancel() }
+        model.runImmediately()
+        await waitUntil { model.canFavorite }
+        var preflight: CheckedContinuation<Void, Never>?
+        model.configurePluginEvents { envelope in
+            if envelope.name == .translationWillRunSession {
+                await withCheckedContinuation { preflight = $0 }
+            }
+            return .allowed(envelope)
+        }
+
+        model.sourceText = "replacement"
+        model.runImmediately()
+        XCTAssertNil(model.snapshot)
+        XCTAssertTrue(model.resultStates.isEmpty)
+        XCTAssertFalse(model.canFavorite)
+        XCTAssertNil(model.currentPluginEventIdentity)
+        await waitUntil { preflight != nil }
+        XCTAssertEqual(adapter.requestedTexts, ["previous"])
+
+        model.updateSourceTextFromUser("")
+        preflight?.resume()
+        preflight = nil
+        try? await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(adapter.requestedTexts, ["previous"])
+        XCTAssertNil(model.snapshot)
+        XCTAssertFalse(model.canFavorite)
+        XCTAssertEqual(model.runPhase, .idle)
+    }
+
+    func testSourceInteractionStalePreflightCannotReplaceLatestRun() async {
+        let (model, adapter) = sourceInteractionFixture(text: "obsolete")
+        defer { model.cancel() }
+        var stalePreflight: CheckedContinuation<Void, Never>?
+        model.configurePluginEvents { envelope in
+            if envelope.name == .translationWillRunSession,
+               envelope.payload.string("source_text") == "obsolete" {
+                await withCheckedContinuation { stalePreflight = $0 }
+            }
+            return .allowed(envelope)
+        }
+        model.runImmediately()
+        await waitUntil { stalePreflight != nil }
+
+        model.updateSourceTextFromUser("latest")
+        model.runImmediately()
+        await waitUntil { model.canFavorite }
+        stalePreflight?.resume()
+        stalePreflight = nil
+        try? await Task.sleep(for: .milliseconds(50))
+
+        XCTAssertEqual(adapter.requestedTexts, ["latest"])
+        XCTAssertEqual(model.snapshot?.input.text, "latest")
+        XCTAssertTrue(model.canFavorite)
+    }
+
+    func testSourceInteractionServiceReorderCannotReviveClearedDebounceSnapshot()
+        async
+    {
+        let (model, store, adapters) = sourceInteractionOrderFixture()
+        defer { model.cancel() }
+        model.runImmediately()
+        await waitUntil { model.snapshot?.successfulResults.count == 2 }
+        model.updateSourceTextFromUser("replacement")
+
+        store.moveEnabledService(
+            serviceID: adapters[1].descriptor.id,
+            before: adapters[0].descriptor.id
+        )
+
+        assertSourceInteractionSnapshotRemainsCleared(model)
+        XCTAssertEqual(model.runPhase, .debouncing)
+    }
+
+    func testSourceInteractionServiceReorderCannotReviveClearedPreflightSnapshot()
+        async
+    {
+        let (model, store, adapters) = sourceInteractionOrderFixture()
+        defer { model.cancel() }
+        model.runImmediately()
+        await waitUntil { model.snapshot?.successfulResults.count == 2 }
+        var preflight: CheckedContinuation<Void, Never>?
+        model.configurePluginEvents { envelope in
+            if envelope.name == .translationWillRunSession {
+                await withCheckedContinuation { preflight = $0 }
+            }
+            return .allowed(envelope)
+        }
+        model.sourceText = "replacement"
+        model.runImmediately()
+        await waitUntil { preflight != nil }
+
+        store.moveEnabledService(
+            serviceID: adapters[1].descriptor.id,
+            before: adapters[0].descriptor.id
+        )
+
+        assertSourceInteractionSnapshotRemainsCleared(model)
+        XCTAssertEqual(model.runPhase, .running)
+        model.cancel()
+        preflight?.resume()
+        preflight = nil
+        try? await Task.sleep(for: .milliseconds(30))
+        assertSourceInteractionSnapshotRemainsCleared(model)
+    }
+
+    func testSourceInteractionServiceReorderCannotReviveUnchangedIMESnapshot()
+        async
+    {
+        let (model, store, adapters) = sourceInteractionOrderFixture()
+        defer { model.cancel() }
+        model.runImmediately()
+        await waitUntil { model.snapshot?.successfulResults.count == 2 }
+        XCTAssertTrue(model.canFavorite)
+        // The committed text is unchanged during composition, so input text
+        // equality alone would let the old successful snapshot become usable.
+        model.updateSourceCompositionState(true)
+
+        store.moveEnabledService(
+            serviceID: adapters[1].descriptor.id,
+            before: adapters[0].descriptor.id
+        )
+
+        assertSourceInteractionSnapshotRemainsCleared(model)
+        XCTAssertEqual(model.runPhase, .idle)
+    }
+
+    func testSourceInteractionSnapshotGateAllowsRetryAndActiveServiceReorder()
+        async
+    {
+        let (model, store, adapters) = sourceInteractionOrderFixture(
+            result: .failure(TestError.fixtureFailure)
+        )
+        defer { model.cancel() }
+        model.runImmediately()
+        await waitUntil { model.snapshot?.results.allSatisfy { $0.state == .failed } == true }
+        let sessionID = model.snapshot?.id
+        XCTAssertTrue(model.retry(serviceID: adapters[0].descriptor.id))
+        await waitUntil { adapters[0].translateCallCount == 2 }
+        await waitUntil { model.snapshot?.results.allSatisfy { $0.state == .failed } == true }
+
+        store.moveEnabledService(
+            serviceID: adapters[1].descriptor.id,
+            before: adapters[0].descriptor.id
+        )
+
+        XCTAssertEqual(model.snapshot?.id, sessionID)
+        XCTAssertEqual(
+            model.snapshot?.results.map(\.service.id),
+            [adapters[1].descriptor.id, adapters[0].descriptor.id]
+        )
+        XCTAssertEqual(model.resultStates.map(\.serviceID), store.enabledServiceIDs)
+    }
+
+    func testAppleRuntimeConfigurationRepeatedSamePairAdvancesEveryRequest() throws {
+#if canImport(Translation)
+        guard #available(macOS 15.0, *) else { return }
+        var state = AppleTranslationRuntimeConfigurationState()
+        let source = TranslationLanguageTag("en")!
+        let target = TranslationLanguageTag("zh-Hans")!
+        var previous: TranslationSession.Configuration?
+        for _ in 0 ..< 3 {
+            let requestID = UUID()
+            state.update(requestID: requestID, source: source, target: target)
+            let configuration = try XCTUnwrap(state.configuration)
+            XCTAssertTrue(state.accepts(requestID: requestID))
+            if let previous {
+                XCTAssertNotEqual(configuration, previous)
+                XCTAssertGreaterThan(configuration.version, previous.version)
+            }
+            previous = configuration
+        }
+#endif
+    }
+
+    func testAppleRuntimeConfigurationSamePairAfterIdleRetainsTriggerVersion() throws {
+#if canImport(Translation)
+        guard #available(macOS 15.0, *) else { return }
+        var state = AppleTranslationRuntimeConfigurationState()
+        let source = TranslationLanguageTag("en")!
+        let target = TranslationLanguageTag("zh-Hans")!
+        let firstID = UUID()
+        state.update(requestID: firstID, source: source, target: target)
+        let first = try XCTUnwrap(state.configuration)
+        state.update(requestID: nil, source: nil, target: nil)
+        XCTAssertNil(state.configuration)
+        XCTAssertFalse(state.accepts(requestID: firstID))
+
+        let nextID = UUID()
+        state.update(requestID: nextID, source: source, target: target)
+        let next = try XCTUnwrap(state.configuration)
+        XCTAssertNotEqual(next, first)
+        XCTAssertGreaterThan(next.version, first.version)
+        XCTAssertTrue(state.accepts(requestID: nextID))
+#endif
+    }
+
+    func testAppleRuntimeConfigurationLanguageChangeAndDuplicateNotification() throws {
+#if canImport(Translation)
+        guard #available(macOS 15.0, *) else { return }
+        var state = AppleTranslationRuntimeConfigurationState()
+        let english = TranslationLanguageTag("en")!
+        let chinese = TranslationLanguageTag("zh-Hans")!
+        let firstID = UUID()
+        state.update(requestID: firstID, source: english, target: chinese)
+        let first = try XCTUnwrap(state.configuration)
+        state.update(requestID: firstID, source: english, target: chinese)
+        XCTAssertEqual(state.configuration, first)
+
+        let nextID = UUID()
+        state.update(requestID: nextID, source: chinese, target: english)
+        let next = try XCTUnwrap(state.configuration)
+        XCTAssertNotEqual(next, first)
+        XCTAssertEqual(next.source, Locale.Language(identifier: chinese.rawValue))
+        XCTAssertEqual(next.target, Locale.Language(identifier: english.rawValue))
+        XCTAssertFalse(state.accepts(requestID: firstID))
+        XCTAssertTrue(state.accepts(requestID: nextID))
+#endif
+    }
+
+    func testAppleRuntimeConfigurationCancelledRequestCannotAcceptReplacementText() {
+#if canImport(Translation)
+        guard #available(macOS 15.0, *) else { return }
+        var state = AppleTranslationRuntimeConfigurationState()
+        let source = TranslationLanguageTag("en")!
+        let target = TranslationLanguageTag("zh-Hans")!
+        let cancelledID = UUID()
+        state.update(requestID: cancelledID, source: source, target: target)
+        let retiringTaskState = state
+        state.update(requestID: nil, source: nil, target: nil)
+        let replacementID = UUID()
+        state.update(requestID: replacementID, source: source, target: target)
+
+        XCTAssertFalse(state.accepts(requestID: cancelledID))
+        XCTAssertFalse(retiringTaskState.accepts(requestID: replacementID))
+        XCTAssertTrue(state.accepts(requestID: replacementID))
+#endif
+    }
+
+    private func assertSourceInteractionSnapshotRemainsCleared(
+        _ model: TranslationPanelSessionModel,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertNil(model.snapshot, file: file, line: line)
+        XCTAssertTrue(model.resultStates.isEmpty, file: file, line: line)
+        XCTAssertFalse(model.canFavorite, file: file, line: line)
+        XCTAssertFalse(model.isFavorite, file: file, line: line)
+        XCTAssertNil(model.currentPluginEventIdentity, file: file, line: line)
+    }
+
+    private func sourceInteractionOrderFixture(
+        result: Result<String, Error>? = nil
+    ) -> (TranslationPanelSessionModel, TranslationStore, [TestTranslationAdapter]) {
+        let adapters = [
+            TestTranslationAdapter(id: "plugin:source-order-alpha", result: result),
+            TestTranslationAdapter(id: "plugin:source-order-beta", result: result),
+        ]
+        let store = TranslationStore(defaults: isolatedDefaults())
+        store.replacePluginAdapters(adapters)
+        store.setServiceEnabled(false, serviceID: "apple-local")
+        for adapter in adapters {
+            store.setServiceEnabled(true, serviceID: adapter.descriptor.id)
+        }
+        let model = TranslationPanelSessionModel(
+            input: TranslationInput(source: .manual, text: "previous"),
+            direction: TranslationLanguageDirection(
+                target: TranslationLanguageTag("zh-Hans")!
+            ),
+            translationStore: store
+        )
+        return (model, store, adapters)
+    }
+
+    private func sourceInteractionFixture(text: String = "") -> (
+        TranslationPanelSessionModel, TestTranslationAdapter
+    ) {
+        let adapter = TestTranslationAdapter(id: "plugin:source-interaction")
+        let store = TranslationStore(defaults: isolatedDefaults())
+        store.replacePluginAdapters([adapter])
+        store.setServiceEnabled(false, serviceID: "apple-local")
+        store.setServiceEnabled(true, serviceID: adapter.descriptor.id)
+        return (
+            TranslationPanelSessionModel(
+                input: TranslationInput(source: .manual, text: text),
+                direction: TranslationLanguageDirection(
+                    target: TranslationLanguageTag("zh-Hans")!
+                ),
+                translationStore: store
+            ),
+            adapter
+        )
     }
 
     func testPluginEventsExposePanelAndTranslationSessionIdentity() async {

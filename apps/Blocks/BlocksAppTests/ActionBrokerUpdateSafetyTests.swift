@@ -29,7 +29,7 @@ final class ActionBrokerUpdateSafetyTests: XCTestCase {
         XCTAssertEqual(control.status(), .enabled)
     }
 
-    func testAppOwnedDisableDoesNotContactLegacyBroker() async {
+    func testAppOwnedDisableRetiresAbsentLegacyRegistrationWithoutContactingBroker() async {
         let fixture = BrokerServiceUpdateFixture()
         fixture.host.prepareError = ActionBrokerUpdateError.untrustedPeer
         let manager = fixture.makeManager(appOwned: true, legacyStatus: .enabled)
@@ -41,6 +41,8 @@ final class ActionBrokerUpdateSafetyTests: XCTestCase {
         XCTAssertTrue(fixture.host.prepareTokens.isEmpty)
         XCTAssertTrue(fixture.host.resumeTokens.isEmpty)
         XCTAssertEqual(fixture.unregisterCount, 1, "only the injected logical preference changes")
+        XCTAssertEqual(fixture.legacyUnregisterCount, 1)
+        XCTAssertEqual(fixture.legacyStatus, .notRegistered)
     }
 
     func testAppOwnedUpdatePreservesIntentWithoutRegistrationRPC() async throws {
@@ -59,16 +61,171 @@ final class ActionBrokerUpdateSafetyTests: XCTestCase {
 
     func testAppOwnedUpdateRefusesLegacyRegistrationButOrdinaryQuitCanDrain() async throws {
         let fixture = BrokerServiceUpdateFixture()
+        fixture.legacyJobAbsent = false
         let manager = fixture.makeManager(appOwned: true, legacyStatus: .enabled)
         do {
             try await manager.prepareForApplicationUpdate()
             XCTFail("legacy registration must be migrated before replacement")
         } catch { }
-        XCTAssertEqual(fixture.host.drainCount, 0)
+        XCTAssertEqual(fixture.host.drainCount, 1)
         XCTAssertEqual(fixture.unregisterCount, 0)
         try await manager.prepareForApplicationUpdate(stopService: false)
-        XCTAssertEqual(fixture.host.drainCount, 1)
+        XCTAssertEqual(fixture.host.drainCount, 2)
         XCTAssertTrue(fixture.host.prepareTokens.isEmpty)
+    }
+
+    func testAppOwnedUpdateRetiresOnlyAbsentLegacyJobAndNeverReregistersIt() async throws {
+        let fixture = BrokerServiceUpdateFixture()
+        let manager = fixture.makeManager(appOwned: true, legacyStatus: .enabled)
+        try await manager.prepareForApplicationUpdate()
+        XCTAssertEqual(fixture.legacyUnregisterCount, 1)
+        XCTAssertEqual(fixture.legacyStatus, .notRegistered)
+        XCTAssertTrue(manager.isEnabled, "retirement must preserve app-owned intent")
+        await manager.resumeAfterCancelledApplicationUpdate()
+        XCTAssertEqual(manager.state, .enabled)
+        XCTAssertEqual(fixture.registerCount, 0)
+        XCTAssertTrue(fixture.host.prepareTokens.isEmpty)
+        XCTAssertTrue(fixture.host.resumeTokens.isEmpty)
+    }
+
+    func testAppOwnedDisableRetainsIntentWhenLegacyJobIsLoadedOrProcessLingers() async {
+        for jobAbsent in [false, true] {
+            let fixture = BrokerServiceUpdateFixture()
+            fixture.legacyJobAbsent = jobAbsent
+            fixture.legacyProcesses = jobAbsent ? [77] : []
+            let manager = fixture.makeManager(appOwned: true, legacyStatus: .enabled)
+            manager.setEnabled(false)
+            await manager.serviceChangeTask?.value
+            XCTAssertTrue(manager.isEnabled)
+            XCTAssertEqual(fixture.unregisterCount, 0)
+            XCTAssertEqual(fixture.legacyUnregisterCount, 0)
+            XCTAssertEqual(fixture.host.stopCount, 0, "failed removal cannot cancel the host")
+            guard case .failed = manager.state else { return XCTFail("legacy failure must remain visible") }
+        }
+    }
+
+    func testAppOwnedLegacyUnregisterFailureIsVisibleAndNeverRestartsLegacyService() async {
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.legacyUnregisterError = ActionBrokerUpdateError.serviceDidNotStop
+        let manager = fixture.makeManager(appOwned: true, legacyStatus: .enabled)
+        manager.setEnabled(false)
+        await manager.serviceChangeTask?.value
+        XCTAssertTrue(manager.isEnabled)
+        XCTAssertEqual(fixture.unregisterCount, 0)
+        XCTAssertEqual(fixture.legacyUnregisterCount, 1)
+        XCTAssertEqual(fixture.legacyStatus, .enabled)
+        XCTAssertEqual(fixture.registerCount, 0)
+        guard case .failed = manager.state else { return XCTFail("unregister failure must remain visible") }
+    }
+
+    func testAppOwnedUnverifiableLegacyJobCannotBeRetired() async {
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.legacyVerificationError = ActionBrokerUpdateError.serviceDidNotStop
+        let manager = fixture.makeManager(appOwned: true, legacyStatus: .enabled)
+        manager.setEnabled(false)
+        await manager.serviceChangeTask?.value
+        XCTAssertTrue(manager.isEnabled)
+        XCTAssertEqual(fixture.legacyUnregisterCount, 0)
+        XCTAssertEqual(fixture.unregisterCount, 0)
+        guard case .failed = manager.state else { return XCTFail("unverifiable launchd state must fail closed") }
+    }
+
+    func testAppOwnedLegacyAbsenceMustRemainVerifiedAfterUnregister() async {
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.legacyReappearsAfterUnregister = true
+        let manager = fixture.makeManager(appOwned: true, legacyStatus: .enabled)
+        manager.setEnabled(false)
+        await manager.serviceChangeTask?.value
+        XCTAssertTrue(manager.isEnabled)
+        XCTAssertEqual(fixture.unregisterCount, 0)
+        XCTAssertEqual(fixture.legacyUnregisterCount, 1)
+        guard case .failed = manager.state else { return XCTFail("reappearing job must block disable") }
+    }
+
+    func testLegacyJobAbsenceDoesNotConfuseMissingDomainOrPermissionFailureWithMissingJob() {
+        let missing = "Could not find service \"\(BlocksActionBrokerXPC.launchAgentLabel)\" in domain for user gui: 501"
+        XCTAssertTrue(ActionBrokerServiceManager.legacyJobIsAbsent(exitCode: 113, standardError: "Bad request.\n\(missing)\n", domain: "gui/501", uid: 501))
+        XCTAssertFalse(ActionBrokerServiceManager.legacyJobIsAbsent(exitCode: 0, standardError: missing, domain: "gui/501", uid: 501))
+        XCTAssertFalse(ActionBrokerServiceManager.legacyJobIsAbsent(exitCode: 112, standardError: "Could not find domain for user gui: 501", domain: "gui/501", uid: 501))
+        XCTAssertFalse(ActionBrokerServiceManager.legacyJobIsAbsent(exitCode: 113, standardError: missing, domain: "user/501", uid: 501))
+        XCTAssertFalse(ActionBrokerServiceManager.legacyJobIsAbsent(exitCode: 1, standardError: "Operation not permitted", domain: "gui/501", uid: 501))
+    }
+
+    func testBrokerProcessScanExcludesOnlyPositivelyUnrelatedUnlinkedProcessNames() throws {
+        let detected = try ActionBrokerServiceManager.brokerProcessIDs(in: [11, 12, 13, 14], policy: .developmentMigration,
+            executablePath: { pid in pid == 14 ? "/old/moved/Blocks.app/Contents/MacOS/BlocksActionBroker" : nil },
+            kernelName: { pid in [11: "browser_crashpad_handler", 12: "bare-modifier-monitor"][pid] },
+            hasExited: { $0 == 13 })
+        XCTAssertEqual(detected, [14])
+        let uncertainNames: [String?] = [nil, "", "BlocksActionBroker", "BlocksActionBro", "BlocksActionBroker-extra"]
+        for name in uncertainNames {
+            XCTAssertThrowsError(try ActionBrokerServiceManager.brokerProcessIDs(in: [77], policy: .developmentMigration,
+                executablePath: { _ in nil }, kernelName: { _ in name }, hasExited: { _ in false }),
+                "unknown or possible Broker identity must fail closed")
+        }
+    }
+
+    func testBrokerProcessScanAllowsUnrelatedActiveUnlinkedExecutableWithKernelNameEvidence() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("BrokerProcessProbe-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        let executable = root.appendingPathComponent("UnlinkedSleep")
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/sleep"), to: executable)
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = ["30"]
+        try process.run()
+        defer {
+            if process.isRunning { process.terminate() }
+            process.waitUntilExit()
+            try? FileManager.default.removeItem(at: root)
+        }
+        // Wait for the copied fixture to exec, rather than inspecting the forked
+        // test runner before the executable name has changed.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while ActionBrokerServiceManager.kernelProcessName(process.processIdentifier) != "UnlinkedSleep",
+              process.isRunning, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(ActionBrokerServiceManager.kernelProcessName(process.processIdentifier), "UnlinkedSleep")
+        try FileManager.default.removeItem(at: executable)
+        XCTAssertTrue(process.isRunning, "the probe must not rely on process exit")
+        XCTAssertNil(ActionBrokerServiceManager.processExecutablePath(process.processIdentifier),
+                     "the live unlinked fixture must exercise proc_pidpath failure")
+        let detected = try ActionBrokerServiceManager.brokerProcessIDs(in: [process.processIdentifier], policy: .developmentMigration,
+            executablePath: ActionBrokerServiceManager.processExecutablePath,
+            kernelName: ActionBrokerServiceManager.kernelProcessName,
+            hasExited: { _ in !process.isRunning })
+        XCTAssertTrue(detected.isEmpty)
+        XCTAssertTrue(process.isRunning, "only this synthetic fixture is terminated by deferred test cleanup")
+    }
+
+    func testBrokerScanPolicyFollowsAppOwnedTransportAndOfficialBundlePath() {
+        let bundle = URL(fileURLWithPath: "/Applications/Blocks.app")
+        XCTAssertEqual(ActionBrokerServiceManager.brokerProcessScanPolicy(usesAppOwnedService: true, bundleURL: bundle),
+                       .developmentMigration)
+        XCTAssertEqual(ActionBrokerServiceManager.brokerProcessScanPolicy(usesAppOwnedService: false, bundleURL: bundle),
+                       .currentBundle(executablePath: "/Applications/Blocks.app/Contents/MacOS/BlocksActionBroker"))
+    }
+
+    func testOfficialSandboxScanDoesNotUseStrictMigrationUnknownProcessPolicy() throws {
+        let expected = "/Applications/Blocks.app/Contents/MacOS/BlocksActionBroker"
+        let paths: [Int32: String] = [11: expected, 12: "/old/moved/Blocks.app/Contents/MacOS/BlocksActionBroker"]
+        var kernelNameQueries = 0
+        var presenceQueries = 0
+        let official = try ActionBrokerServiceManager.brokerProcessIDs(in: [11, 12, 13],
+            policy: .currentBundle(executablePath: expected),
+            executablePath: { paths[$0] }, kernelName: { _ in kernelNameQueries += 1; return nil },
+            hasExited: { _ in presenceQueries += 1; return false })
+        XCTAssertEqual(official, [11], "official scan must match only its current bundle, not an old/moved source installation")
+        XCTAssertEqual(kernelNameQueries, 0, "sandbox denial must never trigger the migration fallback")
+        XCTAssertEqual(presenceQueries, 0)
+
+        let migration = try ActionBrokerServiceManager.brokerProcessIDs(in: [11, 12], policy: .developmentMigration,
+            executablePath: { paths[$0] }, kernelName: { _ in nil }, hasExited: { _ in false })
+        XCTAssertEqual(migration, [11, 12], "source migration must still include old/moved installations")
+        XCTAssertThrowsError(try ActionBrokerServiceManager.brokerProcessIDs(in: [13], policy: .developmentMigration,
+            executablePath: { _ in nil }, kernelName: { _ in nil }, hasExited: { _ in false }),
+            "unverifiable active processes remain fail-closed only for the strict migration policy")
     }
 
     func testAppOwnedBusyWorkPreventsDisableAndRecoversAdmission() async {
@@ -530,11 +687,19 @@ private final class BrokerServiceUpdateFixture {
     var unregisterCount = 0
     var registrationRequiresApproval = false
     var unregister: (() async throws -> Void)?
+    var legacyStatus: SMAppService.Status = .notRegistered
+    var legacyProcesses: [Int32] = []
+    var legacyJobAbsent = true
+    var legacyUnregisterCount = 0
+    var legacyUnregisterError: Error?
+    var legacyVerificationError: Error?
+    var legacyReappearsAfterUnregister = false
     let host = BrokerServiceUpdateHost()
     let journal = ActionBrokerUpdateRecoveryJournal()
 
     func makeManager(moduleAccess: CLIModuleAccessPolicy? = nil, appOwned: Bool = false,
                      legacyStatus: SMAppService.Status = .notRegistered) -> ActionBrokerServiceManager {
+        self.legacyStatus = legacyStatus
         let control = ActionBrokerServiceControl(status: { self.status }, register: {
             self.registerCount += 1
             if self.registrationRequiresApproval {
@@ -554,8 +719,19 @@ private final class BrokerServiceUpdateFixture {
         })
         return ActionBrokerServiceManager(service: control, host: host,
             retryScheduler: { _, _ in AnyCancellable {} }, updateRecoveryJournal: journal,
-            runningBrokerProcessIDs: { self.processes }, processHasExited: { !self.processes.contains($0) },
-            moduleAccess: moduleAccess, usesAppOwnedService: appOwned, legacyServiceStatus: { legacyStatus })
+            runningBrokerProcessIDs: { appOwned ? self.legacyProcesses : self.processes }, processHasExited: { !self.processes.contains($0) },
+            moduleAccess: moduleAccess, usesAppOwnedService: appOwned,
+            legacyService: .init(status: { self.legacyStatus }, register: { XCTFail("legacy service must never be registered") }, unregister: {},
+                unregisterAndWait: {
+                    self.legacyUnregisterCount += 1
+                    if let error = self.legacyUnregisterError { throw error }
+                    self.legacyStatus = .notRegistered
+                    if self.legacyReappearsAfterUnregister { self.legacyJobAbsent = false }
+                }),
+            legacyLaunchdJobsAreAbsent: {
+                if let error = self.legacyVerificationError { throw error }
+                return self.legacyJobAbsent
+            })
     }
 }
 

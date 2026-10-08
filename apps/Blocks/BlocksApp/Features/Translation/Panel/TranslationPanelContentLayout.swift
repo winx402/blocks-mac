@@ -18,10 +18,10 @@ enum TranslationPanelSourceLayout {
         sourceTextHeaderHeight
     }
     static let sourceEditorMinimumHeight: CGFloat = 48
-    static let sourceEditorDefaultHeight: CGFloat = 72
+    static let sourceEditorDefaultHeight: CGFloat = 52
     static let screenshotEditorDefaultHeight: CGFloat = 96
     static let sourceEditorSpacing = BlocksVisualTokens.Spacing.xs
-    static let languageBarHeight: CGFloat = 44
+    static let languageBarHeight: CGFloat = 40
 
     static func expandedEditorHeight(
         for source: TranslationInputSource
@@ -341,15 +341,19 @@ struct TranslationPanelContentLayout<
     ResultsContent: View
 >: View {
     let inputSource: TranslationInputSource
+    let sourceText: String
+    let isInitialSelectionResolved: Bool
     private let sourceContent: (CGFloat) -> SourceContent
     private let languageContent: () -> LanguageContent
     private let resultsContent: () -> ResultsContent
 
-    @State private var scrollCoordinator =
-        TranslationPanelScrollCoordinator()
+    @State private var openingEditorHeight: CGFloat?
+    @State private var awaitsInitialSelection = false
 
     init(
         inputSource: TranslationInputSource,
+        sourceText: String = "",
+        isInitialSelectionResolved: Bool = false,
         @ViewBuilder sourceContent:
             @escaping (CGFloat) -> SourceContent,
         @ViewBuilder languageContent:
@@ -358,6 +362,8 @@ struct TranslationPanelContentLayout<
             @escaping () -> ResultsContent
     ) {
         self.inputSource = inputSource
+        self.sourceText = sourceText
+        self.isInitialSelectionResolved = isInitialSelectionResolved
         self.sourceContent = sourceContent
         self.languageContent = languageContent
         self.resultsContent = resultsContent
@@ -366,32 +372,35 @@ struct TranslationPanelContentLayout<
     var body: some View {
         VStack(spacing: 0) {
             fixedControls
+            Divider()
             resultsViewport
         }
         .accessibilityElement(children: .contain)
-        .onChange(of: inputSource) { _, _ in
-            scrollCoordinator.reset()
+        .onAppear {
+            // Adapt once on presentation, not on every streamed result or edit.
+            openingEditorHeight = preferredEditorHeight
+            awaitsInitialSelection = inputSource == .selection && sourceText.isEmpty
         }
-        .onDisappear {
-            scrollCoordinator.reset()
+        .onChange(of: sourceText) { _, text in
+            if awaitsInitialSelection, !text.isEmpty {
+                if isInitialSelectionResolved {
+                    openingEditorHeight = preferredEditorHeight
+                }
+                awaitsInitialSelection = false
+            }
         }
     }
 
     private var fixedControls: some View {
         VStack(
             alignment: .leading,
-            spacing: TranslationPanelMetrics.sectionSpacing
+            spacing: 0
         ) {
             sourceContent(sourceEditorHeight)
-                .frame(
-                    height: TranslationPanelSourceLayout
-                        .sourceSectionHeight(
-                            for: inputSource,
-                            scrollOffset:
-                                scrollCoordinator.resultsOffset
-                        ),
-                    alignment: .top
-                )
+                .padding(.horizontal, TranslationPanelMetrics.contentInset)
+                .padding(.top, 12)
+                .padding(.bottom, 13)
+            Divider()
             languageContent()
                 .frame(
                     height:
@@ -400,24 +409,10 @@ struct TranslationPanelContentLayout<
                 )
                 .layoutPriority(2)
         }
-        .padding(.horizontal, TranslationPanelMetrics.contentInset)
-        .padding(.top, TranslationPanelMetrics.contentInset)
-        .padding(.bottom, TranslationPanelMetrics.sectionSpacing)
-        .frame(
-            maxWidth: .infinity,
-            minHeight: TranslationPanelSourceLayout.fixedRegionHeight(
-                for: inputSource,
-                scrollOffset: scrollCoordinator.resultsOffset
-            ),
-            maxHeight: TranslationPanelSourceLayout.fixedRegionHeight(
-                for: inputSource,
-                scrollOffset: scrollCoordinator.resultsOffset
-            ),
-            alignment: .top
-        )
+        .fixedSize(horizontal: false, vertical: true)
         .layoutPriority(1)
         // The result ScrollView has a large intrinsic content height once
-        // several services complete. The explicit fixed-region height keeps
+        // several services complete. Preserving the controls' ideal height keeps
         // SwiftUI from satisfying that demand by compressing the language
         // controls; only the results viewport remains flexible.
         .accessibilitySortPriority(2)
@@ -426,26 +421,7 @@ struct TranslationPanelContentLayout<
     private var resultsViewport: some View {
         ScrollView {
             resultsContent()
-            .padding(.horizontal, TranslationPanelMetrics.contentInset)
             .padding(.bottom, TranslationPanelMetrics.contentInset)
-        }
-        .background {
-            TranslationResultsScrollPhaseBridge {
-                contentDelta,
-                resultsAreAtTop in
-                var transaction = Transaction()
-                transaction.disablesAnimations = true
-                return withTransaction(transaction) {
-                    scrollCoordinator.consume(
-                        contentDelta: contentDelta,
-                        collapseRange:
-                            TranslationPanelSourceLayout.collapseRange(
-                                for: inputSource
-                            ),
-                        resultsAreAtTop: resultsAreAtTop
-                    )
-                }
-            }
         }
         .frame(maxHeight: .infinity)
         .accessibilityElement(children: .contain)
@@ -453,9 +429,13 @@ struct TranslationPanelContentLayout<
     }
 
     private var sourceEditorHeight: CGFloat {
-        TranslationPanelSourceLayout.editorHeight(
-            for: inputSource,
-            scrollOffset: scrollCoordinator.resultsOffset
-        )
+        openingEditorHeight ?? preferredEditorHeight
+    }
+
+    private var preferredEditorHeight: CGFloat {
+        if sourceText.count > 180 || sourceText.components(separatedBy: .newlines).count > 3 {
+            return 112
+        }
+        return TranslationPanelSourceLayout.expandedEditorHeight(for: inputSource)
     }
 }

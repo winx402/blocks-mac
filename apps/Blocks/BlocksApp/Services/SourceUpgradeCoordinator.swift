@@ -22,6 +22,8 @@ final class SourceUpgradeCoordinator {
             case historyCapacity = "history_capacity"
             case readinessGateDenied = "readiness_gate_denied"
             case preparationFailed = "preparation_failed"
+            case participantDrainFailed = "participant_drain_failed"
+            case legacyBrokerRequiresMigration = "legacy_broker_requires_migration"
             case cancelled
             case timeout
         }
@@ -126,7 +128,7 @@ final class SourceUpgradeCoordinator {
                 } catch {
                     preparation = nil
                     guard owner == candidate else { return }
-                    cancellationCode = cancellationCode ?? "preparation_failed"
+                    cancellationCode = cancellationCode ?? Self.preparationErrorCode(error)
                     record(.failed(preparationFailureCategory(for: cancellationCode)))
                     beginRecovery(candidate)
                 }
@@ -232,8 +234,18 @@ final class SourceUpgradeCoordinator {
         case "disconnected": return .disconnected
         case "cancelled": return .cancelled
         case "timeout": return .timeout
+        case "participant_drain_failed": return .participantDrainFailed
+        case "legacy_broker_requires_migration": return .legacyBrokerRequiresMigration
         default: return .preparationFailed
         }
+    }
+
+    private static func preparationErrorCode(_ error: Error) -> String {
+        if let participant = error as? ApplicationLifecycleCoordinator.ParticipantDrainError {
+            return participant.sourceUpgradeErrorCode
+        }
+        if error is ApplicationOperationAdmissionGate.AdmissionError { return "busy" }
+        return "preparation_failed"
     }
 
     private func record(_ event: DiagnosticEvent) {

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -17,10 +18,12 @@ LOCALIZABLE = APP / "Resources" / "Localizable.xcstrings"
 TRANSLATION_LOCALIZABLE = APP / "Features" / "Translation" / "Resources" / "TranslationLocalizable.xcstrings"
 PANEL = APP / "Views" / "TranslationFloatingPanelView.swift"
 PANEL_LAYOUT = APP / "Features" / "Translation" / "Panel" / "TranslationPanelContentLayout.swift"
+SOURCE_EDITOR = APP / "Features" / "Translation" / "TranslationSourceTextEditor.swift"
 SESSION_MODEL = APP / "Features" / "Translation" / "TranslationPanelSessionModel.swift"
 RUNTIME = APP / "Features" / "Translation" / "TranslationServiceRuntime.swift"
 PRESENTER = APP / "Services" / "TranslationPanelPresenter.swift"
 STORE_TESTS = ROOT / "apps" / "Blocks" / "BlocksAppTests" / "TranslationStoreTests.swift"
+ENTRY_TESTS = ROOT / "apps" / "Blocks" / "BlocksAppTests" / "TranslationEntryBridgeTests.swift"
 
 LANGUAGES = ["zh-Hans", "en", "ja"]
 
@@ -37,6 +40,10 @@ def text(path: Path) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--timeout", type=int, default=240)
+    parser.add_argument(
+        "--skip-build", action="store_true",
+        help="Run static contracts only; do not invoke the no-launch app build.",
+    )
     args = parser.parse_args()
 
     failures: list[dict[str, str]] = []
@@ -46,23 +53,27 @@ def main() -> int:
         TRANSLATION_LOCALIZABLE,
         PANEL,
         PANEL_LAYOUT,
+        SOURCE_EDITOR,
         SESSION_MODEL,
         RUNTIME,
         PRESENTER,
         STORE_TESTS,
+        ENTRY_TESTS,
     ]:
         require(path.exists(), "missing_file", str(path.relative_to(ROOT)), failures)
 
     panel = text(PANEL)
     panel_layout = text(PANEL_LAYOUT)
+    editor = text(SOURCE_EDITOR)
     session = text(SESSION_MODEL)
     runtime = text(RUNTIME)
     presenter = text(PRESENTER)
     tests = text(STORE_TESTS)
+    entry_tests = text(ENTRY_TESTS)
     combined = "\n".join([panel, panel_layout, session, runtime, presenter])
 
     required_symbols = [
-        "func scheduleAutomaticTranslation(delay: Duration = .milliseconds(450))",
+        "func scheduleAutomaticTranslation(delay: Duration = .milliseconds(800))",
         "autoTranslationTask?.cancel()",
         "runCoordinator.cancelCurrent()",
         "guard !Task.isCancelled else { return }",
@@ -87,10 +98,58 @@ def main() -> int:
         failures,
     )
     require(
-        "translation.runButton" not in panel
-        and "Button(L10n.string(\"translation.runButton\")" not in panel,
-        "manual_run_button_still_present",
-        "The unified session owns automatic translation; the result panel must not restore a second manual run path.",
+        all(symbol not in panel for symbol in [
+            '"translation.runButton"', '"translation.cancel"',
+            "actions.cancelTranslation()", "model.cancel()",
+        ]),
+        "manual_run_or_cancel_button_still_present",
+        "The session owns automatic translation; the panel must not restore translate or cancel controls.",
+        failures,
+    )
+    automatic_run = session.partition("func scheduleAutomaticTranslation(")[2].partition(
+        "@discardableResult"
+    )[0]
+    immediate_run = session.partition("func runImmediately()")[2].partition(
+        "private func startResolvedRun("
+    )[0]
+    publish_change = editor.partition("private func publishTextChange(")[2].partition(
+        "func shouldApplyModelText("
+    )[0]
+    marked_commit = editor.partition("private func updateMarkedTextCommitState(")[2].partition(
+        "private func publishCompositionState("
+    )[0]
+    require(
+        "delay: Duration = .milliseconds(450)" not in session
+        and "guard !isSourceComposingText else" in automatic_run
+        and automatic_run.find("guard !isSourceComposingText else") < automatic_run.find("Task.sleep(for: delay)")
+        and "guard !isSourceComposingText else" in immediate_run
+        and immediate_run.find("guard !isSourceComposingText else") < immediate_run.find("TranslationTargetResolver.resolveDirection")
+        and "func updateSourceCompositionState(_ isComposing: Bool)" in session
+        and "if isComposing || automaticTranslationPending" in session
+        and "onCompositionChange:" in panel
+        and "model.updateSourceCompositionState($0)" in panel
+        and "!textView.isUpdatingComposition" in publish_change
+        and "!textView.isComposingText" in publish_change
+        and publish_change.find("!textView.isComposingText") < publish_change.find("publishCommittedTextIfNeeded")
+        and "publishCompositionState(true)" in marked_commit
+        and "self.publishCommittedTextIfNeeded(from: textView)" in marked_commit
+        and marked_commit.find("self.publishCommittedTextIfNeeded(from: textView)") < marked_commit.find("self.publishCompositionState(false)"),
+        "automatic_translation_debounce_ime_contract_invalid",
+        "Use an 800 ms debounce; suspend queued and immediate runs while IME text is marked, then publish committed text before resuming composition.",
+        failures,
+    )
+    layout_view = panel_layout.partition("struct TranslationPanelContentLayout<")[2]
+    compact_layout = re.sub(r"\s+", "", layout_view)
+    require(
+        "fixedControlsDivider()resultsViewport" in compact_layout
+        and "sourceContent(sourceEditorHeight)" in layout_view
+        and "private var resultsViewport: some View" in layout_view
+        and "openingEditorHeight ?? preferredEditorHeight" in layout_view
+        and "TranslationResultsScrollPhaseBridge(" not in layout_view
+        and "scrollCoordinator" not in layout_view
+        and "sourceExpanded" not in panel + session,
+        "fixed_source_results_viewport_contract_invalid",
+        "Keep the opening source editor height and language controls fixed above the separate result ScrollView; result scrolling must not collapse the source editor.",
         failures,
     )
     require(
@@ -108,10 +167,15 @@ def main() -> int:
     )
     require(
         "testAutomaticTranslationDebounceRunsOnlyLatestInput" in tests
+        and "testSourceInteractionDebounceWaits800MillisecondsAfterLatestEdit" in tests
+        and "testSourceInteractionCompositionSuspendsQueuedAndImmediateRuns" in tests
+        and "testSourceInteractionCancelledCompositionResumesUnchangedCommittedText" in tests
         and "testUserSourceUpdateOwnsItsDebounceWithoutViewSideEffects" in tests
-        and "testNewRevisionRejectsLateResultFromPreviousSession" in tests,
+        and "testNewRevisionRejectsLateResultFromPreviousSession" in tests
+        and "testSourceEditorCompositionSuspendsSynchronouslyAndEndsAfterCommittedText" in entry_tests
+        and "testSourceEditorCompositionCancellationResumesEvenWhenTextIsUnchanged" in entry_tests,
         "automatic_translation_tests_missing",
-        "Debounce ownership, latest-input execution, and stale-result rejection require AppTests.",
+        "800 ms latest-edit debounce, IME suspension/commit/cancellation, model ownership, and stale-result rejection require AppTests.",
         failures,
     )
 
@@ -164,13 +228,16 @@ def main() -> int:
         failures,
     )
 
-    build = run_blocks_no_launch_build(ROOT, args.timeout, "p7c-translation")
-    require(build["ok"], "app_build_failed", build["stderr_tail"], failures)
-    observations["app_build"] = {
-        "ok": build["ok"],
-        "returncode": build["returncode"],
-        "mode": build["mode"],
-    }
+    if args.skip_build:
+        observations["app_build"] = {"skipped": True, "reason": "--skip-build"}
+    else:
+        build = run_blocks_no_launch_build(ROOT, args.timeout, "p7c-translation")
+        require(build["ok"], "app_build_failed", build["stderr_tail"], failures)
+        observations["app_build"] = {
+            "ok": build["ok"],
+            "returncode": build["returncode"],
+            "mode": build["mode"],
+        }
     observations["localization"] = {
         "checked": len(required_keys),
         "missing": missing_l10n,

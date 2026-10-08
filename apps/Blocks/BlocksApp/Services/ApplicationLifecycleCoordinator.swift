@@ -66,6 +66,20 @@ final class ApplicationLifecycleCoordinator {
         }
     }
 
+    /// Preserve the participant failure without sending exception messages,
+    /// paths or user content across the source-install management channel.
+    struct ParticipantDrainError: Error, LocalizedError {
+        let participantID: String
+        let underlying: Error
+        var errorDescription: String? { underlying.localizedDescription }
+        var sourceUpgradeErrorCode: String {
+            if let error = underlying as? ActionBrokerUpdateError, case .legacyRegistrationRequiresMigration = error {
+                return "legacy_broker_requires_migration"
+            }
+            return "participant_drain_failed"
+        }
+    }
+
     let requiredParticipantIDs: Set<String>
     private(set) var state: State = .active
     private var participants: [Participant] = []
@@ -161,7 +175,14 @@ final class ApplicationLifecycleCoordinator {
                 pausedParticipants.append(participant)
                 record(.participant(requestedIntent, id: participant.id, state: .started))
                 onParticipant?(participant.id, false)
-                try await participant.pauseAndDrain()
+                do {
+                    try await participant.pauseAndDrain()
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    throw ParticipantDrainError(participantID: Self.diagnosticParticipantIDs.contains(participant.id) ? participant.id : "other",
+                                                underlying: error)
+                }
                 if requestedIntent == .update, quitCommitted { throw CancellationError() }
                 onParticipant?(participant.id, true)
                 record(.participant(requestedIntent, id: participant.id, state: .completed))

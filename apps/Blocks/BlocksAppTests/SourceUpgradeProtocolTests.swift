@@ -15,6 +15,8 @@ final class SourceUpgradeProtocolTests: XCTestCase {
         XCTAssertFalse(SourceUpgradeProtocol.Response(token: token, status: .committed).matches(request))
         XCTAssertFalse(SourceUpgradeProtocol.Response(token: token, status: .prepared, errorCode: "busy").matches(request))
         XCTAssertTrue(SourceUpgradeProtocol.Response(token: token, status: .failed, errorCode: "busy").matches(request))
+        XCTAssertTrue(SourceUpgradeProtocol.Response(token: token, status: .failed, errorCode: "participant_drain_failed").matches(request))
+        XCTAssertTrue(SourceUpgradeProtocol.Response(token: token, status: .failed, errorCode: "legacy_broker_requires_migration").matches(request))
         XCTAssertFalse(SourceUpgradeProtocol.Response(token: token, status: .failed).matches(request))
         XCTAssertFalse(SourceUpgradeProtocol.Response(token: token, status: .failed, errorCode: "/private/path").matches(request))
     }

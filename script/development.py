@@ -31,6 +31,16 @@ LEGACY_DESTINATION = HOME / "Applications/BlocksDev/Local/Blocks Dev.app"
 MANIFEST = HOME / "Library/Application Support/Blocks Dev/Installation/peers.json"
 EMPTY_ENTITLEMENTS = ROOT / "apps/Blocks/BlocksApp/Blocks-LocalDevelopment.entitlements"
 RENAME_EXCL = 0x00000004
+SOURCE_UPGRADE_FAILURE_GUIDANCE = {
+    "busy": "Blocks is busy or another lifecycle transaction owns upgrade preparation. Finish that work and retry.",
+    "participant_drain_failed": "An application lifecycle participant could not safely drain. Inspect Blocks application-lifecycle diagnostics for the participant; retry after resolving that failure.",
+    "legacy_broker_requires_migration": "The legacy Action Broker is loaded, has a lingering process, or its absence could not be verified. Preserve the installed bundle and matching peers.json, and review CLI service diagnostics. A timeout or missing PID alone does not authorize removal.",
+    "preparation_failed": "The installed version could not prepare the upgrade and did not report a specific cause. Inspect Blocks application-lifecycle/source-upgrade diagnostics; retry after resolving the reported failure.",
+    "timeout": "Upgrade preparation timed out. This is not proof that participants are idle; allow recovery to finish and inspect Blocks diagnostics before retrying.",
+    "cancelled": "Upgrade preparation was cancelled; allow participant recovery to finish before retrying.",
+    "disconnected": "The authenticated upgrade session disconnected; allow participant recovery to finish before retrying.",
+    "transport_failed": "The authenticated upgrade transport failed. Verify the unchanged installation and its peer manifest before retrying.",
+}
 
 
 def run(command: list[str], *, capture=False, timeout=900) -> str:
@@ -207,8 +217,15 @@ class SourceUpgradePreparation:
         run(["/usr/bin/open", "-g", str(self.application)])
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith(("DYLD_", "BLOCKS_"))}
-        result = subprocess.run([str(cli), "source-upgrade", "--json"],
-                                capture_output=True, text=True, timeout=45, env=environment)
+        try:
+            result = subprocess.run([str(cli), "source-upgrade", "--json"],
+                                    capture_output=True, text=True, timeout=45, env=environment)
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError("Source-upgrade failed [timeout]. " + SOURCE_UPGRADE_FAILURE_GUIDANCE["timeout"]
+                               + " No bundle or peer manifest was replaced.") from error
+        if result.returncode < 0:
+            raise RuntimeError(f"Installed source-upgrade CLI was terminated by signal {-result.returncode}; no valid receipt was received. "
+                               "Inspect system crash/code-signing diagnostics. No bundle or peer manifest was replaced.")
         if len(result.stdout) > 8192:
             raise RuntimeError("Source-upgrade response exceeded its allowed size; installation was not replaced.")
         try:
@@ -216,7 +233,11 @@ class SourceUpgradePreparation:
         except (ValueError, TypeError) as error:
             raise RuntimeError("Source-upgrade preparation returned no valid receipt; installation was not replaced.") from error
         if result.returncode != 0 or not isinstance(response, dict) or response.get("version") != 1 or response.get("status") != "committed":
-            raise RuntimeError("Blocks could not safely prepare this upgrade. Finish active work and retry; no bundle or peer manifest was replaced.")
+            code = response.get("errorCode") if isinstance(response, dict) else None
+            if not isinstance(code, str) or code not in SOURCE_UPGRADE_FAILURE_GUIDANCE:
+                code = "preparation_failed"
+            raise RuntimeError(f"Source-upgrade failed [{code}]. " + SOURCE_UPGRADE_FAILURE_GUIDANCE[code]
+                               + " No bundle or peer manifest was replaced.")
         try:
             uuid.UUID(response.get("token", ""))
         except (ValueError, TypeError, AttributeError) as error:
@@ -455,7 +476,10 @@ def _install_development_locked(products: Path) -> None:
                         promote_without_replacing(MANIFEST, manifest_stage)
             except OSError as recovery_error:
                 print(f"Recovery requires review; retained {stage}: {recovery_error}", file=sys.stderr)
-            print(f"Installation did not complete; recovery material: {stage}", file=sys.stderr)
+            if not previous.exists() and not promoted:
+                print("Installation did not complete; unused staging will be removed after unchanged-installation recovery.", file=sys.stderr)
+            else:
+                print(f"Installation did not complete; recovery material: {stage}", file=sys.stderr)
         raise
     finally:
         if not committed and preparation is not None:

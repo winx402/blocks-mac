@@ -15,12 +15,16 @@ struct TranslationSourceTextEditor:
     /// committed model text. This controls presentation only; `onTextChange`
     /// continues to publish committed edits alone.
     var onDisplayedTextChange: (Bool) -> Void = { _ in }
+    /// Runs synchronously when marked text begins, before an old debounce can
+    /// fire. Ending composition follows publication of the final source text.
+    var onCompositionChange: (Bool) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             onTextChange: onTextChange,
             onFocusChange: onFocusChange,
-            onDisplayedTextChange: onDisplayedTextChange
+            onDisplayedTextChange: onDisplayedTextChange,
+            onCompositionChange: onCompositionChange
         )
     }
 
@@ -37,12 +41,12 @@ struct TranslationSourceTextEditor:
         textView.isAutomaticTextReplacementEnabled = false
         textView.drawsBackground = false
         textView.font = NSFont.systemFont(
-            ofSize: NSFont.systemFontSize
+            ofSize: 14
         )
         textView.textColor = .labelColor
         textView.insertionPointColor = .controlAccentColor
         textView.textContainerInset = NSSize(
-            width: 8,
+            width: 0,
             height: 8
         )
         textView.isVerticallyResizable = true
@@ -75,6 +79,7 @@ struct TranslationSourceTextEditor:
         context.coordinator.onTextChange = onTextChange
         context.coordinator.onFocusChange = onFocusChange
         context.coordinator.onDisplayedTextChange = onDisplayedTextChange
+        context.coordinator.onCompositionChange = onCompositionChange
         guard let textView =
             scrollView.documentView as? TranslationSourceNSTextView else {
             return
@@ -126,6 +131,7 @@ struct TranslationSourceTextEditor:
         var onTextChange: (String) -> Void
         var onFocusChange: (Bool) -> Void
         var onDisplayedTextChange: (Bool) -> Void
+        var onCompositionChange: (Bool) -> Void
         var isApplyingModelText = false
         var isPublishingChange = false
         var lastFocusRequest = 0
@@ -136,6 +142,7 @@ struct TranslationSourceTextEditor:
         private var lastPublishedText: String?
         private var lastDisplayedTextState: Bool?
         private var awaitingMarkedTextCommit = false
+        private var lastPublishedCompositionState = false
         private var markedTextCommitGeneration = 0
         private var displayedTextStateGeneration = 0
         private var scheduledDisplayedTextStateGeneration: Int?
@@ -147,6 +154,7 @@ struct TranslationSourceTextEditor:
             onTextChange: @escaping (String) -> Void,
             onFocusChange: @escaping (Bool) -> Void = { _ in },
             onDisplayedTextChange: @escaping (Bool) -> Void = { _ in },
+            onCompositionChange: @escaping (Bool) -> Void = { _ in },
             isEligibleForFocus:
                 @escaping (NSTextView) -> Bool = {
                     $0.window?.isKeyWindow == true
@@ -163,6 +171,7 @@ struct TranslationSourceTextEditor:
             self.onTextChange = onTextChange
             self.onFocusChange = onFocusChange
             self.onDisplayedTextChange = onDisplayedTextChange
+            self.onCompositionChange = onCompositionChange
             self.isEligibleForFocus = isEligibleForFocus
             self.performFocus = performFocus
         }
@@ -192,6 +201,9 @@ struct TranslationSourceTextEditor:
                     self?.publishTextChange(notification)
                 }
             lastPublishedText = textView.string
+            if textView.isComposingText || textView.hasMarkedText() {
+                updateMarkedTextCommitState(for: textView)
+            }
             publishDisplayedTextState(for: textView)
         }
 
@@ -239,6 +251,7 @@ struct TranslationSourceTextEditor:
             lastPublishedText = nil
             lastDisplayedTextState = nil
             awaitingMarkedTextCommit = false
+            lastPublishedCompositionState = false
         }
 
         func requestFocus(generation: Int) {
@@ -318,6 +331,7 @@ struct TranslationSourceTextEditor:
             }
             awaitingMarkedTextCommit = false
             publishCommittedTextIfNeeded(from: textView)
+            publishCompositionState(false)
         }
 
         func shouldApplyModelText(
@@ -341,6 +355,7 @@ struct TranslationSourceTextEditor:
             if textView.isUpdatingComposition || textView.isComposingText {
                 markedTextCommitGeneration += 1
                 awaitingMarkedTextCommit = true
+                publishCompositionState(true)
             } else {
                 // Both cancellation and commit may finish through unmarkText
                 // without a later did-change notification. Fence one main
@@ -360,8 +375,15 @@ struct TranslationSourceTextEditor:
                     }
                     self.publishCommittedTextIfNeeded(from: textView)
                     self.awaitingMarkedTextCommit = false
+                    self.publishCompositionState(false)
                 }
             }
+        }
+
+        private func publishCompositionState(_ isComposing: Bool) {
+            guard lastPublishedCompositionState != isComposing else { return }
+            lastPublishedCompositionState = isComposing
+            onCompositionChange(isComposing)
         }
 
         private func publishCommittedTextIfNeeded(

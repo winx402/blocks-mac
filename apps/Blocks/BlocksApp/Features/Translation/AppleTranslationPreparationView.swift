@@ -675,15 +675,66 @@ private struct AppleTranslationPreparationTaskHost: View {
 }
 
 @available(macOS 15.0, *)
+struct AppleTranslationRuntimeConfigurationState {
+    private var retainedConfiguration: TranslationSession.Configuration?
+    private(set) var activeRequestID: UUID?
+
+    var configuration: TranslationSession.Configuration? {
+        activeRequestID == nil ? nil : retainedConfiguration
+    }
+
+    mutating func update(
+        requestID: UUID?,
+        source: TranslationLanguageTag?,
+        target: TranslationLanguageTag?
+    ) {
+        guard let requestID, let source, let target else {
+            activeRequestID = nil
+            return
+        }
+        guard activeRequestID != requestID else { return }
+        activeRequestID = requestID
+        let sourceLanguage = Locale.Language(identifier: source.rawValue)
+        let targetLanguage = Locale.Language(identifier: target.rawValue)
+        if var next = retainedConfiguration {
+            next.source = sourceLanguage
+            next.target = targetLanguage
+            // Configuration equality includes its version. Retain and advance
+            // it even across the idle gap after a completed/cancelled request;
+            // rebuilding the same language pair at version zero is not a new
+            // translation trigger for the framework.
+            next.invalidate()
+            retainedConfiguration = next
+        } else {
+            retainedConfiguration = TranslationSession.Configuration(
+                source: sourceLanguage,
+                target: targetLanguage
+            )
+        }
+    }
+
+    func accepts(requestID: UUID) -> Bool {
+        activeRequestID == requestID && configuration != nil
+    }
+}
+
+@available(macOS 15.0, *)
 private struct AppleTranslationRuntimeTaskHost: View {
     @ObservedObject var controller: AppleTranslationRuntimeController
-    @State private var configuration: TranslationSession.Configuration?
+    @State private var configurationState = AppleTranslationRuntimeConfigurationState()
 
     var body: some View {
-        Color.clear
-            .id(controller.currentRequest?.id)
-            .translationTask(configuration) { session in
-                guard let request = controller.currentRequest else { return }
+        // Capture the configuration's request identity, not a later @State
+        // value, so a retiring task cannot translate the next request using
+        // its previous language-pair session.
+        let configuredState = configurationState
+        return Color.clear
+            .translationTask(configuredState.configuration) { session in
+                guard !Task.isCancelled,
+                      let request = controller.currentRequest,
+                      configuredState.accepts(requestID: request.id) else {
+                    return
+                }
                 do {
                     if #available(macOS 26.0, *),
                        let readinessFailure =
@@ -692,6 +743,13 @@ private struct AppleTranslationRuntimeTaskHost: View {
                             sessionIsReady: await session.isReady
                         ) {
                         throw readinessFailure
+                    }
+                    // Readiness can suspend while another edit retires this
+                    // configuration. Never invoke the old framework session
+                    // after that cancellation or request replacement.
+                    guard !Task.isCancelled,
+                          controller.currentRequest?.id == request.id else {
+                        throw CancellationError()
                     }
                     let response = try await session.translate(request.text)
                     await MainActor.run {
@@ -710,13 +768,11 @@ private struct AppleTranslationRuntimeTaskHost: View {
                 }
             }
             .onChange(of: controller.currentRequest?.id, initial: true) { _, _ in
-                guard let request = controller.currentRequest else {
-                    configuration = nil
-                    return
-                }
-                configuration = TranslationSession.Configuration(
-                    source: Locale.Language(identifier: request.source.rawValue),
-                    target: Locale.Language(identifier: request.target.rawValue)
+                let request = controller.currentRequest
+                configurationState.update(
+                    requestID: request?.id,
+                    source: request?.source,
+                    target: request?.target
                 )
             }
     }

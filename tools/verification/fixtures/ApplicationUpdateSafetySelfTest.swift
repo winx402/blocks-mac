@@ -282,7 +282,12 @@ struct ApplicationUpdateSafetySelfTest {
             events.append("pause-work")
         }, resume: { events.append("resume-work") }))
         do { try await lifecycle.prepare(); throw FixtureError.rejected }
-        catch FixtureError.rejected { }
+        catch let failure as ApplicationLifecycleCoordinator.ParticipantDrainError {
+            try require(failure.participantID == "database" && failure.underlying is FixtureError,
+                        "participant failure lost its safe category or underlying local error")
+            try require(failure.sourceUpgradeErrorCode == "participant_drain_failed",
+                        "participant failure did not preserve upgrade category")
+        }
         try require(events == ["pause-work", "pause-db", "resume-db", "resume-work"],
             "failure did not resume all participants in reverse order")
         try require(lifecycle.state == .active, "failed lifecycle remained paused")

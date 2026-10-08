@@ -711,13 +711,11 @@ struct TranslationServiceOrderAccessibilityActions: ViewModifier {
 enum TranslationResultHeaderAction: Hashable {
     case copy
     case speak
-    case cancel
     case diagnostics
-    case expand
 }
 
 enum TranslationResultHeaderActionLayout {
-    static let maximumSlotCount = 4
+    static let maximumSlotCount = 3
 
     static var spacing: CGFloat {
         BlocksCompactActionGroupLayout.spacing(for: .micro)
@@ -738,15 +736,10 @@ enum TranslationResultHeaderActionLayout {
         var actions: [TranslationResultHeaderAction] = []
         if isSuccessful {
             actions.append(contentsOf: [.copy, .speak])
-        } else if state == .waiting
-            || state == .running
-            || state == .streaming {
-            actions.append(.cancel)
         }
         if hasDiagnostics {
             actions.append(.diagnostics)
         }
-        actions.append(.expand)
         return actions
     }
 }
@@ -759,12 +752,7 @@ enum TranslationResultHeaderStatusLayout {
     static func showsStateTitle(
         for state: TranslationResultState
     ) -> Bool {
-        switch state {
-        case .waiting, .running, .streaming:
-            true
-        case .succeeded, .failed, .cancelled:
-            false
-        }
+        true
     }
 
     static func showsRetryControl(
@@ -782,15 +770,12 @@ enum TranslationResultHeaderStatusLayout {
 
 struct TranslationResultCard: View {
     let result: TranslationResultSnapshot
-    let isCollapsed: Bool
     let isSpeaking: Bool
     let isPreparingLanguage: Bool
     let canRetry: Bool
-    let onToggleCollapsed: () -> Void
     let onCopy: @MainActor () async -> Bool
     let onSpeak: () -> Void
     let onRetry: () -> Void
-    let onCancel: () -> Void
     let onPrepareAppleLanguage: (() -> Void)?
     let onOpenSettings: (() -> Void)?
     let canMoveUp: Bool
@@ -820,7 +805,7 @@ struct TranslationResultCard: View {
         ) {
             header
 
-            if !isCollapsed {
+            Group {
                 resultBody
                     .frame(
                         maxWidth: .infinity,
@@ -833,12 +818,8 @@ struct TranslationResultCard: View {
                 diagnostics
             }
         }
-        .padding(BlocksVisualTokens.Spacing.md)
-        .blocksSurface(
-            .section,
-            cornerRadius: BlocksVisualTokens.CornerRadius.section,
-            isActive: isBeingDragged
-        )
+        .padding(.horizontal, TranslationPanelMetrics.contentInset)
+        .padding(.vertical, 14)
         .opacity(isBeingDragged ? 0.82 : 1)
         .overlay(alignment: .top) {
             dropIndicator(for: .before)
@@ -858,10 +839,7 @@ struct TranslationResultCard: View {
             )
             .disabled(!canMoveDown)
         }
-        // Collapsing a card and revealing its diagnostics are discrete
-        // hierarchy changes, so they use the shared reveal timing. Dragging
-        // and service reordering remain animation-free direct manipulation.
-        .blocksAnimation(.reveal, value: isCollapsed)
+        // Diagnostics are secondary; result text always remains expanded.
         .blocksAnimation(.reveal, value: diagnosticsExpanded)
         .onChange(of: result.state) { _, state in
             announceTerminalState(state)
@@ -885,12 +863,6 @@ struct TranslationResultCard: View {
 
     private var header: some View {
         HStack(spacing: BlocksVisualTokens.Spacing.xs) {
-            resultStatusControl
-                .blocksAnimation(
-                    .selection,
-                    value: result.state
-                )
-
             TranslationServiceOrderDragSource(
                 serviceID: result.service.id,
                 displayName: result.service.displayName,
@@ -925,7 +897,7 @@ struct TranslationResultCard: View {
                     .font(.caption.weight(.medium))
                     .foregroundStyle(stateTextColor)
                     .lineLimit(1)
-                    .layoutPriority(-1)
+                    .fixedSize(horizontal: true, vertical: false)
             }
 
             Spacer(minLength: BlocksVisualTokens.Spacing.xs)
@@ -1048,13 +1020,6 @@ struct TranslationResultCard: View {
                 density: .micro,
                 action: onSpeak
             )
-        case .cancel:
-            BlocksCompactIconButton(
-                systemImage: "xmark",
-                label: L10n.string("common.cancel"),
-                density: .micro,
-                action: onCancel
-            )
         case .diagnostics:
             BlocksCompactIconButton(
                 systemImage:
@@ -1069,19 +1034,6 @@ struct TranslationResultCard: View {
             ) {
                 diagnosticsExpanded.toggle()
             }
-        case .expand:
-            BlocksCompactIconButton(
-                systemImage:
-                    isCollapsed
-                        ? "chevron.down"
-                        : "chevron.up",
-                label:
-                    isCollapsed
-                        ? L10n.string("common.expand")
-                        : L10n.string("common.collapse"),
-                density: .micro,
-                action: onToggleCollapsed
-            )
         }
     }
 
@@ -1110,6 +1062,7 @@ struct TranslationResultCard: View {
         if result.isSuccessful || result.state == .streaming {
             Text(result.translatedText)
                 .font(.system(size: 16))
+                .lineSpacing(5)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else if result.state == .failed {
@@ -1124,6 +1077,12 @@ struct TranslationResultCard: View {
                 .foregroundStyle(.secondary)
 
                 HStack(spacing: 8) {
+                    if canRetry {
+                        Button(L10n.format(
+                            "translation.result.retryService",
+                            result.service.displayName
+                        ), action: onRetry)
+                    }
                     if let onPrepareAppleLanguage {
                         Button(
                             L10n.string(
@@ -1147,6 +1106,11 @@ struct TranslationResultCard: View {
                         )
                     }
                 }
+            }
+        } else if isActive {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.mini)
+                Text(stateTitle).font(.callout).foregroundStyle(.secondary)
             }
         } else if result.state == .cancelled {
             Text(L10n.string("translation.result.cancelled"))

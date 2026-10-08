@@ -193,6 +193,9 @@ final class TranslationPanelSessionModel: ObservableObject, Identifiable {
     private let runCoordinator: TranslationRunCoordinator
     private let pluginRunAuthorization: BlocksPluginAuthorizationContext
     private var autoTranslationTask: Task<Void, Never>?
+    private var isSourceComposingText = false
+    private var automaticTranslationPending = false
+    private var compositionWasCancelled = false
     private var storeObservation: AnyCancellable?
     private var serviceOrderObservation: AnyCancellable?
     private var observedEnabledServiceIDs: Set<String> = []
@@ -202,6 +205,10 @@ final class TranslationPanelSessionModel: ObservableObject, Identifiable {
     private var screenshotAttachmentExecutionRevision: UInt64 = 0
     private var selectionSourceRevision: UInt64?
     private var sessionSnapshot: TranslationSessionSnapshot?
+    // The coordinator retains its last session for retry/reorder operations.
+    // Clearing panel results must independently revoke that cached session;
+    // plugin revisions cannot serve this purpose because retry advances them.
+    private var acceptedSnapshotSessionID: String?
     private var sourceAttachments:
         [TranslationSourceAttachmentPayload] = []
     private var expectsScreenshotAttachment = false
@@ -375,6 +382,10 @@ final class TranslationPanelSessionModel: ObservableObject, Identifiable {
         translationStore.supportedLanguages
     }
 
+    var enabledServiceCount: Int {
+        translationStore.enabledServiceIDs.count
+    }
+
     var supportedSourceLanguages: [TranslationLanguageTag] {
         translationStore.supportedSourceLanguages
     }
@@ -404,7 +415,27 @@ final class TranslationPanelSessionModel: ObservableObject, Identifiable {
         guard sourceText != text else { return }
         sourceEditRevision &+= 1
         sourceText = text
+        guard !(isSourceComposingText && compositionWasCancelled) else {
+            return
+        }
         scheduleAutomaticTranslation()
+    }
+
+    /// Marked IME text is not source text yet, but must suspend any request
+    /// queued for the previous committed value. The editor publishes the final
+    /// committed text before ending this suspension, including cancellation.
+    func updateSourceCompositionState(_ isComposing: Bool) {
+        guard isSourceComposingText != isComposing else { return }
+        isSourceComposingText = isComposing
+        if isComposing {
+            compositionWasCancelled = false
+        }
+        if isComposing || automaticTranslationPending {
+            scheduleAutomaticTranslation()
+        }
+        if !isComposing {
+            compositionWasCancelled = false
+        }
     }
 
     func updateSourceLanguage(_ language: TranslationLanguageTag?) {
@@ -441,6 +472,7 @@ final class TranslationPanelSessionModel: ObservableObject, Identifiable {
 
     func runImmediately() {
         autoTranslationTask?.cancel()
+        automaticTranslationPending = false
         pluginRunPreflightTask?.cancel()
         invalidateCurrentPluginSession()
         cancelPluginEventTasks()
@@ -448,6 +480,12 @@ final class TranslationPanelSessionModel: ObservableObject, Identifiable {
         pluginRunRevision &+= 1
         let runRevision = pluginRunRevision
         runCoordinator.cancelCurrent()
+        clearSnapshot()
+        guard !isSourceComposingText else {
+            automaticTranslationPending = true
+            updateRunPhase(.idle)
+            return
+        }
         let normalized = sourceText.trimmingCharacters(in: .whitespacesAndNewlines)
         let availableInputs = availableSourceInputs(
             normalizedText: normalized
@@ -579,6 +617,7 @@ final class TranslationPanelSessionModel: ObservableObject, Identifiable {
         sourceResolution: TranslationSourceResolution,
         availableInputs: Set<TranslationSourceAcceptedInput>
     ) {
+        acceptedSnapshotSessionID = translationSessionID
         cancelledPluginSessionID = nil
         let input = TranslationInput(
             source: inputSource,
@@ -643,8 +682,9 @@ final class TranslationPanelSessionModel: ObservableObject, Identifiable {
         }
     }
 
-    func scheduleAutomaticTranslation(delay: Duration = .milliseconds(450)) {
+    func scheduleAutomaticTranslation(delay: Duration = .milliseconds(800)) {
         autoTranslationTask?.cancel()
+        automaticTranslationPending = true
         pluginRunPreflightTask?.cancel()
         invalidateCurrentPluginSession()
         cancelPluginEventTasks()
@@ -652,7 +692,12 @@ final class TranslationPanelSessionModel: ObservableObject, Identifiable {
         pluginRunRevision &+= 1
         runCoordinator.cancelCurrent()
         clearSnapshot()
+        guard !isSourceComposingText else {
+            updateRunPhase(.idle)
+            return
+        }
         guard hasRunnableSourceInput else {
+            automaticTranslationPending = false
             updateRunPhase(.idle)
             return
         }
@@ -662,6 +707,7 @@ final class TranslationPanelSessionModel: ObservableObject, Identifiable {
             guard !Task.isCancelled else { return }
             self?.runImmediately()
         }) else {
+            automaticTranslationPending = false
             updateRunPhase(.idle)
             return
         }
@@ -705,6 +751,8 @@ final class TranslationPanelSessionModel: ObservableObject, Identifiable {
 
     func cancel() {
         autoTranslationTask?.cancel()
+        automaticTranslationPending = false
+        compositionWasCancelled = isSourceComposingText
         pluginRunPreflightTask?.cancel()
         invalidateCurrentPluginSession()
         cancelPluginEventTasks()
@@ -1046,6 +1094,7 @@ final class TranslationPanelSessionModel: ObservableObject, Identifiable {
     private func applySnapshot(
         _ snapshot: TranslationSessionSnapshot
     ) {
+        guard snapshot.id == acceptedSnapshotSessionID else { return }
         var existingByServiceID:
             [String: TranslationPanelResultState] = [:]
         for state in resultStates {
@@ -1252,6 +1301,7 @@ final class TranslationPanelSessionModel: ObservableObject, Identifiable {
     }
 
     private func clearSnapshot() {
+        acceptedSnapshotSessionID = nil
         sessionSnapshot = nil
         if !resultStates.isEmpty {
             resultStates = []

@@ -195,6 +195,28 @@ final class SourceUpgradeTests: XCTestCase {
         XCTAssertFalse(coordinator.hasTransaction)
     }
 
+    func testLifecycleParticipantFailurePreservesAllowlistedUpgradeCategoryAfterRecovery() async throws {
+        defer { ApplicationOperationAdmissionGate.resumeAll() }
+        let failures: [(Error, String)] = [
+            (ActionBrokerUpdateError.legacyRegistrationRequiresMigration, "legacy_broker_requires_migration"),
+            (NSError(domain: "/private/secret", code: 1), "participant_drain_failed"),
+        ]
+        for (underlying, expected) in failures {
+            var resumed = false
+            let lifecycle = ApplicationLifecycleCoordinator(requiredParticipantIDs: ["actionBroker"])
+            try lifecycle.register(.init(id: "actionBroker", pauseAndDrain: { throw underlying }, resume: { resumed = true }))
+            let coordinator = SourceUpgradeCoordinator(canPrepare: { true }, prepare: {
+                try await lifecycle.prepare()
+            }, resume: { await lifecycle.resumeAfterCancelledUpdate() }, terminate: { XCTFail("failed upgrade cannot quit") })
+            let response = await send(coordinator, .prepare, session: UUID(), token: UUID())
+            XCTAssertEqual(response.errorCode, expected)
+            XCTAssertTrue(SourceUpgradeProtocol.errorCodes.contains(expected))
+            XCTAssertTrue(resumed)
+            XCTAssertEqual(lifecycle.state, .active)
+            XCTAssertFalse(coordinator.hasTransaction)
+        }
+    }
+
     func testSourceUpgradeDiagnosticsRecordPreflightAndPreparationFailuresWithoutPayloads() async {
         var preflightEvents: [SourceUpgradeCoordinator.DiagnosticEvent] = []
         let preflight = SourceUpgradeCoordinator(canPrepare: { false }, prepare: {}, resume: {}, terminate: {},

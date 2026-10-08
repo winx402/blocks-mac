@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ PANEL_COMPONENTS = (
     / "Panel"
     / "TranslationFloatingPanelComponents.swift"
 )
+PANEL_LAYOUT = APP / "Features" / "Translation" / "Panel" / "TranslationPanelContentLayout.swift"
 PRESENTER = APP / "Services" / "TranslationPanelPresenter.swift"
 ENTRY_TESTS = ROOT / "apps" / "Blocks" / "BlocksAppTests" / "TranslationEntryBridgeTests.swift"
 
@@ -61,27 +63,34 @@ def text(path: Path) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--timeout", type=int, default=240)
+    parser.add_argument(
+        "--skip-build", action="store_true",
+        help="Run local static checks only; skip the transitive P5-O regression chain, which may build.",
+    )
     args = parser.parse_args()
 
     failures: list[dict[str, str]] = []
     observations: dict[str, Any] = {}
 
-    p5o = run(
-        [
-            "python3",
-            "tools/verification/p5o_openai_translation_runtime_gate_checks.py",
-            "--timeout",
-            str(args.timeout),
-        ],
-        args.timeout,
-    )
-    require(
-        p5o["ok"],
-        "p5o_regression_failed",
-        p5o["stdout"] or p5o["stderr_tail"],
-        failures,
-    )
-    observations["p5o_regression"] = p5o["ok"]
+    if args.skip_build:
+        observations["p5o_regression"] = {"skipped": True, "reason": "--skip-build"}
+    else:
+        p5o = run(
+            [
+                "python3",
+                "tools/verification/p5o_openai_translation_runtime_gate_checks.py",
+                "--timeout",
+                str(args.timeout),
+            ],
+            args.timeout,
+        )
+        require(
+            p5o["ok"],
+            "p5o_regression_failed",
+            p5o["stdout"] or p5o["stderr_tail"],
+            failures,
+        )
+        observations["p5o_regression"] = p5o["ok"]
 
     for path in [
         LOCALIZABLE,
@@ -90,6 +99,7 @@ def main() -> int:
         SESSION_MODEL,
         PANEL,
         PANEL_COMPONENTS,
+        PANEL_LAYOUT,
         PRESENTER,
         ENTRY_TESTS,
     ]:
@@ -99,6 +109,7 @@ def main() -> int:
     session = text(SESSION_MODEL)
     panel = text(PANEL)
     panel_components = text(PANEL_COMPONENTS)
+    panel_layout = text(PANEL_LAYOUT)
     presenter = text(PRESENTER)
     tests = text(ENTRY_TESTS)
     combined = "\n".join(
@@ -114,25 +125,23 @@ def main() -> int:
         "TranslationPanelActivationPolicy",
         "TranslationFirstMouseHostingView",
         "BlocksNotificationPresentationState",
-        "BlocksAnchoredNotificationPanelPresenter",
-        ".blocksSurface(",
-        ".panel,",
-        "TextEditor(",
+        "TranslationPanelInlineFeedbackView",
+        ".background(Color(nsColor: .windowBackgroundColor))",
+        "TranslationSourceTextEditor(",
         "languageBar",
         "Array(resultStates.enumerated())",
         "TranslationPanelResultStateReader(",
         "TranslationResultCard(",
         "BlocksCompactIconButton(",
         "TranslationServiceOrderDragSource(",
-        "BlocksPanelWindowDragArea(",
+        "TranslationPanelWindowDragArea(",
         ".accessibilityLabel(",
         "beginDraggingSession(",
         "performDragOperation(",
-        "maximumSlotCount = 4",
+        "maximumSlotCount = 3",
         "onCopy:",
         "onSpeak:",
         "onRetry:",
-        "collapsedServiceIDs",
         "model.isPinned",
         "actions.openFavorites()",
         "actions.openTranslationSettings()",
@@ -168,9 +177,39 @@ def main() -> int:
         and "sourceExpanded" not in session
         and "translation.panel.selectionActions" not in panel
         and ".overlay(alignment: .topTrailing)" not in panel
-        and "notificationPresenter.attach(to: panel)" in presenter,
+        and "TranslationPanelInlineFeedbackView(" in panel
+        and "notificationState: notificationState" in presenter
+        and "BlocksAnchoredNotificationPanelPresenter" not in presenter
+        and "notificationPresenter.attach(to: panel)" not in presenter,
         "translation_panel_stable_source_contract_missing",
-        "The source editor must remain expanded, selection recovery actions must stay out of the panel, and notifications must use the external anchored HUD.",
+        "The source editor stays expanded, selection recovery actions stay out of the panel, and feedback uses the reserved inline lane without an auxiliary HUD window.",
+        failures,
+    )
+    panel_view = panel.partition("struct TranslationFloatingPanelView: View")[2]
+    layout_view = panel_layout.partition("struct TranslationPanelContentLayout<")[2]
+    compact_layout = re.sub(r"\s+", "", layout_view)
+    require(
+        ".background(Color(nsColor: .windowBackgroundColor))" in panel_view
+        and ".blocksSurface(" not in panel_view
+        and ".blocksSurface(" not in panel_components
+        and "fixedControlsDivider()resultsViewport" in compact_layout
+        and "openingEditorHeight ?? preferredEditorHeight" in layout_view
+        and "TranslationResultsScrollPhaseBridge(" not in layout_view
+        and "scrollCoordinator" not in layout_view,
+        "translation_panel_native_fixed_surface_missing",
+        "The panel uses a native lightweight window background and fixed source/language controls above a separate results viewport, without glass cards or scroll-driven source collapse.",
+        failures,
+    )
+    retired_controls = [
+        "collapsedServiceIDs", "onToggleCollapsed", "isCollapsed",
+        '"translation.runButton"', '"translation.cancel"',
+        "onCancel:", "actions.cancelTranslation()", "model.cancel()",
+    ]
+    retired_hits = [symbol for symbol in retired_controls if symbol in panel_view + panel_components]
+    require(
+        not retired_hits and "collapsedServiceIDs" not in session,
+        "translation_panel_retired_controls_present",
+        "Result text must always remain expanded; no translate, cancel, or collapse controls: " + ", ".join(retired_hits),
         failures,
     )
     forbidden = [
@@ -216,9 +255,9 @@ def main() -> int:
         failures,
     )
     require(
-        "testTranslationNotificationUsesSeparateNonKeyChildPanel" in tests,
+        "testTranslationNotificationStaysInlineWithoutAuxiliaryWindow" in tests,
         "translation_notification_window_test_missing",
-        "The anchored notification panel requires an AppKit window contract test.",
+        "Inline translation feedback requires an AppKit test proving that no auxiliary notification window is created.",
         failures,
     )
 

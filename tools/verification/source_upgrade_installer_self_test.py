@@ -18,7 +18,7 @@ dev = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(dev)
 
 
-def transaction_case(fail_promotion):
+def transaction_case(fail_promotion, prepare_error=None):
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary).resolve()
         installed = root / "Applications/Blocks.app"
@@ -71,6 +71,9 @@ def transaction_case(fail_promotion):
             assert (installed / "Contents/MacOS/Blocks").read_text() == "old"
             assert manifest.read_bytes() == original_manifest
             prepared.append(True)
+            if prepare_error:
+                return subprocess.CompletedProcess(command, 1, json.dumps({
+                    "version": 1, "status": "failed", "token": str(uuid.uuid4()), "errorCode": prepare_error}), "")
             active[0] = False
             return subprocess.CompletedProcess(command, 0, json.dumps({"version": 1, "status": "committed", "token": str(uuid.uuid4())}), "")
         def update(path, change):
@@ -93,8 +96,16 @@ def transaction_case(fail_promotion):
             stack.enter_context(patch.object(dev.os, "replace", replace))
             try: dev.install_development(products)
             except OSError: assert fail_promotion
-            else: assert not fail_promotion
+            except RuntimeError as error:
+                assert prepare_error and prepare_error in str(error), str(error)
+            else: assert not fail_promotion and not prepare_error
         assert prepared == [True]
+        if prepare_error:
+            assert len(opened) == 1
+            assert (installed / "Contents/MacOS/Blocks").read_text() == "old"
+            assert manifest.read_bytes() == original_manifest
+            assert not list((root / "Library/Caches/BlocksDev/DevelopmentInstall.noindex").glob(".BlocksDev-install-*")), "no untouched pre-promotion staging should accumulate"
+            return
         assert len(opened) == (2 if fail_promotion else 1)
         assert (installed / "Contents/MacOS/Blocks").read_text() == ("old" if fail_promotion else "new")
         if fail_promotion: assert manifest.read_bytes() == original_manifest
@@ -103,7 +114,8 @@ def transaction_case(fail_promotion):
 
 def main():
     cases = []
-    for case in ("idle", "legacy", "success", "bad-identity", "bad-receipt", "timeout", "new-job", "changed-app", "changed-manifest"):
+    for case in ("idle", "legacy", "success", "bad-identity", "bad-receipt", "timeout", "new-job", "changed-app", "changed-manifest",
+                 "drain-failed", "legacy-registration", "untrusted-error", "killed-cli"):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             app = root / "Blocks.app"
@@ -139,6 +151,13 @@ def main():
                 if case == "timeout":
                     busy[0] = False
                     raise subprocess.TimeoutExpired(command, 45)
+                if case == "killed-cli":
+                    return subprocess.CompletedProcess(command, -9, "", "")
+                if case in {"drain-failed", "legacy-registration", "untrusted-error"}:
+                    code = {"drain-failed": "participant_drain_failed", "legacy-registration": "legacy_broker_requires_migration",
+                            "untrusted-error": "/private/secret"}[case]
+                    return subprocess.CompletedProcess(command, 1, json.dumps({
+                        "version": 1, "status": "failed", "token": str(uuid.uuid4()), "errorCode": code}), "")
                 busy[0] = case == "new-job"
                 body = "not JSON" if case == "bad-receipt" else json.dumps({
                     "version": 1, "status": "committed", "token": str(uuid.uuid4()),
@@ -156,9 +175,15 @@ def main():
                 failed = False
                 try:
                     preparation.prepare_if_needed()
-                except (RuntimeError, subprocess.TimeoutExpired):
+                except (RuntimeError, subprocess.TimeoutExpired) as error:
                     failed = True
-                assert failed == (case in {"legacy", "bad-identity", "bad-receipt", "timeout", "new-job"}), case
+                    message = str(error)
+                    if case == "drain-failed": assert "[participant_drain_failed]" in message and "Finish active work" not in message
+                    if case == "legacy-registration": assert "[legacy_broker_requires_migration]" in message
+                    if case == "untrusted-error": assert "/private/secret" not in message
+                    if case == "killed-cli": assert "terminated by signal 9" in message
+                    if case == "timeout": assert "[timeout]" in message and "not proof" in message
+                assert failed == (case in {"legacy", "bad-identity", "bad-receipt", "timeout", "new-job", "drain-failed", "legacy-registration", "untrusted-error", "killed-cli"}), case
                 control_calls = [call for call in calls if call[0] == str(cli)]
                 assert bool(control_calls) == (case not in {"idle", "legacy", "bad-identity"}), case
                 assert app.exists() and manifest.exists()
@@ -175,7 +200,9 @@ def main():
             cases.append(case)
     transaction_case(False)
     transaction_case(True)
-    print(json.dumps({"ok": True, "cases": cases + ["prepared-before-swap", "prepared-promotion-failure-restores-and-reopens"]}))
+    for code in ("participant_drain_failed", "legacy_broker_requires_migration", "preparation_failed"):
+        transaction_case(False, prepare_error=code)
+    print(json.dumps({"ok": True, "cases": cases + ["prepared-before-swap", "prepared-promotion-failure-restores-and-reopens", "failed-preparation-preserves-install-and-cleans-staging"]}))
 
 
 if __name__ == "__main__":

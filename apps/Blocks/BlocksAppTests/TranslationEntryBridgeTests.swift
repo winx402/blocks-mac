@@ -1985,6 +1985,92 @@ final class TranslationEntryBridgeTests: XCTestCase {
         )
     }
 
+    func testSourceEditorCompositionSuspendsSynchronouslyAndEndsAfterCommittedText()
+        async
+    {
+        var events: [String] = []
+        let coordinator = TranslationSourceTextEditor.Coordinator(
+            onTextChange: { events.append("text:\($0)") },
+            onCompositionChange: { events.append("composition:\($0)") }
+        )
+        let textView = TranslationSourceNSTextView(
+            frame: NSRect(x: 0, y: 0, width: 240, height: 100)
+        )
+        coordinator.attach(textView)
+        defer { coordinator.detach() }
+
+        textView.setMarkedText(
+            "nihao",
+            selectedRange: NSRange(location: 5, length: 0),
+            replacementRange: NSRange(location: 0, length: 0)
+        )
+        XCTAssertEqual(events, ["composition:true"])
+        textView.setMarkedText(
+            "nihaoma",
+            selectedRange: NSRange(location: 7, length: 0),
+            replacementRange: NSRange(location: 0, length: 5)
+        )
+        XCTAssertEqual(events, ["composition:true"])
+        textView.insertText(
+            "你好吗",
+            replacementRange: NSRange(location: 0, length: 7)
+        )
+
+        await waitUntil { events.last == "composition:false" }
+        XCTAssertEqual(
+            events,
+            ["composition:true", "text:你好吗", "composition:false"]
+        )
+    }
+
+    func testSourceEditorCompositionCancellationResumesEvenWhenTextIsUnchanged()
+        async
+    {
+        var events: [String] = []
+        let coordinator = TranslationSourceTextEditor.Coordinator(
+            onTextChange: { events.append("text:\($0)") },
+            onCompositionChange: { events.append("composition:\($0)") }
+        )
+        let textView = TranslationSourceNSTextView(
+            frame: NSRect(x: 0, y: 0, width: 240, height: 100)
+        )
+        textView.string = "hello"
+        coordinator.attach(textView)
+        defer { coordinator.detach() }
+        textView.setMarkedText(
+            "nihao",
+            selectedRange: NSRange(location: 5, length: 0),
+            replacementRange: NSRange(location: 5, length: 0)
+        )
+        textView.unmarkText()
+        textView.string = "hello"
+
+        await waitUntil { events.last == "composition:false" }
+        XCTAssertEqual(events, ["composition:true", "composition:false"])
+        XCTAssertTrue(coordinator.shouldApplyModelText("", to: textView))
+    }
+
+    func testSourceEditorDetachedCompositionDoesNotPublishPendingResume() async {
+        var compositionStates: [Bool] = []
+        let coordinator = TranslationSourceTextEditor.Coordinator(
+            onTextChange: { _ in },
+            onCompositionChange: { compositionStates.append($0) }
+        )
+        let textView = TranslationSourceNSTextView(
+            frame: NSRect(x: 0, y: 0, width: 240, height: 100)
+        )
+        coordinator.attach(textView)
+        textView.setMarkedText(
+            "nihao",
+            selectedRange: NSRange(location: 5, length: 0),
+            replacementRange: NSRange(location: 0, length: 0)
+        )
+        textView.unmarkText()
+        coordinator.detach()
+        try? await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(compositionStates, [true])
+    }
+
     func testSourceEditorPublishesSemanticFocusState() {
         var focusStates: [Bool] = []
         let coordinator = TranslationSourceTextEditor.Coordinator(
@@ -7778,7 +7864,7 @@ final class TranslationEntryBridgeTests: XCTestCase {
                 TranslationPanelSourceLayout.expandedEditorHeight(
                     for: source
                 ),
-                72
+                52
             )
         }
         XCTAssertEqual(
@@ -8949,8 +9035,11 @@ final class TranslationEntryBridgeTests: XCTestCase {
     }
 
     func testTranslationPanelRestoresSavedSizeAndRepositionsAcrossScreenOrigin() throws {
+        let restoreFramePreference = preserveTranslationPanelFramePreference()
+        defer { restoreFramePreference() }
         let key = "floatingPanel.translation.center.size"
         let defaults = UserDefaults.standard
+        defaults.set(true, forKey: TranslationPanelPresenter.userResizedPreferenceKey)
         let previous = defaults.object(forKey: key)
         defaults.set([512.0, 444.0], forKey: key)
         defer {
@@ -9045,7 +9134,7 @@ final class TranslationEntryBridgeTests: XCTestCase {
         presenter.present()
         let panel = try XCTUnwrap(presenter.panelForTesting)
         let expected = TranslationPanelGeometry.centeredFrame(
-            preferredSize: CGSize(width: 500, height: 420),
+            preferredSize: CGSize(width: 520, height: 282),
             visibleFrame: visible
         )
         // AppKit aligns native window origins to device pixels. CI's 1x
@@ -9058,6 +9147,32 @@ final class TranslationEntryBridgeTests: XCTestCase {
         XCTAssertEqual(panel.frame.minX, expected.minX, accuracy: pixelTolerance, diagnostic)
         XCTAssertEqual(panel.frame.minY, expected.minY, accuracy: pixelTolerance, diagnostic)
         presenter.close()
+    }
+
+    func testTranslationAutomaticOpeningSizeDoesNotBecomeAUserSizeOnClose() throws {
+        let restore = preserveTranslationPanelFramePreference()
+        defer { restore() }
+        let defaults = UserDefaults(suiteName: "OpeningSize.\(UUID().uuidString)")!
+        let store = TranslationStore(defaults: defaults)
+        func presenter(_ text: String) -> TranslationPanelPresenter {
+            TranslationPanelPresenter(
+                model: TranslationPanelSessionModel(
+                    input: TranslationInput(source: .manual, text: text),
+                    direction: TranslationLanguageDirection(target: TranslationLanguageTag("zh-Hans")!),
+                    translationStore: store
+                ),
+                actions: translationPanelActions(), onClose: { _ in }
+            )
+        }
+        let empty = presenter("")
+        empty.present()
+        let emptyHeight = try XCTUnwrap(empty.panelForTesting).frame.height
+        empty.forceClose()
+        XCTAssertFalse(UserDefaults.standard.bool(forKey: TranslationPanelPresenter.userResizedPreferenceKey))
+        let long = presenter(String(repeating: "Long text. ", count: 30))
+        long.present()
+        defer { long.forceClose() }
+        XCTAssertGreaterThan(try XCTUnwrap(long.panelForTesting).frame.height, emptyHeight)
     }
 
     func testTranslationFavoritesUsesStackedLayoutOnNarrowContent() {
@@ -9530,6 +9645,7 @@ final class TranslationEntryBridgeTests: XCTestCase {
 
     private func preserveTranslationPanelFramePreference() -> () -> Void {
         let keys = [
+            TranslationPanelPresenter.userResizedPreferenceKey,
             "floatingPanel.translation.center.size",
             "floatingPanel.translation.center.origin",
         ]

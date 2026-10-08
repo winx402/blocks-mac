@@ -46,7 +46,7 @@ public enum ActionBrokerUpdateError: Error, LocalizedError {
         case .requiresApproval: return "Action Broker requires approval in System Settings > Login Items. The enabled preference has been retained."
         case .serviceDidNotStop: return "Action Broker service shutdown could not be confirmed. The application will not be replaced."
         case .legacyRegistrationRequiresMigration:
-            return "An older development CLI LaunchAgent is still registered. Finish its work and remove that legacy registration before updating. The new App-owned CLI does not use it; no service was forcibly stopped."
+            return "The legacy development CLI LaunchAgent is still loaded, has a lingering process, or its absence could not be verified. The new App-owned CLI cannot safely retire it. Preserve the installed bundle and matching peers.json; review CLI service diagnostics before retrying. No Broker was forcibly stopped, and disabling has not completed."
         }
     }
 }

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -28,6 +29,11 @@ def main() -> int:
     panel = read(PANEL)
     panel_components = read(PANEL_COMPONENTS)
     panel_ui = panel + "\n" + panel_components
+    result_card = panel_components.partition("struct TranslationResultCard: View")[2]
+    action_type = panel_components.partition("enum TranslationResultHeaderAction: Hashable")[2].partition(
+        "enum TranslationResultHeaderActionLayout"
+    )[0]
+    compact_card = re.sub(r"\s+", "", result_card)
     runtime = read(RUNTIME)
     checks = {
         "canonical_bcp47_language_type": (
@@ -58,9 +64,37 @@ def main() -> int:
                 "onCopy:",
                 "onSpeak:",
                 "onRetry:",
-                "onToggleCollapsed:",
                 "Text(result.translatedText)",
                 ".textSelection(.enabled)",
+            ]
+        ),
+        "result_text_always_expanded": (
+            bool(result_card)
+            and "resultBody\n" in result_card
+            and "if result.isSuccessful || result.state == .streaming" in result_card
+            and all(
+                symbol not in panel_ui
+                for symbol in [
+                    "onToggleCollapsed", "isCollapsed", "collapsedServiceIDs",
+                    '"translation.result.collapse"', '"translation.result.expand"',
+                ]
+            )
+        ),
+        "three_fixed_result_action_slots": (
+            "maximumSlotCount = 3" in panel_components
+            and "maximumSlotCount = 4" not in panel_components
+            and "reservedSlotCount:TranslationResultHeaderActionLayout.maximumSlotCount" in compact_card
+            and "ForEach(headerActionIDs, id: \\.self)" in result_card
+            and re.findall(r"\bcase\s+(\w+)", action_type) == ["copy", "speak", "diagnostics"]
+            and all(symbol not in action_type for symbol in ["case collapse", "case cancel", "case retry"])
+            and "actions.append(contentsOf: [.copy, .speak])" in panel_components
+            and "actions.append(.diagnostics)" in panel_components
+        ),
+        "no_translate_cancel_or_collapse_controls": all(
+            symbol not in panel_ui
+            for symbol in [
+                '"translation.runButton"', '"translation.cancel"', "onCancel:",
+                "actions.cancelTranslation()", "model.cancel()", "onToggleCollapsed",
             ]
         ),
         "diagnostics_are_collapsed": (
