@@ -108,9 +108,9 @@ final class TranslationInlineFeedbackTests: XCTestCase {
         XCTAssertTrue(panel.styleMask.contains(.resizable))
         XCTAssertEqual(
             TranslationPanelMetrics.headerTotalHeight,
-            50,
+            46,
             accuracy: 0.5,
-            "consuming the native inset must preserve the 50pt content drag lane"
+            "the compact header must preserve its 28pt controls and two 9pt padding lanes"
         )
 
         for width: CGFloat in [420, 640, 980] {

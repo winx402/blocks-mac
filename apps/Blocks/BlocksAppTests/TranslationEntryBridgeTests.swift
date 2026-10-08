@@ -7236,11 +7236,11 @@ final class TranslationEntryBridgeTests: XCTestCase {
         )
         XCTAssertEqual(
             TranslationPanelMetrics.headerVerticalPadding,
-            11
+            9
         )
         XCTAssertEqual(
             TranslationPanelMetrics.headerTotalHeight,
-            50
+            46
         )
         XCTAssertEqual(
             TranslationPanelMetrics.ocrStatusMinimumWidth,
@@ -7378,32 +7378,6 @@ final class TranslationEntryBridgeTests: XCTestCase {
                 increasesContrast: true
             )
         )
-        XCTAssertFalse(
-            TranslationResultHeaderStatusLayout.showsStateTitle(
-                for: .succeeded
-            )
-        )
-        for state in [
-            TranslationResultState.waiting,
-            .running,
-            .streaming,
-        ] {
-            XCTAssertTrue(
-                TranslationResultHeaderStatusLayout
-                    .showsStateTitle(for: state)
-            )
-        }
-        for state in [
-            TranslationResultState.succeeded,
-            .failed,
-            .cancelled,
-        ] {
-            XCTAssertFalse(
-                TranslationResultHeaderStatusLayout
-                    .showsStateTitle(for: state)
-            )
-        }
-
         let panel = TranslationSessionPanel(
             contentRect: .zero,
             styleMask: [.nonactivatingPanel],
@@ -7550,6 +7524,30 @@ final class TranslationEntryBridgeTests: XCTestCase {
         dismissalController.requestDismissIfAllowed()
         XCTAssertEqual(guardedDismissCount, 1)
         dismissalController.shutdown()
+    }
+
+    func testTranslationResultHeaderRetainsLifecycleStatusAndLimitsRetryToFailure() {
+        // The compact result header retains a readable status for completed
+        // and interrupted runs, not just the activity spinner. Retry stays a
+        // failure-only affordance rather than becoming a manual run control.
+        for state in [
+            TranslationResultState.waiting,
+            .running,
+            .streaming,
+            .succeeded,
+            .failed,
+            .cancelled,
+        ] {
+            XCTAssertTrue(
+                TranslationResultHeaderStatusLayout.showsStateTitle(for: state),
+                "Every lifecycle state needs its compact status text: \(state)"
+            )
+            XCTAssertEqual(
+                TranslationResultHeaderStatusLayout.showsRetryControl(for: state),
+                state == .failed,
+                "Only a failed result offers retry: \(state)"
+            )
+        }
     }
 
     func testTranslationPanelDismissalSkipsFallbackWhenHotKeyRegisters() {

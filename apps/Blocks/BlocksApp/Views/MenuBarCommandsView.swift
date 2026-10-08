@@ -5,6 +5,7 @@ struct MenuBarCommandsView: View {
     @EnvironmentObject private var appModel: AppModel
     @EnvironmentObject private var clipboardStore: ClipboardStore
     @Environment(\.openWindow) private var openWindow
+    @ObservedObject private var appUpdates = AppUpdateCoordinator.shared
 
     var body: some View {
         Button {
@@ -67,6 +68,14 @@ struct MenuBarCommandsView: View {
         }
 
         Divider()
+
+        Button {
+            appUpdates.checkForUpdates()
+        } label: {
+            Label(appUpdates.checkButtonTitle, systemImage: "arrow.triangle.2.circlepath")
+        }
+        .disabled(!appUpdates.canCheckForUpdates)
+        .help(appUpdates.statusText)
 
         Button(L10n.string("menu.quit")) {
             NSApp.terminate(nil)

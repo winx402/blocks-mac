@@ -4949,15 +4949,25 @@ final class TranslationStoreTests: XCTestCase {
             ),
             translationStore: store
         )
+        defer { model.cancel() }
 
         model.updateSourceTextFromUser("first")
         try? await Task.sleep(for: .milliseconds(100))
         model.updateSourceTextFromUser("latest")
         try? await Task.sleep(for: .milliseconds(550))
 
+        // The model owns the approved 800ms quiet interval. The old 450ms
+        // interval would already have invoked the adapter at this checkpoint.
+        XCTAssertTrue(plugin.requestedTexts.isEmpty)
+        XCTAssertNil(model.snapshot)
+        XCTAssertEqual(model.runPhase, .debouncing)
+        await waitUntil {
+            model.snapshot?.input.text == "latest"
+                && model.snapshot?.successfulResults.count == 1
+        }
         XCTAssertEqual(plugin.requestedTexts, ["latest"])
         XCTAssertEqual(model.snapshot?.input.text, "latest")
-        model.cancel()
+        XCTAssertEqual(model.runPhase, .idle)
     }
 
     func testFavoriteMutationsPreserveTheActiveSearchQuery() async throws {
