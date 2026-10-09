@@ -129,6 +129,9 @@ final class AppUpdateCoordinator: NSObject, ObservableObject {
         L10n.string(canRetryInstallationPreparation ? "updates.retryPreparation" : "updates.check")
     }
     var canChangePreferences: Bool { isAvailable && !sessionInProgress && !isPreparingInstallation }
+    // Reuse the persisted channel instead of introducing a second preference
+    // that could disagree with existing Beta opt-ins or the selected feed.
+    var receivesBetaUpdates: Bool { track == .beta }
     var statusText: String { L10n.string(unavailableReasonKey ?? statusKey) }
 
     /// Register only after ALL app/Helper termination paths have a safe drain.
@@ -194,6 +197,10 @@ final class AppUpdateCoordinator: NSObject, ObservableObject {
         defaults.set(newTrack.rawValue, forKey: Self.trackDefaultsKey)
         statusKey = "updates.status.ready"
         controller?.updater.resetUpdateCycleAfterShortDelay()
+    }
+
+    func setReceivesBetaUpdates(_ enabled: Bool) {
+        setTrack(enabled ? .beta : .stable)
     }
 
     private func observe(_ updater: SPUUpdater) {

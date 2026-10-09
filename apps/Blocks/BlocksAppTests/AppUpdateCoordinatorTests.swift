@@ -123,6 +123,9 @@ final class AppUpdateCoordinatorTests: XCTestCase {
         defaults.set("untrusted-custom-channel", forKey: AppUpdateCoordinator.trackDefaultsKey)
         let coordinator = AppUpdateCoordinator(configuration: configuration(testing: true), defaults: defaults)
         XCTAssertEqual(coordinator.track, .stable)
+        XCTAssertFalse(coordinator.receivesBetaUpdates)
+        coordinator.setReceivesBetaUpdates(true)
+        XCTAssertFalse(coordinator.receivesBetaUpdates)
         coordinator.setTrack(.beta)
         XCTAssertEqual(coordinator.track, .stable)
         coordinator.setAutomaticallyChecksForUpdates(true)
@@ -137,6 +140,10 @@ final class AppUpdateCoordinatorTests: XCTestCase {
         defaults.set("beta", forKey: AppUpdateCoordinator.trackDefaultsKey)
         let coordinator = AppUpdateCoordinator(configuration: configuration(testing: true), defaults: defaults)
         XCTAssertEqual(coordinator.track, .beta)
+        XCTAssertTrue(coordinator.receivesBetaUpdates)
+        coordinator.setReceivesBetaUpdates(false)
+        XCTAssertTrue(coordinator.receivesBetaUpdates, "Unavailable controls must not change an existing opt-in")
+        XCTAssertEqual(defaults.string(forKey: AppUpdateCoordinator.trackDefaultsKey), "beta")
         XCTAssertFalse(coordinator.isAvailable)
     }
 

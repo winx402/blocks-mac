@@ -136,26 +136,20 @@ struct GeneralSettingsPane: View {
                 )
             )
             .disabled(!appUpdates.canChangePreferences)
+            .accessibilityIdentifier("updates.automatic")
 
             SettingsRowDivider()
 
-            SettingsFormRow(
-                title: L10n.string("updates.track.title"),
-                detail: L10n.string("updates.track.detail")
-            ) {
-                Picker(L10n.string("updates.track.title"), selection: Binding(
-                    get: { appUpdates.track },
-                    set: { appUpdates.setTrack($0) }
-                )) {
-                    ForEach(AppUpdateTrack.allCases) { track in
-                        Text(track.title).tag(track)
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.segmented)
-                .disabled(!appUpdates.canChangePreferences)
-                .accessibilityLabel(L10n.string("updates.track.title"))
-            }
+            SettingsToggleRow(
+                title: L10n.string("updates.beta.title"),
+                detail: L10n.string("updates.beta.detail"),
+                isOn: Binding(
+                    get: { appUpdates.receivesBetaUpdates },
+                    set: { appUpdates.setReceivesBetaUpdates($0) }
+                )
+            )
+            .disabled(!appUpdates.canChangePreferences)
+            .accessibilityIdentifier("updates.beta")
         }
     }
 
