@@ -85,15 +85,52 @@ enum ClipboardPasteTargetEligibility {
 
     static func frontmostVisibleWindowID(
         processIdentifier: pid_t,
-        windowInfo: [[String: Any]]? = nil
+        windowInfo: [[String: Any]]? = nil,
+        focusedWindowBounds: CGRect? = nil
     ) -> CGWindowID? {
         let windows = windowInfo ?? (CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
         ) as? [[String: Any]] ?? [])
-        return windows.first(where: {
+        let candidates = windows.filter {
             ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == processIdentifier
                 && isVisibleLayerZeroWindow($0)
-        }).flatMap { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value }
+        }
+        if let focusedWindowBounds {
+            // AX is optional routing evidence, never an input-content read.
+            // Match only a unique window of this PID. Overlapping same-size
+            // windows are ambiguous; do not guess by area or list position.
+            let matches = candidates.filter { window in
+                guard let bounds = windowBounds(window) else { return false }
+                return abs(bounds.minX - focusedWindowBounds.minX) <= 1
+                    && abs(bounds.minY - focusedWindowBounds.minY) <= 1
+                    && abs(bounds.width - focusedWindowBounds.width) <= 1
+                    && abs(bounds.height - focusedWindowBounds.height) <= 1
+            }
+            guard matches.count == 1 else { return nil }
+            return (matches[0][kCGWindowNumber as String] as? NSNumber)?.uint32Value
+        }
+        return candidates.first.flatMap { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value }
+    }
+
+    static func windowBounds(_ window: [String: Any]) -> CGRect? {
+        guard let bounds = window[kCGWindowBounds as String] as? [String: Any],
+              let x = (bounds["X"] as? NSNumber)?.doubleValue,
+              let y = (bounds["Y"] as? NSNumber)?.doubleValue,
+              let width = (bounds["Width"] as? NSNumber)?.doubleValue,
+              let height = (bounds["Height"] as? NSNumber)?.doubleValue,
+              x.isFinite, y.isFinite, width.isFinite, height.isFinite else { return nil }
+        return CGRect(x: x, y: y, width: width, height: height)
+    }
+
+    static func windowDiagnostics(processIdentifier: pid_t, windows: [[String: Any]]) -> String {
+        windows.enumerated().filter {
+            ($0.element[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == processIdentifier
+        }.prefix(8).map { index, window in
+            let id = (window[kCGWindowNumber as String] as? NSNumber)?.uint32Value ?? 0
+            let layer = (window[kCGWindowLayer as String] as? NSNumber)?.intValue ?? -1
+            let alpha = (window[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1
+            return "order=\(index),id=\(id),layer=\(layer),alpha=\(alpha),bounds=\(String(describing: windowBounds(window)))"
+        }.joined(separator: ";")
     }
 
     private static func eligibleApplicationWithoutWindowCheck(
@@ -140,9 +177,24 @@ enum ClipboardAutoPasteError: Error, Equatable {
 struct ClipboardAutoPastePartialFailure: Error, Equatable {
     let reason: ClipboardAutoPasteError
     let pasteboardLease: ClipboardPasteboardWriteLease
+    var routingFailure: ClipboardPasteRoutingFailure? = nil
 
     var pasteboardChangeCountAfterWrite: Int {
         pasteboardLease.changeCount
+    }
+}
+
+enum ClipboardPasteRoutingFailure: String, Equatable {
+    case windowChanged
+    case windowUnverifiable
+    case nonEditable
+
+    var detailKey: String {
+        switch self {
+        case .windowChanged: "status.clipboardPasteCopiedFallback.windowChanged"
+        case .windowUnverifiable: "status.clipboardPasteCopiedFallback.windowUnverifiable"
+        case .nonEditable: "status.clipboardPasteCopiedFallback.nonEditable"
+        }
     }
 }
 
@@ -274,6 +326,7 @@ struct ClipboardPasteFocusSnapshot {
     /// Window-server routing identity. AX availability is separate evidence,
     /// not a prerequisite for a user-requested paste into this window.
     let windowID: CGWindowID?
+    let usesFocusedWindowEvidence: Bool
     let focusedWindow: AXUIElement?
     let focusedElement: AXUIElement?
     let focusedSemantics: ClipboardAXEditableSemantics?
@@ -285,10 +338,12 @@ struct ClipboardPasteFocusSnapshot {
         focusedElement: AXUIElement? = nil,
         focusedSemantics: ClipboardAXEditableSemantics? = nil,
         focusedIdentity: ClipboardPasteFocusIdentity? = nil,
-        windowID: CGWindowID? = nil
+        windowID: CGWindowID? = nil,
+        usesFocusedWindowEvidence: Bool = false
     ) {
         self.target = target
         self.windowID = windowID
+        self.usesFocusedWindowEvidence = usesFocusedWindowEvidence
         self.focusedWindow = focusedWindow
         self.focusedElement = focusedElement
         self.focusedSemantics = focusedSemantics
@@ -926,11 +981,53 @@ final class ClipboardAutoPasteCoordinator {
 
     static func capturePasteTargetContext(application: NSRunningApplication) -> ClipboardPasteTargetContext {
         let target = ClipboardPasteTarget(application)
+        let windows = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] ?? []
+        let focusedBounds = focusedWindowBounds(processIdentifier: application.processIdentifier)
         let windowID = ClipboardPasteTargetEligibility.frontmostVisibleWindowID(
-            processIdentifier: application.processIdentifier
+            processIdentifier: application.processIdentifier,
+            windowInfo: windows,
+            focusedWindowBounds: focusedBounds
         )
-        logger.info("capture target=\(target.bundleIdentifier ?? "unknown", privacy: .public) route=window-preserving windowID=\(windowID ?? 0) launchIdentity=\(target.launchDate != nil)")
-        return ClipboardPasteFocusSnapshot(target: target, windowID: windowID)
+        logger.info("capture target=\(target.bundleIdentifier ?? "unknown", privacy: .public) route=window-preserving windowID=\(windowID ?? 0) focusedWindowEvidence=\(focusedBounds != nil) launchIdentity=\(target.launchDate != nil)")
+        logger.debug("capture targetPID=\(target.processIdentifier) candidates=\(ClipboardPasteTargetEligibility.windowDiagnostics(processIdentifier: target.processIdentifier, windows: windows), privacy: .public)")
+        return ClipboardPasteFocusSnapshot(
+            target: target, windowID: windowID, usesFocusedWindowEvidence: focusedBounds != nil
+        )
+    }
+
+    private static func focusedWindowBounds(processIdentifier: pid_t) -> CGRect? {
+        // The non-sandboxed source build may use its existing AX grant to
+        // distinguish an editing window from same-PID auxiliary windows.
+        // Official sandbox builds retain the independent window-list route.
+        #if BLOCKS_LOCAL_DEVELOPMENT
+        guard AXIsProcessTrusted() else { return nil }
+        let application = AXUIElementCreateApplication(processIdentifier)
+        AXUIElementSetMessagingTimeout(application, 0.025)
+        var rawWindow: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(application, kAXFocusedWindowAttribute as CFString, &rawWindow) == .success,
+              let rawWindow, CFGetTypeID(rawWindow) == AXUIElementGetTypeID() else { return nil }
+        let window = rawWindow as! AXUIElement
+        AXUIElementSetMessagingTimeout(window, 0.025)
+        var rawPosition: CFTypeRef?
+        var rawSize: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &rawPosition) == .success,
+              AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &rawSize) == .success,
+              let rawPosition, let rawSize,
+              CFGetTypeID(rawPosition) == AXValueGetTypeID(),
+              CFGetTypeID(rawSize) == AXValueGetTypeID() else { return nil }
+        var position = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(rawPosition as! AXValue, .cgPoint, &position),
+              AXValueGetValue(rawSize as! AXValue, .cgSize, &size),
+              position.x.isFinite, position.y.isFinite,
+              size.width.isFinite, size.height.isFinite,
+              size.width > 0, size.height > 0 else { return nil }
+        return CGRect(origin: position, size: size)
+        #else
+        return nil
+        #endif
     }
 
     func copyToPasteboard(
@@ -1006,13 +1103,15 @@ final class ClipboardAutoPasteCoordinator {
         Self.logger.info(
             "paste route=window-preserving target=\(target.bundleIdentifier ?? "unknown", privacy: .public) windowID=\(targetContext.windowID ?? 0)"
         )
-        guard focusStillMatchesCapturedTarget(targetContext, targetApplication: targetApplication, expected: target) else {
-            throw partialFailure(.targetApplicationUnavailable, lease: pasteboardLease)
+        if let routingFailure = routingFailure(targetContext, targetApplication: targetApplication, expected: target) {
+            throw ClipboardAutoPastePartialFailure(reason: .targetApplicationUnavailable,
+                pasteboardLease: pasteboardLease, routingFailure: routingFailure)
         }
         let inspection = await optionalTargetInspection(targetContext)
         if inspection == .nonEditable {
             Self.logger.info("paste cancelled stage=helper-confirmed-noneditable")
-            throw partialFailure(.targetApplicationUnavailable, lease: pasteboardLease)
+            throw ClipboardAutoPastePartialFailure(reason: .targetApplicationUnavailable,
+                pasteboardLease: pasteboardLease, routingFailure: .nonEditable)
         }
         guard operationAllowed() else {
             throw partialFailure(.featureDisabled, lease: pasteboardLease)
@@ -1055,19 +1154,35 @@ final class ClipboardAutoPasteCoordinator {
         guard eventPostingAccess(false) else {
             throw partialFailure(.accessibilityPermissionRequired, lease: pasteboardLease)
         }
-        guard isOperationAllowed,
-              focusStillMatchesCapturedTarget(
-                  targetContext,
-                  targetApplication: targetApplication,
-                  expected: target
-              ) else {
-            let reason: ClipboardAutoPasteError = isOperationAllowed
-                ? .targetApplicationUnavailable
-                : .featureDisabled
-            throw ClipboardAutoPastePartialFailure(
-                reason: reason,
-                pasteboardLease: pasteboardLease
-            )
+        guard isOperationAllowed else {
+            throw partialFailure(.featureDisabled, lease: pasteboardLease)
+        }
+        if let routingFailure = routingFailure(targetContext, targetApplication: targetApplication, expected: target) {
+            throw ClipboardAutoPastePartialFailure(reason: .targetApplicationUnavailable,
+                pasteboardLease: pasteboardLease, routingFailure: routingFailure)
+        }
+        // Optional AX routing may synchronously wait on another process. Both
+        // the frontmost app and the pasteboard can change during that wait.
+        // Check the write lease again, then sample process routing immediately
+        // before the event post; never deliver to the newly activated app.
+        try await ensurePasteboardOwnership(pasteboardLease)
+        guard targetIdentityMatches(targetApplication, expected: target),
+              frontmostApplicationProvider().map({ targetIdentityMatches($0, expected: target) }) == true else {
+            throw partialFailure(.targetApplicationNotFrontmost, lease: pasteboardLease)
+        }
+        // Broker validation is asynchronous. A different window in the same
+        // app may become focused during that round trip; repeat the frozen
+        // window check after it and keep the remainder synchronous.
+        if let routingFailure = routingFailure(targetContext, targetApplication: targetApplication, expected: target) {
+            throw ClipboardAutoPastePartialFailure(reason: .targetApplicationUnavailable,
+                pasteboardLease: pasteboardLease, routingFailure: routingFailure)
+        }
+        guard eventPostingAccess(false) else {
+            throw partialFailure(.accessibilityPermissionRequired, lease: pasteboardLease)
+        }
+        guard targetIdentityMatches(targetApplication, expected: target),
+              frontmostApplicationProvider().map({ targetIdentityMatches($0, expected: target) }) == true else {
+            throw partialFailure(.targetApplicationNotFrontmost, lease: pasteboardLease)
         }
         // The focus provider can synchronously observe a cancellation or an
         // authorization revocation. Keep this immediately adjacent to the
@@ -1169,26 +1284,34 @@ final class ClipboardAutoPasteCoordinator {
 
     /// Paste into the current caret in the captured window. AX objects may be
     /// absent or recreated; process lifetime and window identity must match.
-    private func focusStillMatchesCapturedTarget(
+    private func routingFailure(
         _ captured: ClipboardPasteTargetContext,
         targetApplication: NSRunningApplication,
         expected target: ClipboardPasteTarget
-    ) -> Bool {
+    ) -> ClipboardPasteRoutingFailure? {
         guard targetIdentityMatches(targetApplication, expected: target),
               frontmostApplicationProvider().map({
                   targetIdentityMatches($0, expected: target)
               }) == true,
               let capturedWindow = captured.windowID, capturedWindow != 0 else {
             Self.logger.info("paste cancelled stage=routing-target-unverifiable")
-            return false
+            return .windowUnverifiable
         }
         let current = focusSnapshotProvider(targetApplication)
         guard current.target == target,
-              current.windowID == capturedWindow else {
-            Self.logger.info("paste cancelled stage=target-window-changed expectedWindow=\(capturedWindow) actualWindow=\(current.windowID ?? 0)")
-            return false
+              current.windowID != nil,
+              !captured.usesFocusedWindowEvidence || current.usesFocusedWindowEvidence else {
+            Self.logger.warning("paste cancelled stage=routing-evidence-lost targetPID=\(target.processIdentifier) expectedWindow=\(capturedWindow)")
+            return .windowUnverifiable
         }
-        return true
+        guard current.windowID == capturedWindow else {
+            let windows = CGWindowListCopyWindowInfo(
+                [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+            ) as? [[String: Any]] ?? []
+            Self.logger.warning("paste cancelled stage=target-window-changed targetPID=\(target.processIdentifier) expectedWindow=\(capturedWindow) actualWindow=\(current.windowID ?? 0) candidates=\(ClipboardPasteTargetEligibility.windowDiagnostics(processIdentifier: target.processIdentifier, windows: windows), privacy: .public)")
+            return .windowChanged
+        }
+        return nil
     }
 
     private func ensurePasteboardOwnership(

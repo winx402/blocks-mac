@@ -79,6 +79,7 @@ final class ClipboardNotificationCoordinator {
     /// it remains visible without leaking into the next panel invocation.
     func copiedWithoutAutomaticPaste(
         reason: ClipboardPasteFailureReason,
+        detail: String? = nil,
         screen: NSScreen? = nil
     ) {
         fallbackPanelPresenter.present(
@@ -87,7 +88,7 @@ final class ClipboardNotificationCoordinator {
                 title: L10n.string(
                     "status.clipboardPasteCopiedFallback.title"
                 ),
-                detail: L10n.string(
+                detail: detail ?? L10n.string(
                     "status.clipboardPasteCopiedFallback.detail"
                 ),
                 dismissPolicy: .automatic(after: 4),

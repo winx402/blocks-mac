@@ -71,7 +71,7 @@ def main() -> int:
     core = read_tree(CORE)
     tests = read_tree(APP_TESTS)
     target_capture = body_of(autopaste, "static func capturePasteTargetContext(")
-    target_validation = body_of(autopaste, "private func focusStillMatchesCapturedTarget(")
+    target_validation = body_of(autopaste, "private func routingFailure(")
     broker_write = body_of(broker, "private func performMaterializedWrite(")
     before_clear = broker_write.split("let afterClear = clearPasteboard()", 1)[0]
     broker_boundary = "\n".join(
@@ -236,8 +236,9 @@ def main() -> int:
             and "windowID: windowID" in target_capture
             and "current.windowID == capturedWindow" in target_validation
             and "current.target == target" in target_validation
-            and "AXUIElementCopyAttributeValue" not in autopaste
-            and "AXIsProcessTrusted" not in autopaste
+            and "AXIsProcessTrusted" not in body_of(autopaste, "static func systemEventPostingAccess(")
+            and "#if BLOCKS_LOCAL_DEVELOPMENT" in body_of(autopaste, "private static func focusedWindowBounds(")
+            and "kAXValueAttribute" not in autopaste
             and "captured.focusedElement" not in target_validation
         ),
         "broker_write_is_single_attempt_without_old_item_reads": (

@@ -18,7 +18,6 @@ struct ContentView: View {
                     openWindow(id: "main")
                 }
                 appModel.refreshPermissionState()
-                appModel.registerDefaultShortcuts()
             }
             .onReceive(
                 NotificationCenter.default.publisher(
@@ -26,7 +25,6 @@ struct ContentView: View {
                 )
             ) { _ in
                 appModel.refreshPermissionState()
-                appModel.registerDefaultShortcuts()
             }
     }
 }

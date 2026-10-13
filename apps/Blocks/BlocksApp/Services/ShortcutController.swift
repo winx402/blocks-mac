@@ -547,6 +547,7 @@ enum ShortcutBindingStore {
 }
 
 enum ShortcutRegistrationFailureReason: Equatable {
+    case applicationNotReady
     case missingReference
     case unregistrationFailed
     case invalidBinding
@@ -592,7 +593,7 @@ struct ShortcutRegistrationResult: Identifiable {
         if registered {
             return L10n.string("settings.shortcutRegistered")
         }
-        if failureReason == .missingReference || failureReason == .unregistrationFailed || failureReason == .invalidBinding {
+        if failureReason == .applicationNotReady || failureReason == .missingReference || failureReason == .unregistrationFailed || failureReason == .invalidBinding {
             return L10n.string("settings.shortcutReregisterFailedTitle")
         }
         return L10n.format("settings.shortcutConflict", String(osStatus))
@@ -863,6 +864,7 @@ final class ShortcutController {
     private let routeTokenExhaustedStatus: OSStatus = -108
     private let stalePressedHotKeyResetDelay: TimeInterval = 2.0
     private let registrationBackend: RegistrationBackend
+    private var applicationIsRunning: () -> Bool
     private var hotKeys: [ShortcutCommand: RegisteredHotKey] = [:]
     private var pendingUnregistrations: [ShortcutCommand: [RegisteredHotKey]] = [:]
     private var routeTokensByCommand: [ShortcutCommand: UInt32] = [:]
@@ -874,10 +876,12 @@ final class ShortcutController {
     private var registrationEpoch: UInt64 = 0
 #if DEBUG
     private var systemRegistrationCallCounts = SystemRegistrationCallCounts.zero
+    private var configuredBindingsForFixtures: [ShortcutCommand: ShortcutBinding]?
 #endif
 
     init() {
         registrationBackend = .system
+        applicationIsRunning = { NSApp.isRunning }
     }
 
 #if DEBUG
@@ -899,6 +903,17 @@ final class ShortcutController {
 
     private init(registrationBackend: RegistrationBackend) {
         self.registrationBackend = registrationBackend
+        applicationIsRunning = { NSApp.isRunning }
+    }
+
+    func setApplicationRunningForFixtures(_ provider: @escaping () -> Bool) {
+        precondition(!usesSystemRegistration)
+        applicationIsRunning = provider
+    }
+
+    func setConfiguredBindingsForFixtures(_ bindings: [ShortcutCommand: ShortcutBinding]) {
+        precondition(!usesSystemRegistration)
+        configuredBindingsForFixtures = bindings
     }
 
     var systemRegistrationCallCountsForFixtures: SystemRegistrationCallCounts {
@@ -1022,6 +1037,15 @@ final class ShortcutController {
         actions: [ShortcutCommand: () -> Void],
         runtimeDisabledCommands: Set<ShortcutCommand> = []
     ) -> [ShortcutRegistrationResult] {
+#if DEBUG
+        if let configuredBindingsForFixtures {
+            return registerShortcuts(
+                bindings: configuredBindingsForFixtures,
+                actions: actions,
+                runtimeDisabledCommands: runtimeDisabledCommands
+            )
+        }
+#endif
         let bindings = Dictionary(
             uniqueKeysWithValues: ShortcutCommand.allCases.map { command in
                 (command, ShortcutBindingStore.effectiveBinding(for: command))
@@ -1148,7 +1172,7 @@ final class ShortcutController {
         bindings: [ShortcutCommand: ShortcutBinding],
         runtimeDisabledCommands: Set<ShortcutCommand>
     ) -> [ShortcutRegistrationResult] {
-        guard NSApp.isRunning else {
+        guard applicationIsRunning() else {
             Self.logger.error("stage=registration-rejected reason=application-not-running")
             return ShortcutCommand.allCases.map {
                 ShortcutRegistrationResult(
@@ -1156,7 +1180,8 @@ final class ShortcutController {
                     binding: bindings[$0] ?? ShortcutBindingStore.binding(for: $0),
                     registered: false,
                     osStatus: applicationNotReadyStatus,
-                    runtimeDisabled: runtimeDisabledCommands.contains($0)
+                    runtimeDisabled: runtimeDisabledCommands.contains($0),
+                    failureReason: .applicationNotReady
                 )
             }
         }
@@ -1176,7 +1201,8 @@ final class ShortcutController {
                         binding: bindings[$0] ?? ShortcutBindingStore.binding(for: $0),
                         registered: false,
                         osStatus: applicationNotReadyStatus,
-                        runtimeDisabled: runtimeDisabledCommands.contains($0)
+                        runtimeDisabled: runtimeDisabledCommands.contains($0),
+                        failureReason: .applicationNotReady
                     )
                 }
             }
@@ -1267,7 +1293,8 @@ final class ShortcutController {
                         command: command,
                         binding: binding,
                         registered: false,
-                        osStatus: applicationNotReadyStatus
+                        osStatus: applicationNotReadyStatus,
+                        failureReason: .applicationNotReady
                     )
                 }
                 var ref: EventHotKeyRef?
@@ -1408,7 +1435,7 @@ final class ShortcutController {
             return
         }
         if let command = commandsByHotKeyID[hotKeyID] {
-            Self.logger.info("stage=event-delivered command=\(command.rawValue, privacy: .public)")
+            Self.logger.notice("stage=event-delivered command=\(command.rawValue, privacy: .public)")
             eventDeliveryObserver?(command, registrationEpoch)
         } else {
             Self.logger.error("stage=event-received hotKeyID=\(hotKeyID, privacy: .public) reason=command-missing")

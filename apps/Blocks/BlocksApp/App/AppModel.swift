@@ -1,9 +1,14 @@
 import AppKit
 import BlocksCore
 import Combine
+import OSLog
 
 @MainActor
 final class AppModel: ObservableObject {
+    private static let shortcutLogger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.blocks.app",
+        category: "global-shortcut"
+    )
     let applicationOperationGate: ApplicationOperationAdmissionGate
     let applicationLifecycle = ApplicationLifecycleCoordinator(requiredParticipantIDs: [
         "app", "shortcuts", "helper", "actionBroker", "clipboard", "translation",
@@ -269,6 +274,11 @@ final class AppModel: ObservableObject {
         )
         if runtimeServicesEnabled { cliInstallationController.reconcileManagedInstallation() }
         if !BlocksRuntimeEnvironment.isUnitTestHost { FeedbackController.shared.startIfEnabled() }
+        if runtimeServicesEnabled {
+            // Attach only after actions, module availability and update lifecycle
+            // are configured. The delegate never constructs another AppModel.
+            AppDelegate.attachShortcutStoreForApplicationLaunch(resolvedShortcutStore)
+        }
     }
 
     private func configureApplicationLifecycle() {
@@ -1431,6 +1441,7 @@ final class AppModel: ObservableObject {
                     await self?.executeShortcutWithPluginHooks(
                         command: .clipboardHistory
                     ) { [weak self] in
+                        Self.shortcutLogger.info("stage=clipboard-shortcut-action")
                         self?.showClipboardFloatingPanel()
                     }
                 }
@@ -1617,6 +1628,7 @@ final class AppModel: ObservableObject {
     func showClipboardHistory() { clipboardCoordinator.showHistory() }
 
     func showClipboardFloatingPanel(openMainWindow: @escaping () -> Void = {}) {
+        Self.shortcutLogger.info("stage=clipboard-panel-request")
         clipboardCoordinator.showFloatingPanel(
             openMainWindow: openMainWindowOrDefault(openMainWindow, section: .clipboardSettings),
             openSettings: { [weak self] in self?.openMainWindow(section: .clipboardSettings) }

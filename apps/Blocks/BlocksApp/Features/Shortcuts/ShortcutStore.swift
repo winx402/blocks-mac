@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import OSLog
 
 struct ShortcutActionHandlers {
     let screenshotSmart: () -> Void
@@ -32,13 +33,30 @@ struct ShortcutRegistrationSummary {
 
 @MainActor
 final class ShortcutStore: ObservableObject {
+    private static let logger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "com.blocks.app",
+        category: "global-shortcut"
+    )
     private var applicationUpdatePaused = false
+    private var registrationDeferredForApplicationUpdate = false
+    private var applicationLaunchCompleted = false
+    private var startupInitializationInProgress = false
+    private let startupRetryWait: (UInt64) async throws -> Void
 
     func prepareForApplicationUpdate() async throws {
         applicationUpdatePaused = true
     }
 
-    func resumeAfterCancelledApplicationUpdate() async { applicationUpdatePaused = false }
+    func resumeAfterCancelledApplicationUpdate() async {
+        applicationUpdatePaused = false
+        if registrationDeferredForApplicationUpdate {
+            registrationDeferredForApplicationUpdate = false
+            registerDefaultShortcuts(force: true)
+        }
+        if applicationLaunchCompleted {
+            await initializeShortcutsAfterApplicationLaunch()
+        }
+    }
     @Published private(set) var shortcutRegistrationResults: [ShortcutRegistrationResult] = []
     @Published private(set) var lastDeliveryEvent: ShortcutDeliveryEvent?
     @Published private(set) var registrationGeneration: UInt64 = 0
@@ -50,10 +68,14 @@ final class ShortcutStore: ObservableObject {
 
     init(
         shortcutController: ShortcutController = ShortcutController(),
-        actions: ShortcutActionHandlers = .disabled
+        actions: ShortcutActionHandlers = .disabled,
+        startupRetryWait: @escaping (UInt64) async throws -> Void = { delay in
+            try await Task.sleep(nanoseconds: delay)
+        }
     ) {
         self.shortcutController = shortcutController
         self.actions = actions
+        self.startupRetryWait = startupRetryWait
         shortcutController.setEventDeliveryObserver { [weak self] command, registrationEpoch in
             Task { @MainActor [weak self] in
                 guard self?.registrationGeneration == registrationEpoch else {
@@ -93,6 +115,36 @@ final class ShortcutStore: ObservableObject {
         self.actions = actions
     }
 
+    private var needsStartupRegistration: Bool {
+        shortcutRegistrationResults.isEmpty
+            || shortcutRegistrationResults.contains { $0.failureReason == .applicationNotReady }
+    }
+
+    /// App lifecycle owns this entry point; no view, window or activation is required.
+    /// Only readiness failures are retried. Carbon conflicts remain visible until
+    /// an explicit binding change or manual registration refresh.
+    func initializeShortcutsAfterApplicationLaunch() async {
+        applicationLaunchCompleted = true
+        guard !startupInitializationInProgress, needsStartupRegistration else { return }
+        startupInitializationInProgress = true
+        defer { startupInitializationInProgress = false }
+        // didFinishLaunching can precede NSApplication's running flag. Let its
+        // current callback unwind, then allow at most four readiness retries.
+        await Task.yield()
+        let retryDelays: [UInt64] = [50_000_000, 100_000_000, 250_000_000, 500_000_000]
+        for attempt in 0...retryDelays.count {
+            guard !Task.isCancelled, !applicationUpdatePaused else { return }
+            registerDefaultShortcuts()
+            Self.logger.notice("stage=startup-registration attempt=\(attempt + 1, privacy: .public) completed=\(!self.needsStartupRegistration, privacy: .public) registered=\(self.registeredShortcutCount, privacy: .public) failed=\(self.failedShortcutCount, privacy: .public)")
+            guard needsStartupRegistration, attempt < retryDelays.count else { return }
+            do {
+                try await startupRetryWait(retryDelays[attempt])
+            } catch {
+                return
+            }
+        }
+    }
+
     func setRuntimeAvailability(screenshotEnabled: Bool, clipboardEnabled: Bool) {
         var disabled: Set<ShortcutCommand> = []
         if !screenshotEnabled {
@@ -111,7 +163,13 @@ final class ShortcutStore: ObservableObject {
     }
 
     func registerDefaultShortcuts(force: Bool = false) {
-        guard force || shortcutRegistrationResults.isEmpty else {
+        guard !applicationUpdatePaused else {
+            if force || needsStartupRegistration {
+                registrationDeferredForApplicationUpdate = true
+            }
+            return
+        }
+        guard force || needsStartupRegistration else {
             return
         }
         // A delivery proves only the currently registered binding. Replacing

@@ -18127,6 +18127,27 @@
         }
       }
     },
+    "status.clipboardPasteCopiedFallback.nonEditable": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "The current control cannot accept text. Focus an input field, then press Command+V." } },
+        "ja": { "stringUnit": { "state": "translated", "value": "現在の操作対象には入力できません。入力欄にフォーカスして Command+V を押してください。" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "当前控件无法输入文字。请聚焦输入框后按 Command+V 粘贴。" } }
+      }
+    },
+    "status.clipboardPasteCopiedFallback.windowChanged": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "The target window changed, so automatic paste was cancelled. The content is copied; focus the intended input field and press Command+V." } },
+        "ja": { "stringUnit": { "state": "translated", "value": "対象ウインドウが変わったため、自動貼り付けを中止しました。内容はコピー済みです。目的の入力欄にフォーカスして Command+V を押してください。" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "检测到目标窗口变化，已取消自动粘贴。内容已复制，请聚焦需要的输入框后按 Command+V。" } }
+      }
+    },
+    "status.clipboardPasteCopiedFallback.windowUnverifiable": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "The original target window could not be verified. The content is copied; focus the intended input field and press Command+V." } },
+        "ja": { "stringUnit": { "state": "translated", "value": "元の対象ウインドウを確認できませんでした。内容はコピー済みです。目的の入力欄にフォーカスして Command+V を押してください。" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "无法确认原目标窗口。内容已复制，请聚焦需要的输入框后按 Command+V。" } }
+      }
+    },
     "status.clipboardPasteCopiedFallback.title": {
       "localizations": {
         "en": {

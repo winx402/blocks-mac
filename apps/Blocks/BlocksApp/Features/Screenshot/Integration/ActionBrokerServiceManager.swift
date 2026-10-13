@@ -421,20 +421,32 @@ final class ActionBrokerServiceManager: ObservableObject {
         guard received > 0, Int(received) < processes.count else { throw ActionBrokerUpdateError.serviceDidNotStop }
         return try brokerProcessIDs(in: Array(processes.prefix(Int(received))), policy: policy,
             executablePath: processExecutablePath, kernelName: kernelProcessName,
-            hasExited: { kill($0, 0) != 0 && errno == ESRCH })
+            hasExited: { kill($0, 0) != 0 && errno == ESRCH },
+            kernelSnapshot: kernelProcessSnapshot)
+    }
+
+    struct BrokerProcessSnapshot: Equatable {
+        let processID: Int32
+        let startSeconds: Int64
+        let startMicroseconds: Int64
+        let status: Int32
+
+        var isZombie: Bool { status == SZOMB }
     }
 
     /// proc_pidpath can return ENOENT for a live executable unlinked during an
     /// unrelated app update. proc_name reads the kernel's executable name, not
     /// argv/ps display text. Use it only to exclude a positively different name;
-    /// missing/empty names and full or truncated Broker names still fail closed.
+    /// Missing/empty names and possible Broker names fail closed unless two
+    /// kernel snapshots prove an unchanged zombie lifetime.
     /// The managed Broker contract fixes its executable name to BlocksActionBroker.
     static func brokerProcessIDs(
         in processIDs: [Int32],
         policy: BrokerProcessScanPolicy,
         executablePath: (Int32) -> String?,
         kernelName: (Int32) -> String?,
-        hasExited: (Int32) -> Bool
+        hasExited: (Int32) -> Bool,
+        kernelSnapshot: (Int32) -> BrokerProcessSnapshot? = { _ in nil }
     ) throws -> [Int32] {
         let brokerName = "BlocksActionBroker"
         return try processIDs.filter { processID in
@@ -450,13 +462,44 @@ final class ActionBrokerServiceManager: ObservableObject {
                 // Include old/moved installations, not only the current bundle.
                 return path.hasSuffix("/Contents/MacOS/\(brokerName)")
             }
+            let before = kernelSnapshot(processID)
             if hasExited(processID) { return false }
             guard let name = kernelName(processID), !name.isEmpty,
                   !brokerName.hasPrefix(name), !name.hasPrefix(brokerName) else {
+                // Signal 0 succeeds for zombies, while libproc can report
+                // ESRCH for both their path and name. Only exclude a process
+                // whose kernel state proves the same lifetime was already
+                // terminal on both sides of these inconclusive probes. Never
+                // treat an unreadable snapshot or a reused PID as exit proof.
+                if let before, before.processID == processID, before.isZombie,
+                   let after = kernelSnapshot(processID), after == before {
+                    return false
+                }
                 throw ActionBrokerUpdateError.serviceDidNotStop
             }
             return false
         }
+    }
+
+    static func kernelProcessSnapshot(_ processID: Int32) -> BrokerProcessSnapshot? {
+        guard processID > 0 else { return nil }
+        // KERN_PROC_PID includes unreaped zombies that proc_pidpath/proc_name
+        // cannot inspect. p_starttime is a kernel lifetime identifier, not ps
+        // output or argv. A failed/short response (including permission denial
+        // or disappearance) is not evidence of a terminal process.
+        var info = kinfo_proc()
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, processID]
+        let expectedSize = MemoryLayout<kinfo_proc>.stride
+        var size = expectedSize
+        let result = mib.withUnsafeMutableBufferPointer {
+            sysctl($0.baseAddress, UInt32($0.count), &info, &size, nil, 0)
+        }
+        guard result == 0, size == expectedSize, info.kp_proc.p_pid == processID else { return nil }
+        let start = info.kp_proc.p_starttime
+        guard start.tv_sec > 0, start.tv_usec >= 0, start.tv_usec < 1_000_000 else { return nil }
+        return BrokerProcessSnapshot(processID: processID,
+            startSeconds: Int64(start.tv_sec), startMicroseconds: Int64(start.tv_usec),
+            status: Int32(info.kp_proc.p_stat))
     }
 
     static func processExecutablePath(_ processID: Int32) -> String? {

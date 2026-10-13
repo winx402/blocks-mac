@@ -634,7 +634,7 @@ extension ClipboardFeatureCoordinator {
         case .targetApplicationNotFrontmost:
             recordCopiedFallback(.targetApplicationNotFrontmost)
         case .targetApplicationUnavailable:
-            recordCopiedFallback(.targetApplicationUnavailable)
+            recordCopiedFallback(.targetApplicationUnavailable, routingFailure: failure.routingFailure)
         case .pasteEventFailed:
             recordCopiedFallback(.eventCreationFailed)
         case .pasteboardChanged:
@@ -787,15 +787,18 @@ extension ClipboardFeatureCoordinator {
         )
     }
 
-    private func recordCopiedFallback(_ reason: ClipboardPasteFailureReason) {
+    private func recordCopiedFallback(_ reason: ClipboardPasteFailureReason, routingFailure: ClipboardPasteRoutingFailure? = nil) {
         clipboardStore.pasteAttempt?.state = .pasteboardWritten
         clipboardStore.pasteAttempt?.failureReason = reason
         recordStatus(
             .ready,
             title: "status.clipboardPasteCopiedFallback.title",
-            detail: L10n.string("status.clipboardPasteCopiedFallback.detail")
+            detail: L10n.string(routingFailure?.detailKey ?? "status.clipboardPasteCopiedFallback.detail")
         )
-        notificationCoordinator.copiedWithoutAutomaticPaste(reason: reason)
+        notificationCoordinator.copiedWithoutAutomaticPaste(
+            reason: reason,
+            detail: routingFailure.map { L10n.string($0.detailKey) }
+        )
     }
 
 }

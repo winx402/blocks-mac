@@ -48,7 +48,8 @@ def main() -> int:
         "event_permission_is_independent_of_AX": "CGPreflightPostEventAccess()" in auto
         and "CGRequestPostEventAccess()" in auto
         and "eventPostingAccess(promptForAccessibility)" in auto
-        and "AXIsProcessTrusted" not in auto,
+        and "AXIsProcessTrusted" not in body_of(auto, "static func systemEventPostingAccess(")
+        and "#if BLOCKS_LOCAL_DEVELOPMENT" in body_of(auto, "private static func focusedWindowBounds("),
         "new_gesture_guidance_localized": "status.clipboardPastePermissionReady.detail" in strings,
         "replay_regression_is_rejected": refresh_never_replays(fixture)
         and not refresh_never_replays(fixture.replace("pendingPasteRequest = nil", "pendingPasteRequest = nil; startPaste(oldRequest)")),
