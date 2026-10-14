@@ -1164,7 +1164,7 @@ final class SelectionHelperClient: @unchecked Sendable {
         do {
             try keyStore.save(key)
         } catch {
-            return .failure(.connectionFailed)
+            return .failure(.keychainUnavailable)
         }
         return health(timeout: timeout)
     }
@@ -1902,7 +1902,19 @@ final class SelectionHelperSettingsController:
     @Published private(set) var state:
         SelectionHelperConnectionState = .checking
     @Published var pairingCode = ""
-    @Published private(set) var lastError: String?
+    @Published private var statusError: String?
+    @Published private(set) var lastPairingFailure: SelectionAgentServiceFailure?
+    @Published private(set) var isPairing = false
+
+    /// Passive health can report a different current state, but a manual
+    /// operation's failure remains actionable until another pair or an
+    /// authenticated health success. Never retain the entered code here.
+    private(set) var lastError: String? {
+        get { lastPairingFailure.map(helperFailureMessage) ?? statusError }
+        set { statusError = newValue }
+    }
+
+    var needsPairing: Bool { !client.isPaired }
 
     private let client: SelectionHelperClient
     private let disconnectRecoveryStore:
@@ -2016,6 +2028,10 @@ final class SelectionHelperSettingsController:
     }
 
     func refresh(allowLaunch: Bool = true) {
+        guard !isPairing else {
+            if !allowLaunch { refreshAgainWithoutLaunch = true }
+            return
+        }
         guard !refreshInFlight else {
             if !allowLaunch { refreshAgainWithoutLaunch = true }
             return
@@ -2113,9 +2129,12 @@ final class SelectionHelperSettingsController:
     }
 
     func pair() {
+        guard !isPairing else { return }
         guard let lease = client.beginApplicationOperation() else { return }
+        lastPairingFailure = nil
         let code = pairingCode.filter(\.isNumber)
         guard code.count == 6 else {
+            lastPairingFailure = .invalidPairingCode
             lastError = L10n.string(
                 "translation.selectionHelper.codeInvalid"
             )
@@ -2123,20 +2142,26 @@ final class SelectionHelperSettingsController:
         }
         generation &+= 1
         let currentGeneration = generation
+        isPairing = true
         state = .connecting
         lastError = nil
         let client = client
         Task.detached(priority: .userInitiated) {
             client.pair(code: code, timeout: 1.2)
         }.valueTask(holding: lease) { [weak self] result in
-            guard let self,
-                  generation == currentGeneration else {
-                return
-            }
+            guard let self else { return }
+            isPairing = false
+            guard generation == currentGeneration else { return }
             if case .success = result {
                 pairingCode = ""
+            } else if case let .failure(failure) = result {
+                lastPairingFailure = failure
             }
             applyHealthResult(result)
+            if refreshAgainWithoutLaunch {
+                refreshAgainWithoutLaunch = false
+                refresh(allowLaunch: false)
+            }
         }
     }
 
@@ -2180,7 +2205,7 @@ final class SelectionHelperSettingsController:
     }
 
     private func pollHelperPermission() {
-        guard !permissionHealthCheckInFlight,
+        guard !isPairing, !permissionHealthCheckInFlight,
               let lease = client.beginApplicationOperation() else { return }
         permissionHealthCheckInFlight = true
         let currentGeneration = generation
@@ -2273,6 +2298,7 @@ final class SelectionHelperSettingsController:
     ) {
         switch result {
         case let .success(health):
+            lastPairingFailure = nil
             lastError = nil
             if health.protocolVersion <
                 BlocksSelectionHelperProtocol

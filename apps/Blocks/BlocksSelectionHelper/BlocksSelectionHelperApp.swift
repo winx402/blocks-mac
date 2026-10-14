@@ -2975,7 +2975,9 @@ private struct SelectionHelperContentView: View {
         case .starting:
             String(localized: "selectionHelper.connection.starting")
         case .ready:
-            String(localized: "selectionHelper.connection.ready")
+            model.isPaired
+                ? String(localized: "selectionHelper.connection.paired")
+                : String(localized: "selectionHelper.connection.waitingForPairing")
         case let .failed(message):
             String(
                 format: String(

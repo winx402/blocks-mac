@@ -64,6 +64,8 @@ final class AppTerminationCoordinator {
     private var terminationIsPending = false
     private var terminationHasCompleted = false
     private var finalizerHasRun = false
+    private var preparedRestartIsArmed = false
+    private var preparedRestartRecoveryIsPending = false
 
     init(
         dispatcher: Dispatcher? = nil,
@@ -98,7 +100,52 @@ final class AppTerminationCoordinator {
         self.finalizer = finalizer
     }
 
+    /// Permission restart has already drained the reversible update lifecycle.
+    /// Arming is not a quit commitment: AppKit may still reject termination.
+    @discardableResult
+    func armPreparedRestart() -> Bool {
+        guard !isQuitting, !terminationIsPending, !terminationHasCompleted,
+              !preparedRestartIsArmed else { return false }
+        preparedRestartIsArmed = true
+        record(phase: "prepared_restart_armed")
+        return true
+    }
+
+    /// Called only while the old process is still alive and termination has not
+    /// reached applicationWillTerminate. No ordinary-quit fence is reopened.
+    @discardableResult
+    func cancelPreparedRestart() -> Bool {
+        guard preparedRestartIsArmed, !isQuitting,
+              !terminationIsPending, !terminationHasCompleted else { return false }
+        preparedRestartIsArmed = false
+        preparedRestartRecoveryIsPending = false
+        record(phase: "prepared_restart_cancelled")
+        return true
+    }
+
+    /// Keep the parent alive while its owned launcher cancellation is awaiting
+    /// confirmation. Ordinary quit is available again after safe cancellation.
+    @discardableResult
+    func beginPreparedRestartRecovery() -> Bool {
+        guard preparedRestartIsArmed, !isQuitting,
+              !terminationIsPending, !terminationHasCompleted else { return false }
+        preparedRestartRecoveryIsPending = true
+        record(phase: "prepared_restart_recovery_wait")
+        return true
+    }
+
     func finalizeTerminationResourcesIfNeeded() {
+        if preparedRestartIsArmed, !terminationHasCompleted {
+            // Only applicationWillTerminate commits a prepared restart. Until
+            // this hook, the caller may restore the app without closed DBs,
+            // stopped private processes, hidden UI or a forced-exit watchdog.
+            preparedRestartIsArmed = false
+            preparedRestartRecoveryIsPending = false
+            terminationHasCompleted = true
+            isQuitting = true
+            onQuit?()
+            record(phase: "prepared_restart_committed")
+        }
         guard terminationHasCompleted, !finalizerHasRun else { return }
         finalizerHasRun = true
         finalizer?()
@@ -106,6 +153,8 @@ final class AppTerminationCoordinator {
 
     func requestTermination() -> NSApplication.TerminateReply {
         guard !terminationHasCompleted else { return .terminateNow }
+        guard !preparedRestartRecoveryIsPending else { return .terminateCancel }
+        guard !preparedRestartIsArmed else { return .terminateNow }
         guard !terminationIsPending else { return .terminateLater }
         terminationIsPending = true
         isQuitting = true

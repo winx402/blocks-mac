@@ -16,6 +16,7 @@ final class AppModel: ObservableObject {
     ])
     private var needsApplicationUpdateBackup = false
     private var ownsSparklePreparation = false
+    private var ownsPermissionRestartPreparation = false
     private var sourceUpgradeCoordinator: SourceUpgradeCoordinator?
     #if BLOCKS_LOCAL_DEVELOPMENT
     private var sourceUpgradeServer: SourceUpgradeTransport.Server?
@@ -278,6 +279,10 @@ final class AppModel: ObservableObject {
             // Attach only after actions, module availability and update lifecycle
             // are configured. The delegate never constructs another AppModel.
             AppDelegate.attachShortcutStoreForApplicationLaunch(resolvedShortcutStore)
+            if resolvedPermissionStore.pendingPermissionRecoveryKind != nil {
+                selectedSection = .permissions
+                resolvedPermissionStore.resumePendingPermissionRecovery()
+            }
         }
     }
 
@@ -351,6 +356,26 @@ final class AppModel: ObservableObject {
             return
         }
         guard applicationLifecycle.hasCompleteSafetyCoverage else { return }
+        PermissionRestartSafety.shared.configure(
+            prepare: { [weak self] in
+                guard let self,
+                      !ownsPermissionRestartPreparation,
+                      !ownsSparklePreparation,
+                      sourceUpgradeCoordinator?.hasTransaction != true,
+                      !AppUpdateCoordinator.shared.isPreparingInstallation,
+                      !AppTerminationCoordinator.shared.isQuitting,
+                      applicationLifecycle.state == .active else {
+                    throw ApplicationLifecycleCoordinator.SafetyError.preparationInProgress
+                }
+                ownsPermissionRestartPreparation = true
+                try await prepareOwnedApplicationUpdate()
+            },
+            resume: { [weak self] in
+                guard let self, ownsPermissionRestartPreparation else { return }
+                await resumeOwnedApplicationUpdate()
+                ownsPermissionRestartPreparation = false
+            }
+        )
         AppTerminationCoordinator.shared.installDispatcher { [weak self] in
             guard let self else { throw ApplicationLifecycleCoordinator.SafetyError.configurationLocked }
             if applicationLifecycle.state != .prepared { needsApplicationUpdateBackup = false }
@@ -375,7 +400,8 @@ final class AppModel: ObservableObject {
 
     func prepareForApplicationUpdate() async throws {
         guard sourceUpgradeCoordinator?.hasTransaction != true,
-              !ownsSparklePreparation, applicationLifecycle.state == .active else {
+              !ownsSparklePreparation, !ownsPermissionRestartPreparation,
+              applicationLifecycle.state == .active else {
             throw ApplicationLifecycleCoordinator.SafetyError.preparationInProgress
         }
         // Reserve before the first suspension, including appWillTerminate hooks.
@@ -423,6 +449,7 @@ final class AppModel: ObservableObject {
             guard let self else { return false }
             return !AppTerminationCoordinator.shared.isQuitting
                 && !ownsSparklePreparation
+                && !ownsPermissionRestartPreparation
                 && !AppUpdateCoordinator.shared.isPreparingInstallation
                 && applicationLifecycle.state == .active
         }, prepare: { [weak self] in

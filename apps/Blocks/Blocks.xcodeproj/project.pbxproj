@@ -7,6 +7,11 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B06700000000000000000001 /* PermissionRecoveryState.swift in Sources */ = {isa = PBXBuildFile; fileRef = F06700000000000000000001; };
+		B06700000000000000000002 /* PermissionRecoveryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F06700000000000000000002; };
+		B06700000000000000000003 /* SelectionHelperSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F06700000000000000000003; };
+		B06700000000000000000004 /* PermissionRecoveryFlowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F06700000000000000000004; };
+		B06700000000000000000005 /* SelectionHelperSetupFlowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F06700000000000000000005; };
 		B06500000000000000000001 /* ActionBrokerZombieProcessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F06500000000000000000001; };
 		B06500000000000000000002 /* ShortcutStartupLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F06500000000000000000002; };
 		B06500000000000000000003 /* ClipboardPasteWindowRoutingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F06500000000000000000003; };
@@ -561,6 +566,11 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		F06700000000000000000001 /* PermissionRecoveryState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Permissions/PermissionRecoveryState.swift; sourceTree = "<group>"; };
+		F06700000000000000000002 /* PermissionRecoveryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Permissions/PermissionRecoveryView.swift; sourceTree = "<group>"; };
+		F06700000000000000000003 /* SelectionHelperSetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Translation/Entry/SelectionHelperSetupView.swift; sourceTree = "<group>"; };
+		F06700000000000000000004 /* PermissionRecoveryFlowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionRecoveryFlowTests.swift; sourceTree = "<group>"; };
+		F06700000000000000000005 /* SelectionHelperSetupFlowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionHelperSetupFlowTests.swift; sourceTree = "<group>"; };
 		F06500000000000000000001 /* ActionBrokerZombieProcessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActionBrokerZombieProcessTests.swift; sourceTree = "<group>"; };
 		F06500000000000000000002 /* ShortcutStartupLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShortcutStartupLifecycleTests.swift; sourceTree = "<group>"; };
 		F06500000000000000000003 /* ClipboardPasteWindowRoutingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardPasteWindowRoutingTests.swift; sourceTree = "<group>"; };
@@ -1152,6 +1162,8 @@
 				F14H00000000000000000001 /* ScreenshotSettingsStateTests.swift */,
 				F17T00000000000000000002 /* AppAppearanceTests.swift */,
 				F99900000000000000000002 /* PermissionRestartTests.swift */,
+				F06700000000000000000004 /* PermissionRecoveryFlowTests.swift */,
+				F06700000000000000000005 /* SelectionHelperSetupFlowTests.swift */,
 				F15C00000000000000000002 /* LocalVisionOCRServiceTests.swift */,
 				F15C00000000000000000003 /* TranslationStoreTests.swift */,
 				F15E00000000000000000003 /* ScreenshotHistoryActionServiceTests.swift */,
@@ -1401,6 +1413,9 @@
 					F13C0000000000000000000E /* PermissionAssistPanelView.swift */,
 					F3010000000000000000003C /* PermissionStore.swift */,
 					F3010000000000000000003D /* PermissionSystemActions.swift */,
+					F06700000000000000000001 /* PermissionRecoveryState.swift */,
+					F06700000000000000000002 /* PermissionRecoveryView.swift */,
+					F06700000000000000000003 /* SelectionHelperSetupView.swift */,
 					F99900000000000000000001 /* PermissionRelaunchProcess.swift */,
 					F3010000000000000000003E /* ScreenshotStore.swift */,
 					F3010000000000000000003F /* ShortcutStore.swift */,
@@ -2091,6 +2106,9 @@
 					B0030000000000000000005E /* PermissionFeatureCoordinator.swift in Sources */,
 					B0030000000000000000003D /* PermissionStore.swift in Sources */,
 					B0030000000000000000003E /* PermissionSystemActions.swift in Sources */,
+					B06700000000000000000001 /* PermissionRecoveryState.swift in Sources */,
+					B06700000000000000000002 /* PermissionRecoveryView.swift in Sources */,
+					B06700000000000000000003 /* SelectionHelperSetupView.swift in Sources */,
 					B99900000000000000000001 /* PermissionRelaunchProcess.swift in Sources */,
 					B0030000000000000000003F /* ScreenshotStore.swift in Sources */,
 					B00300000000000000000040 /* ShortcutStore.swift in Sources */,
@@ -2313,6 +2331,8 @@
 				B14H00000000000000000001 /* ScreenshotSettingsStateTests.swift in Sources */,
 				B17T00000000000000000002 /* AppAppearanceTests.swift in Sources */,
 				B99900000000000000000002 /* PermissionRestartTests.swift in Sources */,
+				B06700000000000000000004 /* PermissionRecoveryFlowTests.swift in Sources */,
+				B06700000000000000000005 /* SelectionHelperSetupFlowTests.swift in Sources */,
 				B15R00000000000000000001 /* ClipboardScreenshotHistoryRepositoryTests.swift in Sources */,
 				B04300000000000000000003 /* ClipboardManagementTests.swift in Sources */,
 				B04700000000000000000003 /* CLIModuleAccessTests.swift in Sources */,

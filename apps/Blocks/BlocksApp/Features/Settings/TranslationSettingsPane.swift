@@ -562,6 +562,7 @@ struct TranslationSettingsPane: View {
     @State private var serviceProfilePendingDeletion:
         TranslationServiceProfile?
     @State private var openAIServiceEditorPresented = false
+    @State private var selectionHelperSetupPresented = false
     @State private var communityServicePendingEnable:
         TranslationServiceDescriptor?
     @State private var serviceProfileFeedbacks:
@@ -709,6 +710,9 @@ struct TranslationSettingsPane: View {
                     translationStore.refreshServiceRegistry()
                 }
                 .environmentObject(appModel)
+            }
+            .sheet(isPresented: $selectionHelperSetupPresented) {
+                SelectionHelperSetupView(controller: selectionHelperController)
             }
     }
 
@@ -1538,60 +1542,6 @@ struct TranslationSettingsPane: View {
                 }
             }
 
-            if case .notPaired =
-                selectionHelperController.state {
-                SettingsRowDivider()
-                SettingsFormRow(
-                    title: L10n.string(
-                        "translation.selectionHelper.pairingCode"
-                    ),
-                    detail: L10n.string(
-                        "translation.selectionHelper.pairingCode.detail"
-                    )
-                ) {
-                    HStack(spacing: 8) {
-                        TextField(
-                            "000000",
-                            text: Binding(
-                                get: { selectionHelperController.pairingCode },
-                                set: { selectionHelperController.pairingCode = $0 }
-                            )
-                        )
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 92)
-                        .onChange(
-                            of:
-                                selectionHelperController
-                                    .pairingCode
-                        ) { _, value in
-                            let normalized =
-                                String(
-                                    value
-                                        .filter(\.isNumber)
-                                        .prefix(6)
-                                )
-                            if normalized != value {
-                                selectionHelperController
-                                    .pairingCode =
-                                    normalized
-                            }
-                        }
-
-                        Button(
-                            L10n.string(
-                                "translation.selectionHelper.pair"
-                            )
-                        ) {
-                            selectionHelperController.pair()
-                        }
-                        .disabled(
-                            selectionHelperController
-                                .pairingCode.count != 6
-                        )
-                    }
-                }
-            }
-
             if let error = selectionHelperController.lastError {
                 SettingsRowDivider()
                 SettingsInlineFeedback(
@@ -1721,10 +1671,10 @@ struct TranslationSettingsPane: View {
             HStack(spacing: 8) {
                 Button(
                     L10n.string(
-                        "translation.selectionHelper.open"
+                        "translation.selectionHelper.setup.action"
                     )
                 ) {
-                    selectionHelperController.openHelper()
+                    selectionHelperSetupPresented = true
                 }
                 Button(
                     L10n.string(
@@ -1745,29 +1695,14 @@ struct TranslationSettingsPane: View {
         case .notPaired:
             Button(
                 L10n.string(
-                    "translation.selectionHelper.open"
+                    "translation.selectionHelper.setup.action"
                 )
             ) {
-                selectionHelperController.openHelper()
+                selectionHelperSetupPresented = true
             }
         case .missingAccessibilityPermission:
-            HStack(spacing: 8) {
-                Button(
-                    L10n.string(
-                        "translation.selectionHelper.requestPermission"
-                    )
-                ) {
-                    selectionHelperController
-                        .requestAccessibilityPermission()
-                }
-                Button(
-                    L10n.string(
-                        "translation.selectionHelper.openPermissionSettings"
-                    )
-                ) {
-                    selectionHelperController
-                        .openAccessibilitySettings()
-                }
+            Button(L10n.string("translation.selectionHelper.setup.action")) {
+                selectionHelperSetupPresented = true
             }
         case .ready:
             HStack(spacing: 8) {
@@ -1798,10 +1733,10 @@ struct TranslationSettingsPane: View {
         case .connectionFailed:
             Button(
                 L10n.string(
-                    "translation.selectionHelper.recheck"
+                    "translation.selectionHelper.setup.action"
                 )
             ) {
-                selectionHelperController.refresh()
+                selectionHelperSetupPresented = true
             }
         }
     }

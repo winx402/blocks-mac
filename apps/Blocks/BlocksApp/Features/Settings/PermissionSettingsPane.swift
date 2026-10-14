@@ -7,10 +7,15 @@ struct PermissionSettingsPane: View {
     @EnvironmentObject private var permissionStore: PermissionStore
     @State private var diagnosticsExpanded = false
     @State private var permissionHelpExpanded = false
-    @State private var restartFeedback: SettingsFeedbackDescriptor?
+    @State private var recoveryPresented = false
 
     var body: some View {
         content
+            .onAppear { recoveryPresented = permissionStore.recoveryState != nil }
+            .sheet(isPresented: $recoveryPresented) {
+                PermissionRecoveryView()
+                    .environmentObject(permissionStore)
+            }
     }
 
     @ViewBuilder
@@ -20,12 +25,14 @@ struct PermissionSettingsPane: View {
         ) {
             PermissionDiagnosticRow(
                 diagnostic: permissionStore.permissionSnapshot.screenRecording,
-                requestAction: appModel.requestScreenRecordingPermissionAssist
+                requestAction: appModel.requestScreenRecordingPermissionAssist,
+                recoveryAction: { beginRecovery(.screenRecording) }
             )
             SettingsRowDivider()
             PermissionDiagnosticRow(
                 diagnostic: permissionStore.permissionSnapshot.accessibility,
-                requestAction: appModel.requestAccessibilityPermissionAssist
+                requestAction: appModel.requestAccessibilityPermissionAssist,
+                recoveryAction: { beginRecovery(.accessibility) }
             )
             if let controller = appModel.selectionHelperSettingsController {
                 SettingsRowDivider()
@@ -34,14 +41,13 @@ struct PermissionSettingsPane: View {
             SettingsRowDivider()
             PermissionDiagnosticRow(
                 diagnostic: permissionStore.permissionSnapshot.inputMonitoring,
-                requestAction: { permissionStore.requestInputMonitoringPermissionAssist() }
+                requestAction: { permissionStore.requestInputMonitoringPermissionAssist() },
+                recoveryAction: { beginRecovery(.inputMonitoring) }
             )
             SettingsRowDivider()
             SettingsActionRow(
                 title: L10n.string("settings.permissionRefresh"),
-                detail: permissionStore.permissionSnapshot.screenRecordingRestartLikely
-                    ? L10n.string("status.screenRecordingRestartRequired.detail")
-                    : nil
+                detail: nil
             ) {
                 Button {
                     appModel.refreshPermissionState()
@@ -51,27 +57,6 @@ struct PermissionSettingsPane: View {
                         systemImage: "arrow.clockwise"
                     )
                 }
-                if permissionStore.permissionSnapshot.screenRecordingRestartLikely {
-                    Button {
-                        restartFeedback = nil
-                        appModel.restartForPermissionRefresh { result in
-                            guard result == .failed else {
-                                return
-                            }
-                            restartFeedback = SettingsFeedbackDescriptor(
-                                kind: .error,
-                                title: L10n.string("permission.assist.state.failed"),
-                                detail: L10n.string("settings.permissionActionReopen")
-                            )
-                        }
-                    } label: {
-                        Label(L10n.string("settings.permissionRestartApp"), systemImage: "power")
-                    }
-                }
-            }
-            if permissionStore.permissionSnapshot.screenRecordingRestartLikely {
-                SettingsRowDivider()
-                SettingsFeedbackSlot(feedback: restartFeedback)
             }
         }
 
@@ -103,6 +88,16 @@ struct PermissionSettingsPane: View {
                             PermissionDiagnosticCard(diagnostic: permissionStore.permissionSnapshot.accessibility)
                             Divider()
                             PermissionDiagnosticCard(diagnostic: permissionStore.permissionSnapshot.inputMonitoring)
+                            Divider()
+                            LabeledContent("CGPreflightPostEventAccess") {
+                                Text(permissionStore.permissionSnapshot.postEventAccessGranted.map(String.init) ?? "—")
+                            }
+                            LabeledContent(L10n.string("settings.permissionRecovery.sample")) {
+                                Text(permissionStore.permissionSnapshot.capturedAt, style: .time)
+                            }
+                            LabeledContent("PID") {
+                                Text(permissionStore.permissionSnapshot.sampledProcessID.map(String.init) ?? "—")
+                            }
                         }
                         .padding(.vertical, BlocksVisualTokens.Spacing.sm)
                     } label: {
@@ -124,10 +119,16 @@ struct PermissionSettingsPane: View {
             .padding(.vertical, SettingsLayout.rowVerticalPadding)
         }
     }
+
+    private func beginRecovery(_ kind: PermissionDiagnosticKind) {
+        permissionStore.beginPermissionRecovery(for: kind)
+        recoveryPresented = true
+    }
 }
 
 private struct SelectionHelperPermissionStatusRow: View {
     @ObservedObject var controller: SelectionHelperSettingsController
+    @State private var setupPresented = false
 
     var body: some View {
         SettingsStatusRow(
@@ -153,6 +154,9 @@ private struct SelectionHelperPermissionStatusRow: View {
         .accessibilityElement(children: .contain)
         .accessibilityLabel(L10n.string("translation.selectionHelper.title"))
         .accessibilityValue(stateDetail)
+        .sheet(isPresented: $setupPresented) {
+            SelectionHelperSetupView(controller: controller)
+        }
     }
 
     private var status: SettingsRowStatus {
@@ -211,24 +215,17 @@ private struct SelectionHelperPermissionStatusRow: View {
             Button(L10n.string("translation.selectionHelper.download")) {
                 controller.openDownloadPage()
             }
-        case .notRunning, .notPaired:
-            Button(L10n.string("translation.selectionHelper.open")) {
-                controller.openHelper()
-            }
-        case .missingAccessibilityPermission:
-            Button(L10n.string("translation.selectionHelper.requestPermission")) {
-                controller.requestAccessibilityPermission()
-            }
-            Button(L10n.string("translation.selectionHelper.openPermissionSettings")) {
-                controller.openAccessibilitySettings()
+        case .notRunning, .notPaired, .missingAccessibilityPermission, .connectionFailed:
+            Button(L10n.string("translation.selectionHelper.setup.action")) {
+                setupPresented = true
             }
         case .versionOutdated:
             Button(L10n.string("translation.selectionHelper.update")) {
                 controller.openDownloadPage()
             }
-        case .ready, .installationConflict, .connectionFailed:
+        case .ready, .installationConflict:
             Button(L10n.string("translation.selectionHelper.recheck")) {
-                controller.refresh()
+                controller.refresh(allowLaunch: false)
             }
         }
     }
@@ -286,6 +283,16 @@ struct PermissionDiagnosticCard: View {
                             .textSelection(.enabled)
                     }
                 }
+            }
+            if let command = diagnostic.manualTCCResetCommand {
+                Text(L10n.string("settings.permissionRecovery.manualOnly"))
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(command)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                    .accessibilityLabel(L10n.string("settings.permissionRecovery.commandAccessibility"))
+                Text(L10n.string("settings.permissionRecovery.consequence"))
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .font(.caption)
@@ -359,8 +366,7 @@ struct PermissionDiagnosticCard: View {
 struct PermissionDiagnosticRow: View {
     let diagnostic: PermissionDiagnosticSnapshot
     let requestAction: () -> Void
-    @State private var recoveryConfirmationPresented = false
-    @State private var recoveryGuidancePresented = false
+    var recoveryAction: () -> Void = {}
 
     var body: some View {
         SettingsRowShell(
@@ -370,35 +376,16 @@ struct PermissionDiagnosticRow: View {
         ) {
             HStack(spacing: BlocksVisualTokens.Spacing.sm) {
                 Label(
-                    diagnostic.granted ? L10n.string("settings.granted") : L10n.string("settings.missing"),
+                    diagnostic.granted ? L10n.string("settings.granted") : L10n.string("settings.permissionRecovery.notDetected"),
                     systemImage: diagnostic.granted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
                 )
                 .font(.caption.weight(.medium))
                 .foregroundStyle(diagnostic.granted ? .green : .orange)
                 if !diagnostic.granted {
                     Button(requestButtonTitle, action: requestAction)
-                    if diagnostic.manualTCCResetCommand != nil {
-                        Button(L10n.string("settings.permissionAlreadyEnabled")) {
-                            recoveryConfirmationPresented = true
-                        }
-                    }
+                    Button(L10n.string("settings.permissionAlreadyEnabled"), action: recoveryAction)
                 }
             }
-        }
-        .confirmationDialog(
-            L10n.string("settings.permissionRecovery.confirmationTitle"),
-            isPresented: $recoveryConfirmationPresented,
-            titleVisibility: .visible
-        ) {
-            Button(L10n.string("settings.permissionRecovery.confirm")) {
-                recoveryGuidancePresented = true
-            }
-            Button(L10n.string("common.cancel"), role: .cancel) {}
-        } message: {
-            Text(L10n.string("settings.permissionRecovery.confirmationDetail"))
-        }
-        .sheet(isPresented: $recoveryGuidancePresented) {
-            PermissionTCCRecoverySheet(diagnostic: diagnostic)
         }
     }
 
@@ -426,54 +413,6 @@ struct PermissionDiagnosticRow: View {
 
     private var recommendedActionText: String {
         diagnostic.recommendedAction.localizedPrimaryRowDetail
-    }
-}
-
-private struct PermissionTCCRecoverySheet: View {
-    let diagnostic: PermissionDiagnosticSnapshot
-    @Environment(\.dismiss) private var dismiss
-
-    var body: some View {
-        SettingsSheetScaffold(
-            title: L10n.string("settings.permissionRecovery.title"),
-            detail: L10n.string("settings.permissionRecovery.subtitle"),
-            systemImage: "exclamationmark.triangle",
-            preferredHeight: 440
-        ) {
-            VStack(alignment: .leading, spacing: BlocksVisualTokens.Spacing.md) {
-                Label(
-                    L10n.string("settings.permissionRecovery.unverifiedCause"),
-                    systemImage: "questionmark.circle"
-                )
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(.secondary)
-
-                Text(L10n.string("settings.permissionRecovery.manualOnly"))
-                    .font(.subheadline)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                if let command = diagnostic.manualTCCResetCommand {
-                    Text(command)
-                        .font(.system(.body, design: .monospaced))
-                        .textSelection(.enabled)
-                        .padding(BlocksVisualTokens.Spacing.sm)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .blocksSurface(
-                            .section,
-                            cornerRadius: BlocksVisualTokens.CornerRadius.control
-                        )
-                        .accessibilityLabel(L10n.string("settings.permissionRecovery.commandAccessibility"))
-                }
-
-                Text(L10n.string("settings.permissionRecovery.consequence"))
-                    .font(.subheadline)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        } actions: {
-            Button(L10n.string("common.close")) {
-                dismiss()
-            }
-        }
     }
 }
 

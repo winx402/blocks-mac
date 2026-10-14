@@ -12,6 +12,8 @@ enum PermissionStateService {
         let screenRecordingGranted: Bool
         let accessibilityGranted: Bool
         let inputMonitoringGranted: Bool
+        let postEventAccessGranted: Bool
+        let sampledProcessID: Int32
         let capturedAt: Date
     }
 
@@ -41,6 +43,7 @@ enum PermissionStateService {
         let screenRecordingGranted = ScreenRecordingPermission.isAuthorized
         let accessibilityGranted = AXIsProcessTrusted()
         let inputMonitoringGranted = CGPreflightListenEventAccess()
+        let postEventAccessGranted = CGPreflightPostEventAccess()
         return SnapshotContext(
             bundleID: bundleID,
             appPath: appPath,
@@ -49,6 +52,8 @@ enum PermissionStateService {
             screenRecordingGranted: screenRecordingGranted,
             accessibilityGranted: accessibilityGranted,
             inputMonitoringGranted: inputMonitoringGranted,
+            postEventAccessGranted: postEventAccessGranted,
+            sampledProcessID: getpid(),
             capturedAt: Date()
         )
     }
@@ -127,7 +132,9 @@ enum PermissionStateService {
                 matchingRunningAppPaths: context.matchingRunningPaths,
                 identityIssue: inputMonitoringIssue
             ),
-            capturedAt: context.capturedAt
+            capturedAt: context.capturedAt,
+            postEventAccessGranted: context.postEventAccessGranted,
+            sampledProcessID: context.sampledProcessID
         )
     }
 

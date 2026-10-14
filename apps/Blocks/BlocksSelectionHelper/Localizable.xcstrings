@@ -31,23 +31,30 @@
     },
     "selectionHelper.connection.failed" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Local connection failed: %@" } },
-        "ja" : { "stringUnit" : { "state" : "translated", "value" : "ローカル接続に失敗しました：%@" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "本机连接失败：%@" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Local communication service failed: %@" } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "ローカル通信サービスに失敗しました：%@" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "本机通信服务失败：%@" } }
       }
     },
-    "selectionHelper.connection.ready" : {
+    "selectionHelper.connection.paired" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Local connection ready" } },
-        "ja" : { "stringUnit" : { "state" : "translated", "value" : "ローカル接続の準備ができました" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "本机连接已就绪" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Paired. Check connection and permissions in Blocks." } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "ペアリング済み。Blocks で接続と権限を確認してください。" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已配对，请在积木工具中检查连接与权限" } }
+      }
+    },
+    "selectionHelper.connection.waitingForPairing" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Waiting to connect to Blocks. Enter the code in Permissions → Selection Helper → Complete Setup." } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "Blocks への接続を待っています。権限 → 選択ヘルパー → 設定を完了でコードを入力してください。" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "等待连接积木工具，请在权限 → 划词助手 → 完成设置中输入配对码" } }
       }
     },
     "selectionHelper.connection.starting" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Starting local connection…" } },
-        "ja" : { "stringUnit" : { "state" : "translated", "value" : "ローカル接続を開始しています…" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在启动本机连接…" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Starting local communication service…" } },
+        "ja" : { "stringUnit" : { "state" : "translated", "value" : "ローカル通信サービスを起動しています…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在启动本机通信服务…" } }
       }
     },
     "selectionHelper.detail" : {

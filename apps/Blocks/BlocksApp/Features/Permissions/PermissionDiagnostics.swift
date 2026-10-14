@@ -1,6 +1,6 @@
 import Foundation
 
-enum PermissionDiagnosticKind: String, Equatable {
+enum PermissionDiagnosticKind: String, Equatable, Codable {
     case screenRecording
     case accessibility
     case inputMonitoring
@@ -89,6 +89,18 @@ struct PermissionStateSnapshot: Equatable {
     let accessibility: PermissionDiagnosticSnapshot
     let inputMonitoring: PermissionDiagnosticSnapshot
     let capturedAt: Date
+    // These are distinct process checks. AX trust alone does not establish
+    // permission to post synthetic events into another application.
+    var postEventAccessGranted: Bool? = nil
+    var sampledProcessID: Int32? = nil
+
+    func diagnostic(for kind: PermissionDiagnosticKind) -> PermissionDiagnosticSnapshot {
+        switch kind {
+        case .screenRecording: screenRecording
+        case .accessibility: accessibility
+        case .inputMonitoring: inputMonitoring
+        }
+    }
 
     var screenRecordingGranted: Bool {
         screenRecording.granted

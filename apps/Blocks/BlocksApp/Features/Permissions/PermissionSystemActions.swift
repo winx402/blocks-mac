@@ -1,5 +1,6 @@
 import AppKit
 import BlocksCore
+import OSLog
 
 enum PermissionRestartResult: Equatable {
     /// A separate launcher has accepted the handoff. The app has not quit yet.
@@ -113,13 +114,68 @@ final class DefaultPermissionAssistPresenter: PermissionAssistPresenting {
 }
 
 @MainActor
+final class PermissionRestartSafety {
+    typealias Prepare = @MainActor () async throws -> Void
+    typealias Resume = @MainActor () async -> Void
+
+    static let shared = PermissionRestartSafety()
+
+    fileprivate final class Attempt {
+        let prepare: Prepare
+        let resume: Resume
+
+        init(prepare: @escaping Prepare, resume: @escaping Resume) {
+            self.prepare = prepare
+            self.resume = resume
+        }
+    }
+
+    private var prepare: Prepare?
+    private var resume: Resume?
+    private var activeAttempt: Attempt?
+
+    init(prepare: Prepare? = nil, resume: Resume? = nil) {
+        self.prepare = prepare
+        self.resume = resume
+    }
+
+    /// AppModel installs full reversible lifecycle coverage. Missing setup is
+    /// deliberately a failure; a restart must never fall back to ordinary quit.
+    func configure(prepare: @escaping Prepare, resume: @escaping Resume) {
+        guard activeAttempt == nil else { return }
+        self.prepare = prepare
+        self.resume = resume
+    }
+
+    fileprivate func reserveAttempt() -> Attempt? {
+        guard activeAttempt == nil, let prepare, let resume else { return nil }
+        let attempt = Attempt(prepare: prepare, resume: resume)
+        activeAttempt = attempt
+        return attempt
+    }
+
+    fileprivate func releaseAttempt(_ attempt: Attempt) {
+        guard activeAttempt === attempt else { return }
+        activeAttempt = nil
+    }
+}
+
+@MainActor
 struct DefaultPermissionSystemActions: PermissionSystemActioning {
     typealias Relauncher = @MainActor (URL, pid_t, @escaping @Sendable (pid_t?, Error?) -> Void) -> Void
+    typealias HandoffCanceller = @MainActor (pid_t) async -> Bool
+    typealias HandoffCommitter = @MainActor (pid_t) -> Bool
 
     private let relauncher: Relauncher
+    private let cancelHandoff: HandoffCanceller
+    private let commitHandoff: HandoffCommitter
     private let applicationTerminator: @MainActor () -> Void
     private let bundleURL: URL
     private let processID: pid_t
+    private let safety: PermissionRestartSafety
+    private let terminationCoordinator: AppTerminationCoordinator
+    private let preparationTimeoutNanoseconds: UInt64
+    private let handoffTimeoutNanoseconds: UInt64
     private let restartGate = PermissionRestartGate()
 
     init(
@@ -134,12 +190,28 @@ struct DefaultPermissionSystemActions: PermissionSystemActioning {
             NSApp.terminate(nil)
         },
         bundleURL: URL = Bundle.main.bundleURL,
-        processID: pid_t = getpid()
+        processID: pid_t = getpid(),
+        safety: PermissionRestartSafety? = nil,
+        terminationCoordinator: AppTerminationCoordinator? = nil,
+        preparationTimeoutNanoseconds: UInt64 = 5_000_000_000,
+        handoffTimeoutNanoseconds: UInt64 = 15_000_000_000,
+        cancelHandoff: @escaping HandoffCanceller = { parentProcessID in
+            await PermissionRelaunchProcess.cancelOwnedHandoff(parentProcessID: parentProcessID)
+        },
+        commitHandoff: @escaping HandoffCommitter = { parentProcessID in
+            PermissionRelaunchProcess.commitOwnedHandoff(parentProcessID: parentProcessID)
+        }
     ) {
         self.relauncher = relauncher
+        self.cancelHandoff = cancelHandoff
+        self.commitHandoff = commitHandoff
         self.applicationTerminator = applicationTerminator
         self.bundleURL = bundleURL
         self.processID = processID
+        self.safety = safety ?? .shared
+        self.terminationCoordinator = terminationCoordinator ?? .shared
+        self.preparationTimeoutNanoseconds = min(preparationTimeoutNanoseconds, 5_000_000_000)
+        self.handoffTimeoutNanoseconds = handoffTimeoutNanoseconds
     }
 
     func openScreenRecordingSettings() {
@@ -156,83 +228,268 @@ struct DefaultPermissionSystemActions: PermissionSystemActioning {
     func restartForPermissionRefresh(
         completion: @escaping (PermissionRestartResult) -> Void
     ) {
-        guard restartGate.enqueue(completion) else { return }
+        guard let requestID = restartGate.enqueue(completion) else { return }
+        guard !terminationCoordinator.isQuitting,
+              let attempt = safety.reserveAttempt() else {
+            restartGate.resolve(.failed, requestID: requestID)
+            return
+        }
         let restartHandler = PermissionRestartHandler(
             terminator: applicationTerminator,
             restartGate: restartGate,
-            parentProcessID: processID
+            requestID: requestID,
+            parentProcessID: processID,
+            safety: safety,
+            attempt: attempt,
+            terminationCoordinator: terminationCoordinator,
+            preparationTimeoutNanoseconds: preparationTimeoutNanoseconds,
+            handoffTimeoutNanoseconds: handoffTimeoutNanoseconds,
+            cancelHandoff: cancelHandoff,
+            commitHandoff: commitHandoff
         )
-        relauncher(bundleURL, processID) { childProcessID, error in
-            let didStart = error == nil
-            if Thread.isMainThread {
-                MainActor.assumeIsolated {
-                    restartHandler.complete(childProcessID: childProcessID, didStart: didStart)
-                }
-            } else {
-                Task { @MainActor in
-                    restartHandler.complete(childProcessID: childProcessID, didStart: didStart)
-                }
-            }
-        }
+        restartHandler.start(relauncher: relauncher, bundleURL: bundleURL)
     }
 }
 
 @MainActor
 private final class PermissionRestartGate {
-    private var hasRequest = false
+    private var requestID: UUID?
     private var result: PermissionRestartResult?
+    private var isRecovering = false
     private var callbacks: [(PermissionRestartResult) -> Void] = []
 
-    /// Returns true only for the first request. Concurrent taps receive the
+    /// Returns a token only for the first request. Concurrent taps receive the
     /// same eventual result rather than a premature success indication.
-    func enqueue(_ completion: @escaping (PermissionRestartResult) -> Void) -> Bool {
+    func enqueue(_ completion: @escaping (PermissionRestartResult) -> Void) -> UUID? {
+        if isRecovering {
+            completion(.failed)
+            return nil
+        }
         if let result {
             completion(result)
-            return false
+            return nil
         }
         callbacks.append(completion)
-        guard !hasRequest else { return false }
-        hasRequest = true
-        return true
+        guard requestID == nil else { return nil }
+        let requestID = UUID()
+        self.requestID = requestID
+        return requestID
     }
 
-    func resolve(_ result: PermissionRestartResult) {
+    func resolve(_ result: PermissionRestartResult, requestID: UUID) {
+        guard self.requestID == requestID else { return }
         self.result = result == .scheduled ? result : nil
-        hasRequest = result == .scheduled
+        if result == .failed {
+            self.requestID = nil
+            isRecovering = false
+        }
         let callbacks = self.callbacks
         self.callbacks.removeAll()
         callbacks.forEach { $0(result) }
+    }
+
+    func markRecovering(requestID: UUID) {
+        guard self.requestID == requestID else { return }
+        isRecovering = true
     }
 }
 
 @MainActor
 private final class PermissionRestartHandler {
+    private enum Phase: Equatable { case preparing, launching, handedOff, recovering, finished }
+    private static let logger = Logger(subsystem: "app.blocks", category: "PermissionRestart")
     private let terminator: @MainActor () -> Void
     private let restartGate: PermissionRestartGate
+    private let requestID: UUID
     private let parentProcessID: pid_t
-    private var hasCompleted = false
+    private let safety: PermissionRestartSafety
+    private let attempt: PermissionRestartSafety.Attempt
+    private let terminationCoordinator: AppTerminationCoordinator
+    private let preparationTimeoutNanoseconds: UInt64
+    private let handoffTimeoutNanoseconds: UInt64
+    private let cancelHandoff: DefaultPermissionSystemActions.HandoffCanceller
+    private let commitHandoff: DefaultPermissionSystemActions.HandoffCommitter
+    private var phase: Phase = .preparing
+    private var preparationHasFinished = false
+    private var preparationTask: Task<Void, Never>?
+    private var preparationDeadline: Task<Void, Never>?
+    private var handoffDeadline: Task<Void, Never>?
+    private var recoveryIsRunning = false
+    private var failureWasReported = false
+    private var ownsPreparedRestart = false
+    private var handoffWasStarted = false
 
     init(
         terminator: @escaping @MainActor () -> Void,
         restartGate: PermissionRestartGate,
-        parentProcessID: pid_t
+        requestID: UUID,
+        parentProcessID: pid_t,
+        safety: PermissionRestartSafety,
+        attempt: PermissionRestartSafety.Attempt,
+        terminationCoordinator: AppTerminationCoordinator,
+        preparationTimeoutNanoseconds: UInt64,
+        handoffTimeoutNanoseconds: UInt64,
+        cancelHandoff: @escaping DefaultPermissionSystemActions.HandoffCanceller,
+        commitHandoff: @escaping DefaultPermissionSystemActions.HandoffCommitter
     ) {
         self.terminator = terminator
         self.restartGate = restartGate
+        self.requestID = requestID
         self.parentProcessID = parentProcessID
+        self.safety = safety
+        self.attempt = attempt
+        self.terminationCoordinator = terminationCoordinator
+        self.preparationTimeoutNanoseconds = preparationTimeoutNanoseconds
+        self.handoffTimeoutNanoseconds = handoffTimeoutNanoseconds
+        self.cancelHandoff = cancelHandoff
+        self.commitHandoff = commitHandoff
+    }
+
+    func start(relauncher: @escaping DefaultPermissionSystemActions.Relauncher, bundleURL: URL) {
+        log("preparing")
+        preparationDeadline = Task { @MainActor [self] in
+            do { try await Task.sleep(nanoseconds: preparationTimeoutNanoseconds) }
+            catch { return }
+            guard phase == .preparing else { return }
+            fail(stage: "preparation_timeout")
+        }
+        // Do not use a task group for this deadline: a non-cooperative prepare
+        // would make the group's implicit child join unbounded.
+        preparationTask = Task { @MainActor [self] in
+            let succeeded: Bool
+            do {
+                try Task.checkCancellation()
+                try await attempt.prepare()
+                try Task.checkCancellation()
+                succeeded = true
+            } catch {
+                succeeded = false
+            }
+            preparationHasFinished = true
+            preparationTask = nil
+            if phase == .recovering {
+                beginRecovery()
+                return
+            }
+            guard phase == .preparing else { return }
+            preparationDeadline?.cancel()
+            preparationDeadline = nil
+            guard succeeded else {
+                fail(stage: "preparation_failed")
+                return
+            }
+            guard !terminationCoordinator.isQuitting else {
+                fail(stage: "quit_conflict")
+                return
+            }
+            phase = .launching
+            handoffWasStarted = true
+            log("prepared")
+            relauncher(bundleURL, parentProcessID) { [self] childProcessID, error in
+                let didStart = error == nil
+                if Thread.isMainThread {
+                    MainActor.assumeIsolated {
+                        complete(childProcessID: childProcessID, didStart: didStart)
+                    }
+                } else {
+                    Task { @MainActor in
+                        complete(childProcessID: childProcessID, didStart: didStart)
+                    }
+                }
+            }
+        }
     }
 
     func complete(childProcessID: pid_t?, didStart: Bool) {
-        guard !hasCompleted else { return }
-        hasCompleted = true
+        guard phase == .launching else { return }
         guard didStart,
               let childProcessID,
               childProcessID > 0,
               childProcessID != parentProcessID else {
-            restartGate.resolve(.failed)
+            fail(stage: "handoff_failed")
             return
         }
-        restartGate.resolve(.scheduled)
+        guard terminationCoordinator.armPreparedRestart() else {
+            fail(stage: "quit_conflict")
+            return
+        }
+        ownsPreparedRestart = true
+        guard commitHandoff(parentProcessID) else {
+            fail(stage: "handoff_commit_failed")
+            return
+        }
+        phase = .handedOff
+        log("handoff_ready", childProcessID: childProcessID)
+        handoffDeadline = Task { @MainActor [self] in
+            do { try await Task.sleep(nanoseconds: handoffTimeoutNanoseconds) }
+            catch { return }
+            guard phase == .handedOff else { return }
+            // This is recovery, not a second quit request. The launcher also
+            // times out without opening the app while this PID still exists.
+            fail(stage: "handoff_timeout")
+        }
+        restartGate.resolve(.scheduled, requestID: requestID)
         terminator()
+    }
+
+    private func fail(stage: String) {
+        guard phase != .recovering, phase != .finished else { return }
+        phase = .recovering
+        restartGate.markRecovering(requestID: requestID)
+        preparationDeadline?.cancel()
+        preparationDeadline = nil
+        handoffDeadline?.cancel()
+        handoffDeadline = nil
+        preparationTask?.cancel()
+        if ownsPreparedRestart {
+            _ = terminationCoordinator.beginPreparedRestartRecovery()
+        }
+        log(stage)
+        if preparationHasFinished {
+            beginRecovery()
+        } else {
+            // Cancellation cannot prove an uncooperative participant has stopped.
+            // Report the bounded failure now, but keep both safety and AppModel
+            // ownership until the real prepare returns and can be resumed.
+            reportFailureIfNeeded()
+        }
+    }
+
+    private func beginRecovery() {
+        guard phase == .recovering, preparationHasFinished, !recoveryIsRunning else { return }
+        recoveryIsRunning = true
+        Task { @MainActor [self] in
+            if handoffWasStarted {
+                while !(await cancelHandoff(parentProcessID)) {
+                    // A false result is an unproven exit, not permission to
+                    // reopen producers, drop ownership or start another launch.
+                    log("launcher_cancel_timeout")
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
+                log("launcher_cancel_confirmed")
+            }
+            if ownsPreparedRestart {
+                _ = terminationCoordinator.cancelPreparedRestart()
+                ownsPreparedRestart = false
+            }
+            // A manual Quit wins over a reversible restart. Never ask business
+            // services to reopen after its synchronous quit fence is committed.
+            if !terminationCoordinator.isQuitting { await attempt.resume() }
+            recoveryIsRunning = false
+            phase = .finished
+            safety.releaseAttempt(attempt)
+            log(terminationCoordinator.isQuitting ? "quit_committed" : "recovered")
+            reportFailureIfNeeded()
+        }
+    }
+
+    private func reportFailureIfNeeded() {
+        guard !failureWasReported else { return }
+        failureWasReported = true
+        restartGate.resolve(.failed, requestID: requestID)
+    }
+
+    private func log(_ stage: String, childProcessID: pid_t = 0) {
+        Self.logger.info("Permission restart stage=\(stage, privacy: .public) parent_pid=\(self.parentProcessID, privacy: .public) launcher_pid=\(childProcessID, privacy: .public)")
     }
 }

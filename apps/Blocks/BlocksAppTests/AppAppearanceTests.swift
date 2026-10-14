@@ -3414,7 +3414,7 @@ final class AppAppearanceTests: XCTestCase {
         XCTAssertFalse(window.isVisible)
     }
 
-    func testPermissionRestartRequiresDistinctReadyLauncherBeforeTerminating() {
+    func testPermissionRestartRequiresDistinctReadyLauncherBeforeTerminating() async {
         let launchError = NSError(domain: "AppAppearanceTests", code: 1)
         let parentPID = getpid()
         let launchResults: [(pid_t?, Error?, PermissionRestartResult)] = [
@@ -3427,16 +3427,27 @@ final class AppAppearanceTests: XCTestCase {
         for (childPID, error, expectedResult) in launchResults {
             var receivedResult: PermissionRestartResult?
             var terminatorCallCount = 0
+            let received = expectation(description: "restart result after safe preparation")
+            let termination = AppTerminationCoordinator(replyHandler: { _ in })
             let actions = DefaultPermissionSystemActions(
                 relauncher: { _, _, completion in
                     completion(childPID, error)
                 },
                 applicationTerminator: {
                     terminatorCallCount += 1
-                }
+                    termination.finalizeTerminationResourcesIfNeeded()
+                },
+                safety: PermissionRestartSafety(prepare: {}, resume: {}),
+                terminationCoordinator: termination,
+                cancelHandoff: { _ in true },
+                commitHandoff: { _ in true }
             )
 
-            actions.restartForPermissionRefresh { receivedResult = $0 }
+            actions.restartForPermissionRefresh {
+                receivedResult = $0
+                received.fulfill()
+            }
+            await fulfillment(of: [received], timeout: 1)
 
             XCTAssertEqual(receivedResult, expectedResult)
             XCTAssertEqual(
