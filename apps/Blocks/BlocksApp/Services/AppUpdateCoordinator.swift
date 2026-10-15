@@ -2,6 +2,7 @@ import AppKit
 import BlocksCore
 import Combine
 import Foundation
+import OSLog
 import Sparkle
 
 enum AppUpdateTrack: String, CaseIterable, Identifiable {
@@ -98,6 +99,7 @@ final class AppUpdateCoordinator: NSObject, ObservableObject {
     @Published private(set) var automaticallyChecksForUpdates = false
     @Published private(set) var sessionInProgress = false
     @Published private(set) var statusKey = "updates.status.ready"
+    @Published private(set) var preparationFailure: AppUpdatePreparationFailure?
     @Published private(set) var unavailableReasonKey: String?
     @Published private(set) var track: AppUpdateTrack
 
@@ -112,10 +114,15 @@ final class AppUpdateCoordinator: NSObject, ObservableObject {
     private var pendingInstallHandler: (() -> Void)?
     private var recoveryTask: Task<Void, Never>?
     private var preparationNeedsRecovery = false
+    private let preparationPresenter: (any AppUpdatePreparationPresenting)?
+    private var installationSessionID: UUID?
+    private static let logger = Logger(subsystem: "app.blocks.app", category: "app-update-preparation")
 
-    init(configuration: AppUpdateConfiguration = .current, defaults: UserDefaults = .standard) {
+    init(configuration: AppUpdateConfiguration = .current, defaults: UserDefaults = .standard,
+         preparationPresenter: (any AppUpdatePreparationPresenting)? = nil) {
         self.configuration = configuration
         self.defaults = defaults
+        self.preparationPresenter = preparationPresenter ?? (configuration.isUnitTestHost ? nil : AppUpdatePreparationWindow())
         track = AppUpdateTrack(rawValue: defaults.string(forKey: Self.trackDefaultsKey) ?? "") ?? .stable
         unavailableReasonKey = configuration.unavailableReasonKey ?? "updates.unavailable.lifecycle"
         super.init()
@@ -132,7 +139,10 @@ final class AppUpdateCoordinator: NSObject, ObservableObject {
     // Reuse the persisted channel instead of introducing a second preference
     // that could disagree with existing Beta opt-ins or the selected feed.
     var receivesBetaUpdates: Bool { track == .beta }
-    var statusText: String { L10n.string(unavailableReasonKey ?? statusKey) }
+    var statusText: String {
+        if unavailableReasonKey == nil, let preparationFailure { return preparationFailure.message }
+        return L10n.string(unavailableReasonKey ?? statusKey)
+    }
 
     /// Register only after ALL app/Helper termination paths have a safe drain.
     /// The callback must reject new work, await existing work, back up storage,
@@ -226,23 +236,30 @@ final class AppUpdateCoordinator: NSObject, ObservableObject {
     /// Kept separate from Sparkle delegate types so tests can prove that failed
     /// preparation never invokes an installation handler, without an updater.
     func postponeInstallation(until installHandler: @escaping () -> Void) {
-        guard pendingInstallHandler == nil else { return }
+        guard pendingInstallHandler == nil, installationPreparationTask == nil,
+              recoveryTask == nil, !preparationNeedsRecovery else { return }
+        installationSessionID = UUID()
         pendingInstallHandler = installHandler
+        // Public user-driver teardown closes only the consumed standard UI.
+        // The updater's saved relaunch continuation and verified download stay
+        // owned by Sparkle; do not abort/reset/re-download the update session.
+        controller?.userDriver.dismissUpdateInstallation()
         retryInstallationPreparation()
     }
 
     func retryInstallationPreparation() {
         guard !AppTerminationCoordinator.shared.isQuitting else { return }
         guard pendingInstallHandler != nil, installationPreparationTask == nil, recoveryTask == nil else { return }
+        guard let sessionID = installationSessionID else { return }
         canRetryInstallationPreparation = false
         isPreparingInstallation = true
+        preparationFailure = nil
         statusKey = "updates.status.waiting"
+        presentPreparation(.preparing, sessionID: sessionID)
+        Self.logger.info("update-preparation event=started")
         installationPreparationTask = Task { [weak self] in
             guard let self else { return }
-            defer {
-                installationPreparationTask = nil
-                isPreparingInstallation = false
-            }
+            var failure: AppUpdatePreparationFailure?
             do {
                 guard let prepareForUpdate, resumeAfterCancelledUpdate != nil else {
                     throw updateError("updates.unavailable.lifecycle")
@@ -255,24 +272,54 @@ final class AppUpdateCoordinator: NSObject, ObservableObject {
                 statusKey = "updates.status.installing"
                 let handler = pendingInstallHandler
                 pendingInstallHandler = nil
+                installationSessionID = nil
+                preparationPresenter?.dismiss()
+                Self.logger.info("update-preparation event=completed action=invoke_install")
                 handler?()
                 // An installer may synchronously report an abort from the handler.
                 if Task.isCancelled { await recoverPausedWorkIfNeeded() }
             } catch {
                 await recoverPausedWorkIfNeeded()
-                guard pendingInstallHandler != nil else { return }
-                // Do not invoke the installation handler on failure. Retain it
-                // for an explicit retry, never for a timer/automatic retry loop.
+                if pendingInstallHandler != nil, installationSessionID == sessionID {
+                    failure = AppUpdatePreparationFailure(error: error)
+                }
+            }
+            installationPreparationTask = nil
+            isPreparingInstallation = false
+            if let failure, installationSessionID == sessionID {
+                // Publish actions only AFTER the failed task and recovery have
+                // unwound, so even an immediate Retry cannot hit a stale task.
+                preparationFailure = failure
                 statusKey = "updates.status.preparationFailed"
                 canRetryInstallationPreparation = true
+                Self.logger.error("update-preparation event=failed participant=\(failure.participant, privacy: .public) reason=\(failure.reason.rawValue, privacy: .public) retry_available=true")
+                if canRetryInstallationPreparation, installationSessionID == sessionID {
+                    presentPreparation(.failed(failure), sessionID: sessionID)
+                }
             }
         }
+    }
+
+    private func presentPreparation(_ state: AppUpdatePreparationPresentation, sessionID: UUID) {
+        preparationPresenter?.show(state, retry: { [weak self] in
+            guard let self, installationSessionID == sessionID, canRetryInstallationPreparation else { return }
+            retryInstallationPreparation()
+        }, later: { [weak self] in
+            guard let self, installationSessionID == sessionID, canRetryInstallationPreparation else { return }
+            // Keep the verified update and continuation. Settings/menu Retry
+            // can resume it; Later never invokes installation or clears pairing.
+            preparationPresenter?.dismiss()
+            Self.logger.info("update-preparation event=deferred retry_available=true")
+        })
     }
 
     /// Safe for repeated Sparkle cancellation/abort callbacks. An in-flight
     /// preparation is cancelled and must unwind before recovery may resume work.
     func cancelInstallationPreparation() {
         pendingInstallHandler = nil
+        installationSessionID = nil
+        preparationFailure = nil
+        preparationPresenter?.dismiss()
         canRetryInstallationPreparation = false
         if let installationPreparationTask {
             installationPreparationTask.cancel()

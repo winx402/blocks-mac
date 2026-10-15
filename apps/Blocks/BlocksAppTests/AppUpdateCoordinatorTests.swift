@@ -1,4 +1,5 @@
 import Foundation
+import BlocksCore
 import Combine
 import XCTest
 @testable import Blocks
@@ -275,6 +276,228 @@ final class AppUpdateCoordinatorTests: XCTestCase {
         XCTAssertEqual(installCount, 0)
         XCTAssertFalse(coordinator.canRetryInstallationPreparation)
     }
+
+    func testRecoveryWindowCanImmediatelyRetryTheSameContinuationExactlyOnce() async {
+        let suite = "AppUpdateCoordinatorTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let presenter = UpdatePreparationPresenterStub()
+        let coordinator = AppUpdateCoordinator(configuration: configuration(testing: true), defaults: defaults,
+                                               preparationPresenter: presenter)
+        let installed = expectation(description: "Immediate UI retry installs")
+        var attempts = 0
+        var events: [String] = []
+        coordinator.configureInstallationSafety(prepareForUpdate: {
+            attempts += 1
+            events.append("prepare")
+            if attempts == 1 {
+                throw ApplicationLifecycleCoordinator.ParticipantDrainError(
+                    participantID: "helper", underlying: SelectionHelperUpdatePreparationFailure.helperNotPaired)
+            }
+        }, resumeAfterCancelledUpdate: { events.append("resume") })
+        presenter.onShow = { state in
+            guard case let .failed(failure) = state else { return }
+            XCTAssertEqual(failure.reason, .helperNotPaired)
+            XCTAssertEqual(events, ["prepare", "resume"], "Recovery precedes enabled Retry")
+            presenter.retry?()
+            presenter.retry?()
+        }
+        var installCount = 0
+        coordinator.postponeInstallation {
+            installCount += 1
+            installed.fulfill()
+        }
+        await fulfillment(of: [installed], timeout: 2)
+        XCTAssertEqual(events, ["prepare", "resume", "prepare"])
+        XCTAssertEqual(installCount, 1)
+        XCTAssertEqual(presenter.states.count, 3)
+        XCTAssertNil(coordinator.preparationFailure)
+        XCTAssertFalse(coordinator.canRetryInstallationPreparation)
+        XCTAssertEqual(presenter.dismissCount, 1)
+    }
+
+    func testLaterRetainsUpdateAndCancelledWindowActionsCannotReplayIntoNewSession() async {
+        let suite = "AppUpdateCoordinatorTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let presenter = UpdatePreparationPresenterStub()
+        let coordinator = AppUpdateCoordinator(configuration: configuration(testing: true), defaults: defaults,
+                                               preparationPresenter: presenter)
+        let firstFailed = expectation(description: "First session paused")
+        let secondFailed = expectation(description: "Second session paused")
+        var failureCount = 0
+        var attempts = 0
+        var installCount = 0
+        coordinator.configureInstallationSafety(prepareForUpdate: {
+            attempts += 1
+            throw ActionBrokerUpdateError.busy
+        }, resumeAfterCancelledUpdate: {})
+        presenter.onShow = { state in
+            if case .failed = state {
+                failureCount += 1
+                if failureCount == 1 { firstFailed.fulfill() } else { secondFailed.fulfill() }
+            }
+        }
+        coordinator.postponeInstallation { installCount += 1 }
+        await fulfillment(of: [firstFailed], timeout: 2)
+        let staleRetry = presenter.retry
+        let staleLater = presenter.later
+        presenter.later?()
+        XCTAssertEqual(installCount, 0)
+        XCTAssertTrue(coordinator.canRetryInstallationPreparation)
+        XCTAssertEqual(presenter.dismissCount, 1)
+        coordinator.cancelInstallationPreparation()
+        XCTAssertNil(coordinator.preparationFailure)
+        coordinator.postponeInstallation { installCount += 1 }
+        await fulfillment(of: [secondFailed], timeout: 2)
+        let shownCount = presenter.states.count
+        staleRetry?()
+        staleLater?()
+        XCTAssertEqual(attempts, 2)
+        XCTAssertEqual(presenter.states.count, shownCount)
+        XCTAssertEqual(installCount, 0)
+        XCTAssertTrue(coordinator.canRetryInstallationPreparation)
+        coordinator.cancelInstallationPreparation()
+    }
+
+    func testFailureActionsAreNotPublishedUntilSuspendedRecoveryCompletes() async {
+        let suite = "AppUpdateCoordinatorTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let presenter = UpdatePreparationPresenterStub()
+        let coordinator = AppUpdateCoordinator(configuration: configuration(testing: true), defaults: defaults,
+                                               preparationPresenter: presenter)
+        let recovering = expectation(description: "Recovery suspended")
+        let finished = expectation(description: "Failure ready")
+        var continuation: CheckedContinuation<Void, Never>?
+        coordinator.configureInstallationSafety(prepareForUpdate: { throw ActionBrokerUpdateError.busy },
+            resumeAfterCancelledUpdate: {
+                await withCheckedContinuation { continuation = $0; recovering.fulfill() }
+            })
+        presenter.onShow = { state in if case .failed = state { finished.fulfill() } }
+        coordinator.postponeInstallation { XCTFail("Must not install") }
+        await fulfillment(of: [recovering], timeout: 2)
+        XCTAssertTrue(coordinator.isPreparingInstallation)
+        XCTAssertFalse(coordinator.canRetryInstallationPreparation)
+        XCTAssertEqual(presenter.states, [.preparing])
+        coordinator.retryInstallationPreparation()
+        continuation?.resume()
+        await fulfillment(of: [finished], timeout: 2)
+        XCTAssertFalse(coordinator.isPreparingInstallation)
+        XCTAssertTrue(coordinator.canRetryInstallationPreparation)
+        coordinator.cancelInstallationPreparation()
+    }
+
+    func testPreparationFailureClassificationNeverDisplaysRawErrorOrUnknownParticipant() {
+        let secret = "secret endpoint /Users/private/file"
+        let raw = NSError(domain: secret, code: 7, userInfo: [NSLocalizedDescriptionKey: secret])
+        let unknown = AppUpdatePreparationFailure(error: ApplicationLifecycleCoordinator.ParticipantDrainError(
+            participantID: secret, underlying: raw))
+        XCTAssertEqual(unknown.participant, "other")
+        XCTAssertEqual(unknown.reason, .other)
+        XCTAssertFalse(unknown.message.contains(secret))
+        let cases: [(String, Error, AppUpdatePreparationFailure.Reason)] = [
+            ("helper", SelectionHelperUpdatePreparationFailure.helperNotPaired, .helperNotPaired),
+            ("helper", SelectionAgentServiceFailure.keychainUnavailable, .helperKeyUnavailable),
+            ("helper", ApplicationOperationAdmissionGate.AdmissionError.busy(secret), .helperBusy),
+            ("helper", SelectionAgentServiceFailure.connectionFailed, .helperUnavailable),
+            ("actionBroker", ActionBrokerUpdateError.legacyRegistrationRequiresMigration, .brokerMigration),
+            ("actionBroker", ActionBrokerUpdateError.busy, .brokerUnavailable),
+            ("database", raw, .database),
+            ("translation", ApplicationOperationAdmissionGate.AdmissionError.busy(secret), .busy),
+        ]
+        for (participant, error, reason) in cases {
+            let failure = AppUpdatePreparationFailure(error: ApplicationLifecycleCoordinator.ParticipantDrainError(
+                participantID: participant, underlying: error))
+            XCTAssertEqual(failure.reason, reason)
+            XCTAssertFalse(failure.message.contains(secret))
+            XCTAssertNotEqual(failure.message, "updates.preparation.\(reason.rawValue)")
+        }
+    }
+
+    func testSynchronousInstallerAbortRecoversOnceWithoutReopeningStaleActions() async {
+        let suite = "AppUpdateCoordinatorTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let presenter = UpdatePreparationPresenterStub()
+        let coordinator = AppUpdateCoordinator(configuration: configuration(testing: true), defaults: defaults,
+                                               preparationPresenter: presenter)
+        let recovering = expectation(description: "Installer abort recovery suspended")
+        let recovered = expectation(description: "Installer abort recovered")
+        var continuation: CheckedContinuation<Void, Never>?
+        var installCount = 0
+        var resumeCount = 0
+        var oldRetry: (() -> Void)?
+        presenter.onShow = { _ in oldRetry = presenter.retry }
+        coordinator.configureInstallationSafety(prepareForUpdate: {}, resumeAfterCancelledUpdate: {
+            XCTAssertFalse(Task.isCancelled)
+            resumeCount += 1
+            await withCheckedContinuation { continuation = $0; recovering.fulfill() }
+            recovered.fulfill()
+        })
+        coordinator.postponeInstallation {
+            installCount += 1
+            coordinator.cancelInstallationPreparation()
+            coordinator.cancelInstallationPreparation()
+        }
+        await fulfillment(of: [recovering], timeout: 2)
+        XCTAssertTrue(coordinator.isPreparingInstallation)
+        oldRetry?()
+        XCTAssertEqual(installCount, 1)
+        XCTAssertEqual(resumeCount, 1)
+        XCTAssertFalse(coordinator.canRetryInstallationPreparation)
+        continuation?.resume()
+        await fulfillment(of: [recovered], timeout: 2)
+        // Give the awaiting preparation its actor turn to finish.
+        let deadline = ContinuousClock.now + .seconds(1)
+        while coordinator.isPreparingInstallation, ContinuousClock.now < deadline { await Task.yield() }
+        XCTAssertFalse(coordinator.isPreparingInstallation)
+        XCTAssertEqual(presenter.states, [.preparing])
+        XCTAssertNil(coordinator.preparationFailure)
+        XCTAssertEqual(installCount, 1)
+        XCTAssertEqual(resumeCount, 1)
+    }
+
+    func testCancelDuringFailedRecoveryDoesNotPublishFailureOrRetry() async {
+        let suite = "AppUpdateCoordinatorTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let presenter = UpdatePreparationPresenterStub()
+        let coordinator = AppUpdateCoordinator(configuration: configuration(testing: true), defaults: defaults,
+                                               preparationPresenter: presenter)
+        let recovering = expectation(description: "Recovery suspended")
+        var continuation: CheckedContinuation<Void, Never>?
+        coordinator.configureInstallationSafety(prepareForUpdate: { throw ActionBrokerUpdateError.busy },
+            resumeAfterCancelledUpdate: {
+                await withCheckedContinuation { continuation = $0; recovering.fulfill() }
+            })
+        coordinator.postponeInstallation { XCTFail("Cancelled update must not install") }
+        await fulfillment(of: [recovering], timeout: 2)
+        coordinator.cancelInstallationPreparation()
+        continuation?.resume()
+        let deadline = ContinuousClock.now + .seconds(1)
+        while coordinator.isPreparingInstallation, ContinuousClock.now < deadline { await Task.yield() }
+        XCTAssertFalse(coordinator.isPreparingInstallation)
+        XCTAssertEqual(presenter.states, [.preparing])
+        XCTAssertFalse(coordinator.canRetryInstallationPreparation)
+        XCTAssertNil(coordinator.preparationFailure)
+    }
+}
+
+@MainActor
+private final class UpdatePreparationPresenterStub: AppUpdatePreparationPresenting {
+    var states: [AppUpdatePreparationPresentation] = []
+    var retry: (() -> Void)?
+    var later: (() -> Void)?
+    var onShow: ((AppUpdatePreparationPresentation) -> Void)?
+    var dismissCount = 0
+    func show(_ state: AppUpdatePreparationPresentation, retry: @escaping () -> Void, later: @escaping () -> Void) {
+        states.append(state)
+        self.retry = retry
+        self.later = later
+        onShow?(state)
+    }
+    func dismiss() { dismissCount += 1; retry = nil; later = nil }
 }
 
 @MainActor

@@ -4224,6 +4224,182 @@ final class TranslationEntryBridgeTests: XCTestCase {
         XCTAssertEqual(health.capabilities, [])
     }
 
+    func testSelectionHelperUpdatePreparationReportsUnpairedWithoutIPC()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("selection-helper-update-unpaired-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let helper = root.appendingPathComponent("Blocks Selection Helper.app")
+        try makeSelectionHelperBundle(at: helper)
+        let keyStore = SelectionHelperKeyStoreStub()
+        let connection = SelectionHelperAuthenticatedConnectionStub(
+            key: Data(repeating: 0x62, count: 32),
+            disconnectResult: .failure(.timedOut)
+        )
+        let recorder = SelectionHelperUpdateLifecycleDiagnosticRecorder()
+        let client = SelectionHelperClient(
+            keyStore: keyStore,
+            connection: connection,
+            applicationLocator: selectionHelperFixtureLocator(
+                candidates: [helper], running: [helper]
+            ),
+            updateLifecycleDiagnosticRecorder: { recorder.append($0) }
+        )
+
+        do {
+            try await client.prepareForApplicationUpdate()
+            XCTFail("A running unpaired Helper must reject update preparation")
+        } catch {
+            XCTAssertEqual(
+                error as? SelectionHelperUpdatePreparationFailure,
+                .helperNotPaired
+            )
+            XCTAssertNil(error as? SelectionAgentServiceFailure)
+        }
+
+        XCTAssertEqual(recorder.events, [
+            .started,
+            .failed(.pairingKey, .keyAbsent),
+        ])
+        XCTAssertEqual(connection.authenticatedRequestCount, 0)
+        XCTAssertEqual(connection.pairRequestCount, 0)
+        XCTAssertEqual(connection.disconnectRequestCount, 0)
+        XCTAssertEqual(keyStore.deleteCount, 0)
+        XCTAssertNil(client.beginApplicationOperation(), "Failure must not silently reopen admission")
+        XCTAssertFalse(client.hasPendingApplicationUpdateRecovery)
+        await client.resumeAfterCancelledApplicationUpdate()
+        let lease = client.beginApplicationOperation()
+        XCTAssertNotNil(lease)
+        lease?.release()
+        XCTAssertEqual(connection.authenticatedRequestCount, 0)
+    }
+
+    func testSelectionHelperUpdatePreparationPreservesKeychainFailureWithoutIPCOrDeletion()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("selection-helper-update-keychain-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let helper = root.appendingPathComponent("Blocks Selection Helper.app")
+        try makeSelectionHelperBundle(at: helper)
+
+        for status in [errSecAuthFailed, errSecInteractionNotAllowed, errSecMissingEntitlement] {
+            var deletes = 0
+            let keyStore = SelectionHelperSharedKeyStore(
+                accessGroupProvider: { "TESTTEAM01.fixture" },
+                itemCopyMatching: { _, _ in status },
+                itemDelete: { _ in deletes += 1; return errSecSuccess }
+            )
+            let connection = SelectionHelperAuthenticatedConnectionStub(
+                key: Data(repeating: 0x63, count: 32),
+                disconnectResult: .failure(.timedOut)
+            )
+            let recorder = SelectionHelperUpdateLifecycleDiagnosticRecorder()
+            let client = SelectionHelperClient(
+                keyStore: keyStore,
+                connection: connection,
+                applicationLocator: selectionHelperFixtureLocator(
+                    candidates: [helper], running: [helper]
+                ),
+                updateLifecycleDiagnosticRecorder: { recorder.append($0) }
+            )
+
+            do {
+                try await client.prepareForApplicationUpdate()
+                XCTFail("An inaccessible key must reject update preparation")
+            } catch {
+                XCTAssertEqual(error as? SelectionAgentServiceFailure, .keychainUnavailable)
+                XCTAssertNil(error as? SelectionHelperUpdatePreparationFailure)
+            }
+
+            XCTAssertEqual(recorder.events, [
+                .started,
+                .failed(.pairingKey, .keyUnavailable),
+            ])
+            XCTAssertEqual(connection.authenticatedRequestCount, 0)
+            XCTAssertEqual(connection.pairRequestCount, 0)
+            XCTAssertEqual(connection.disconnectRequestCount, 0)
+            XCTAssertEqual(deletes, 0)
+            XCTAssertTrue(connection.helperStillHasKey)
+            XCTAssertNil(client.beginApplicationOperation())
+            XCTAssertFalse(client.hasPendingApplicationUpdateRecovery)
+            await client.resumeAfterCancelledApplicationUpdate()
+            let lease = client.beginApplicationOperation()
+            XCTAssertNotNil(lease)
+            lease?.release()
+            XCTAssertEqual(connection.authenticatedRequestCount, 0)
+            XCTAssertEqual(deletes, 0)
+        }
+    }
+
+    func testSelectionHelperUpdateRetryAfterManualExitNeedsNoPairingAndRestoresGate()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("selection-helper-update-exit-retry-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let helper = root.appendingPathComponent("Blocks Selection Helper.app")
+        try makeSelectionHelperBundle(at: helper)
+
+        for failure: SelectionAgentServiceFailure? in [nil, .keychainUnavailable] {
+            var running = true
+            let keyStore = SelectionHelperKeyStoreStub(associationLoadFailure: failure)
+            let connection = SelectionHelperAuthenticatedConnectionStub(
+                key: Data(repeating: 0x64, count: 32),
+                disconnectResult: .failure(.timedOut)
+            )
+            let recorder = SelectionHelperUpdateLifecycleDiagnosticRecorder()
+            let client = SelectionHelperClient(
+                keyStore: keyStore,
+                connection: connection,
+                applicationLocator: selectionHelperFixtureLocator(
+                    candidates: [helper],
+                    runningProvider: { running ? [helper] : [] }
+                ),
+                updateLifecycleDiagnosticRecorder: { recorder.append($0) }
+            )
+
+            do {
+                try await client.prepareForApplicationUpdate()
+                XCTFail("A running Helper without an accessible key must block the first attempt")
+            } catch {
+                if let failure {
+                    XCTAssertEqual(error as? SelectionAgentServiceFailure, failure)
+                } else {
+                    XCTAssertEqual(error as? SelectionHelperUpdatePreparationFailure, .helperNotPaired)
+                }
+            }
+            XCTAssertNil(client.beginApplicationOperation())
+            await client.resumeAfterCancelledApplicationUpdate()
+            let lease = client.beginApplicationOperation()
+            XCTAssertNotNil(lease, "Cancellation recovery must reopen admission before retry")
+            lease?.release()
+
+            // Model the user normally quitting Helper; the client must not
+            // send an unauthenticated quit or require pairing to retry.
+            running = false
+            try await client.prepareForApplicationUpdate()
+            XCTAssertEqual(recorder.events, [
+                .started,
+                .failed(.pairingKey, failure == nil ? .keyAbsent : .keyUnavailable),
+                .started,
+                .succeeded(.helperNotRunning),
+            ])
+            XCTAssertNil(client.beginApplicationOperation(), "Successful preparation must keep admission paused")
+            XCTAssertFalse(client.hasPendingApplicationUpdateRecovery)
+            XCTAssertEqual(connection.authenticatedRequestCount, 0)
+            XCTAssertEqual(connection.pairRequestCount, 0)
+            XCTAssertEqual(connection.disconnectRequestCount, 0)
+            XCTAssertEqual(keyStore.deleteCount, 0)
+            XCTAssertNil(keyStore.load())
+            await client.resumeAfterCancelledApplicationUpdate()
+            let recoveredLease = client.beginApplicationOperation()
+            XCTAssertNotNil(recoveredLease)
+            recoveredLease?.release()
+        }
+    }
+
     func testSelectionHelperUpdateLifecycleDiagnosticsDistinguishProtocolStages()
         async throws
     {
@@ -9619,11 +9795,12 @@ final class TranslationEntryBridgeTests: XCTestCase {
 
     private func selectionHelperFixtureLocator(
         candidates: [URL],
-        running: [URL] = []
+        running: [URL] = [],
+        runningProvider: (() -> [URL])? = nil
     ) -> SelectionHelperApplicationLocator {
         SelectionHelperApplicationLocator(
             candidateURLsProvider: { candidates },
-            runningApplicationURLsProvider: { running },
+            runningApplicationURLsProvider: runningProvider ?? { running },
             allowedApplicationURLsProvider: { candidates },
             identityVerifier: SelectionHelperBundleIdentityVerifierStub(
                 teamID: "TESTTEAM01"
@@ -10161,15 +10338,18 @@ private final class SelectionHelperKeyStoreStub:
 {
     private var storedKey: Data?
     private let loadDelay: TimeInterval
+    private let associationLoadFailure: SelectionAgentServiceFailure?
     private(set) var deleteCount = 0
 
     init(
         key: Data? = nil,
         legacyKey _: Data? = nil,
-        loadDelay: TimeInterval = 0
+        loadDelay: TimeInterval = 0,
+        associationLoadFailure: SelectionAgentServiceFailure? = nil
     ) {
         storedKey = key
         self.loadDelay = loadDelay
+        self.associationLoadFailure = associationLoadFailure
     }
 
     func load() -> Data? {
@@ -10177,6 +10357,11 @@ private final class SelectionHelperKeyStoreStub:
             Thread.sleep(forTimeInterval: loadDelay)
         }
         return storedKey
+    }
+
+    func loadForAssociation() -> Result<Data?, SelectionAgentServiceFailure> {
+        if let associationLoadFailure { return .failure(associationLoadFailure) }
+        return .success(load())
     }
 
     func save(_ data: Data) throws {

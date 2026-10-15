@@ -23,6 +23,10 @@ enum SelectionAgentServiceFailure: Error, Equatable {
     case keychainUnavailable
 }
 
+enum SelectionHelperUpdatePreparationFailure: Error, Equatable {
+    case helperNotPaired
+}
+
 struct SelectionHelperBundleIdentity: Equatable, Sendable {
     let teamID: String
     let signingIdentifier: String
@@ -821,6 +825,7 @@ final class SelectionHelperClient: @unchecked Sendable {
             case localGateBusy = "local_gate_busy"
             case locatorConflict = "locator_conflict"
             case keyAbsent = "key_absent"
+            case keyUnavailable = "key_unavailable"
             case healthTransportFailure = "health_transport_failure"
             case updateCapabilityMissing = "update_capability_missing"
             case prepareTransportFailure = "prepare_transport_failure"
@@ -865,9 +870,16 @@ final class SelectionHelperClient: @unchecked Sendable {
             updateStateLock.withLock {
                 helperWasRunningBeforeUpdate = true
             }
-            guard let key = keyStore.load() else {
+            let key: Data
+            switch keyStore.loadForAssociation() {
+            case let .success(storedKey?):
+                key = storedKey
+            case .success(nil):
                 recordUpdateLifecycle(.failed(.pairingKey, .keyAbsent))
-                throw SelectionAgentServiceFailure.notPaired
+                throw SelectionHelperUpdatePreparationFailure.helperNotPaired
+            case let .failure(failure):
+                recordUpdateLifecycle(.failed(.pairingKey, .keyUnavailable))
+                throw failure
             }
             let healthResult = sendAuthenticated(
                 .init(kind: .health), keyData: key, timeout: 0.5, lifecycleControl: true

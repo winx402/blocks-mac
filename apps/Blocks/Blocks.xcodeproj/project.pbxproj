@@ -48,6 +48,7 @@
 		B908L0000000000000000002 /* ApplicationLifecycleCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F908L0000000000000000002; };
 		B908L0000000000000000003 /* AppTerminationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F908L0000000000000000003; };
 		B908U0000000000000000001 /* AppUpdateCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F908U0000000000000000001; };
+		B908U0000000000000000068 /* AppUpdatePreparationPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = F908U0000000000000000068; };
 		B908U0000000000000000002 /* AppUpdateCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F908U0000000000000000002; };
 		B9090000000000000000001 /* CompactSourceHeaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9090000000000000000001; };
 		B9090000000000000000002 /* MainWindowPresentationCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9090000000000000000002; };
@@ -604,6 +605,7 @@
 		F908L0000000000000000002 /* ApplicationLifecycleCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/ApplicationLifecycleCoordinator.swift; sourceTree = "<group>"; };
 		F908L0000000000000000003 /* AppTerminationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/AppTerminationCoordinator.swift; sourceTree = "<group>"; };
 		F908U0000000000000000001 /* AppUpdateCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/AppUpdateCoordinator.swift; sourceTree = "<group>"; };
+		F908U0000000000000000068 /* AppUpdatePreparationPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/AppUpdatePreparationPresentation.swift; sourceTree = "<group>"; };
 		F908U0000000000000000002 /* AppUpdateCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdateCoordinatorTests.swift; sourceTree = "<group>"; };
 		F9090000000000000000001 /* CompactSourceHeaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompactSourceHeaderTests.swift; sourceTree = "<group>"; };
 		F9090000000000000000002 /* MainWindowPresentationCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindowPresentationCoordinatorTests.swift; sourceTree = "<group>"; };
@@ -1330,6 +1332,7 @@
 				F909F0000000000000000011 /* FeedbackSettingsSection.swift */,
 				F909F0000000000000000012 /* FeedbackComposerView.swift */,
 				F908U0000000000000000001 /* AppUpdateCoordinator.swift */,
+				F908U0000000000000000068 /* AppUpdatePreparationPresentation.swift */,
 				F50000000000000000000001 /* Assets.xcassets */,
 				F30100000000000000000001 /* BlocksApp.swift */,
 				F34R00000000000000000001 /* DistributionChannel.swift */,
@@ -2036,6 +2039,7 @@
 				B909F0000000000000000011 /* FeedbackSettingsSection.swift in Sources */,
 				B909F0000000000000000012 /* FeedbackComposerView.swift in Sources */,
 				B908U0000000000000000001 /* AppUpdateCoordinator.swift in Sources */,
+				B908U0000000000000000068 /* AppUpdatePreparationPresentation.swift in Sources */,
 				B00300000000000000000001 /* BlocksApp.swift in Sources */,
 				B34R00000000000000000001 /* DistributionChannel.swift in Sources */,
 				B34R00000000000000000002 /* DiagnosticsExportService.swift in Sources */,
