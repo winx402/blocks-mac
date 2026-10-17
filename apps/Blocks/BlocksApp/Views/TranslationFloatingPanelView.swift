@@ -201,6 +201,7 @@ struct TranslationFloatingPanelView: View {
     var pluginRuntime: BlocksPluginRuntimeCoordinator?
     @ObservedObject var resultOrderDragCoordinator:
         TranslationServiceOrderDragCoordinator
+    var onLanguageMenuTrackingChange: (String, Bool) -> Void = { _, _ in }
     let onExit: () -> Void
     let onClose: () -> Void
 
@@ -300,7 +301,6 @@ struct TranslationFloatingPanelView: View {
         TranslationPanelContentLayout(
             inputSource: model.inputSource,
             sourceText: model.sourceText,
-            isInitialSelectionResolved: model.selectionReadState == .selected,
             sourceContent: { editorHeight in
                 sourceSection(editorHeight: editorHeight)
             },
@@ -541,7 +541,7 @@ struct TranslationFloatingPanelView: View {
                         .font(.body)
                         .foregroundStyle(.tertiary)
                         .padding(.leading, 5)
-                        .padding(.top, 10)
+                        .padding(.top, TranslationPanelSourceLayout.editorTextVerticalInset + 2)
                         .allowsHitTesting(false)
                 }
             }
@@ -589,128 +589,105 @@ struct TranslationFloatingPanelView: View {
 
     private var languageBar: some View {
         HStack(spacing: 10) {
-            Picker(
-                L10n.string("translation.panel.sourceLanguage"),
-                selection: Binding(
-                    get: { model.sourceLanguage?.rawValue ?? "" },
-                    set: {
-                        model.updateSourceLanguage(
-                            $0.isEmpty ? nil : TranslationLanguageTag($0)
-                        )
-                    }
-                )
-            ) {
-                Text(automaticSourceTitle).tag("")
-                if !sourceLanguageSections.common.isEmpty {
-                    Section(
-                        L10n.string("translation.language.common")
-                    ) {
-                        ForEach(
-                            sourceLanguageSections.common,
-                            id: \.rawValue
-                        ) { language in
-                            Text(
-                                TranslationLanguagePreferences
-                                    .localizedName(for: language)
-                            )
-                            .tag(language.rawValue)
-                        }
-                    }
+            TranslationLanguageMenuPicker(
+                title: L10n.string("translation.panel.sourceLanguage"),
+                identifier: "translation.panel.sourceLanguage",
+                entries: languageMenuEntries(
+                    automaticTitle: automaticSourceTitle,
+                    automaticValue: "",
+                    sections: sourceLanguageSections
+                ),
+                selection: model.sourceLanguage?.rawValue ?? "",
+                onSelection: {
+                    notificationState.dismiss(
+                        deduplicationKey: "translation.language.swap.automaticSource"
+                    )
+                    model.updateSourceLanguage(
+                        $0.isEmpty ? nil : TranslationLanguageTag($0)
+                    )
+                },
+                onTrackingChange: {
+                    onLanguageMenuTrackingChange("source", $0)
                 }
-                if !sourceLanguageSections.all.isEmpty {
-                    Section(L10n.string("translation.language.all")) {
-                        ForEach(
-                            sourceLanguageSections.all,
-                            id: \.rawValue
-                        ) { language in
-                            Text(
-                                TranslationLanguagePreferences
-                                    .localizedName(for: language)
-                            )
-                            .tag(language.rawValue)
-                        }
-                    }
-                }
-            }
-            .pickerStyle(.menu)
-            .labelsHidden()
-            .buttonStyle(.borderless)
-            .controlSize(.small)
+            )
             .frame(maxWidth: .infinity)
-            .accessibilityIdentifier("translation.panel.sourceLanguage")
 
             BlocksCompactIconButton(
                 systemImage: "arrow.left.arrow.right",
                 label: L10n.string(
                     "translation.panel.swapLanguages"
                 ),
-                isEnabled: model.sourceLanguage != nil,
-                density: .micro
+                density: .micro,
+                showsHelp: false
             ) {
-                model.swapLanguagesAndRun()
+                if model.sourceLanguage == nil {
+                    notificationState.present(BlocksNotificationDescriptor(
+                        level: .info,
+                        title: L10n.string("translation.panel.swapLanguages"),
+                        detail: automaticSourceSwapHint,
+                        deduplicationKey: "translation.language.swap.automaticSource"
+                    ))
+                } else {
+                    model.swapLanguagesAndRun()
+                }
             }
+            .help(model.sourceLanguage == nil ? automaticSourceSwapHint : L10n.string("translation.panel.swapLanguages"))
+            .accessibilityHint(model.sourceLanguage == nil ? automaticSourceSwapHint : "")
+            .accessibilityIdentifier("translation.panel.swapLanguages")
 
-            Picker(
-                L10n.string("translation.panel.targetLanguage"),
-                selection: Binding(
-                    get: {
-                        model.usesAutomaticTarget
-                            ? Self.automaticTargetTag
-                            : model.targetLanguage.rawValue
-                    },
-                    set: { value in
-                        if value == Self.automaticTargetTag {
-                            model.enableAutomaticTarget()
-                            return
-                        }
-                        guard let target = TranslationLanguageTag(value) else { return }
-                        model.updateTargetLanguage(target)
+            TranslationLanguageMenuPicker(
+                title: L10n.string("translation.panel.targetLanguage"),
+                identifier: "translation.panel.targetLanguage",
+                entries: languageMenuEntries(
+                    automaticTitle: automaticTargetTitle,
+                    automaticValue: Self.automaticTargetTag,
+                    sections: targetLanguageSections
+                ),
+                selection: model.usesAutomaticTarget
+                    ? Self.automaticTargetTag
+                    : model.targetLanguage.rawValue,
+                onSelection: { value in
+                    if value == Self.automaticTargetTag {
+                        model.enableAutomaticTarget()
+                        return
                     }
-                )
-            ) {
-                Text(automaticTargetTitle)
-                    .tag(Self.automaticTargetTag)
-                if !targetLanguageSections.common.isEmpty {
-                    Section(
-                        L10n.string("translation.language.common")
-                    ) {
-                        ForEach(
-                            targetLanguageSections.common,
-                            id: \.rawValue
-                        ) { language in
-                            Text(
-                                TranslationLanguagePreferences
-                                    .localizedName(for: language)
-                            )
-                            .tag(language.rawValue)
-                        }
-                    }
+                    guard let target = TranslationLanguageTag(value) else { return }
+                    model.updateTargetLanguage(target)
+                },
+                onTrackingChange: {
+                    onLanguageMenuTrackingChange("target", $0)
                 }
-                if !targetLanguageSections.all.isEmpty {
-                    Section(L10n.string("translation.language.all")) {
-                        ForEach(
-                            targetLanguageSections.all,
-                            id: \.rawValue
-                        ) { language in
-                            Text(
-                                TranslationLanguagePreferences
-                                    .localizedName(for: language)
-                            )
-                            .tag(language.rawValue)
-                        }
-                    }
-                }
-            }
-            .pickerStyle(.menu)
-            .labelsHidden()
-            .buttonStyle(.borderless)
-            .controlSize(.small)
+            )
             .frame(maxWidth: .infinity)
-            .accessibilityIdentifier("translation.panel.targetLanguage")
         }
         .fixedSize(horizontal: false, vertical: true)
         .padding(.horizontal, TranslationPanelMetrics.contentInset)
         .frame(height: TranslationPanelSourceLayout.languageBarHeight)
+    }
+
+    private var automaticSourceSwapHint: String {
+        L10n.string("translation.panel.swapLanguages.automaticSourceHint")
+    }
+
+    private func languageMenuEntries(
+        automaticTitle: String,
+        automaticValue: String,
+        sections: TranslationLanguageMenuSections
+    ) -> [TranslationLanguageMenuEntry] {
+        var entries = [TranslationLanguageMenuEntry(title: automaticTitle, value: automaticValue)]
+        for (key, languages) in [
+            ("translation.language.common", sections.common),
+            ("translation.language.all", sections.all),
+        ] where !languages.isEmpty {
+            entries.append(TranslationLanguageMenuEntry(title: L10n.string(key), value: nil))
+            entries += languages.map {
+                TranslationLanguageMenuEntry(
+                    title: TranslationLanguagePreferences.localizedName(for: $0),
+                    value: $0.rawValue
+                )
+            }
+        }
+        return entries
     }
 
     private var automaticSourceTitle: String {

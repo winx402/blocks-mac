@@ -8038,14 +8038,14 @@ final class TranslationEntryBridgeTests: XCTestCase {
                 TranslationPanelSourceLayout.expandedEditorHeight(
                     for: source
                 ),
-                52
+                96
             )
         }
         XCTAssertEqual(
             TranslationPanelSourceLayout.expandedEditorHeight(
                 for: .screenshotOCR
             ),
-            96
+            112
         )
 
         for source in TranslationInputSource.allCases {
@@ -8129,7 +8129,7 @@ final class TranslationEntryBridgeTests: XCTestCase {
         XCTAssertEqual(
             TranslationPanelSourceLayout.fixedRegionHeight(
                 for: .manual,
-                scrollOffset: 24
+                scrollOffset: TranslationPanelSourceLayout.collapseRange(for: .manual)
             ),
             TranslationPanelMetrics.contentInset
                 + textHeaderHeight

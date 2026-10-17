@@ -2,6 +2,7 @@ import AppKit
 import BlocksCore
 import Darwin
 import Foundation
+import OSLog
 import Security
 
 private actor ActionHostRouter {
@@ -261,12 +262,49 @@ private final class BooleanReplyOnce: @unchecked Sendable {
 private final class BrokerListenerDelegate: NSObject, NSXPCListenerDelegate {
     private let router = ActionHostRouter()
     private let updateAdmission = ActionBrokerUpdateAdmission()
+    #if !BLOCKS_LOCAL_DEVELOPMENT
+    // Constructed eagerly before listener.resume(), including when there have
+    // been no clients yet. Never rebind our trust anchor to a replaced file.
+    private let identityValidator = ActionBrokerIdentityValidator<SecCode, SecStaticCode>(operations: .system)
+    private let identityDiagnostics = ActionBrokerIdentityDiagnosticLimiter()
+    private let identityLogger = Logger(subsystem: "app.blocks.action-broker", category: "Identity")
+
+    override init() {
+        super.init()
+        if case let .failure(failure) = identityValidator.ownIdentity { recordIdentityFailure(failure) }
+    }
+
+    private func recordIdentityFailure(_ failure: ActionBrokerIdentityFailure) {
+        guard identityDiagnostics.shouldLog(failure) else { return }
+        let status = failure.osStatus.map { String($0) } ?? "none"
+        identityLogger.error("Connection identity rejected subject=\(failure.subject.rawValue, privacy: .public) stage=\(failure.stage.rawValue, privacy: .public) reason=\(failure.reason.rawValue, privacy: .public) osstatus=\(status, privacy: .public)")
+    }
+    #endif
 
     func listener(
         _ listener: NSXPCListener,
         shouldAcceptNewConnection connection: NSXPCConnection
     ) -> Bool {
+        #if BLOCKS_LOCAL_DEVELOPMENT
         guard let role = BlocksPeerIdentityValidator.role(for: connection) else { return false }
+        #else
+        let authorization: ActionBrokerPeerAuthorization
+        switch identityValidator.authorizeCandidate(
+            processID: connection.processIdentifier,
+            effectiveUserID: connection.effectiveUserIdentifier,
+            currentUserID: getuid()
+        ) {
+        case let .success(candidate): authorization = candidate
+        case let .failure(failure):
+            recordIdentityFailure(failure)
+            return false
+        }
+        // Candidate metadata is PID-based, so it must never alone grant a
+        // protocol. XPC checks messages from the actual connection against the
+        // exact role requirement before dispatching any exported operation.
+        connection.setCodeSigningRequirement(authorization.connectionRequirement)
+        let role = authorization.role
+        #endif
         let hostProcessID: pid_t?
         switch role {
         case .appHost:
@@ -286,6 +324,7 @@ private final class BrokerListenerDelegate: NSObject, NSXPCListenerDelegate {
     }
 }
 
+#if BLOCKS_LOCAL_DEVELOPMENT
 private enum BlocksPeerIdentityValidator {
     enum PeerRole {
         case appHost
@@ -297,7 +336,6 @@ private enum BlocksPeerIdentityValidator {
               connection.processIdentifier > 0 else {
             return nil
         }
-        #if BLOCKS_LOCAL_DEVELOPMENT
         if BlocksLocalBuildTrust.accepts(processIdentifier: connection.processIdentifier,
                                         userIdentifier: connection.effectiveUserIdentifier, role: "app") {
             return .appHost
@@ -307,53 +345,9 @@ private enum BlocksPeerIdentityValidator {
             return .client
         }
         return nil
-        #else
-        guard let peer = signingInfo(pid: connection.processIdentifier),
-              let own = signingInfo(pid: getpid()),
-              !own.teamID.isEmpty,
-              peer.teamID == own.teamID else {
-            return nil
-        }
-        switch peer.identifier {
-        case BlocksActionBrokerXPC.appBundleIdentifier:
-            return .appHost
-        case "app.blocks.cli", "blocks":
-            return .client
-        default:
-            return nil
-        }
-        #endif
-    }
-
-    private static func signingInfo(pid: pid_t) -> (teamID: String, identifier: String)? {
-        var code: SecCode?
-        let attributes = [kSecGuestAttributePid: NSNumber(value: pid)] as CFDictionary
-        guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &code) == errSecSuccess,
-              let code else {
-            return nil
-        }
-        guard SecCodeCheckValidity(
-            code,
-            SecCSFlags(rawValue: kSecCSStrictValidate),
-            nil
-        ) == errSecSuccess else {
-            return nil
-        }
-        var staticCode: SecStaticCode?
-        guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess,
-              let staticCode else {
-            return nil
-        }
-        var information: CFDictionary?
-        guard SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess,
-              let values = information as? [CFString: Any],
-              let teamID = values[kSecCodeInfoTeamIdentifier] as? String,
-              let identifier = values[kSecCodeInfoIdentifier] as? String else {
-            return nil
-        }
-        return (teamID, identifier)
     }
 }
+#endif
 
 private let delegate = BrokerListenerDelegate()
 private let listener = NSXPCListener(machServiceName: BlocksActionBrokerXPC.machServiceName)

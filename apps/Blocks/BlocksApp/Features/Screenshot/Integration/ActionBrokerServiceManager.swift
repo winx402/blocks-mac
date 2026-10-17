@@ -111,6 +111,7 @@ final class ActionBrokerServiceManager: ObservableObject {
         case connecting
         case reconnecting
         case recovering
+        case recoveryRequired
         case enabled
         case unavailable
         case failed(String)
@@ -682,8 +683,8 @@ final class ActionBrokerServiceManager: ObservableObject {
         case .enabled:
             isServiceRegistered = true
             startHost(
-                isReconnect: state == .reconnecting || state == .recovering || retryAttempt > 0,
-                isHealthCheck: state == .recovering
+                isReconnect: state == .reconnecting || state == .recovering || state == .recoveryRequired || retryAttempt > 0,
+                isHealthCheck: state == .recoveryRequired
             )
         case .requiresApproval:
             cancelReconnectAndStopHost()
@@ -698,6 +699,24 @@ final class ActionBrokerServiceManager: ObservableObject {
             isServiceRegistered = false
             state = .unavailable
         }
+    }
+
+    /// An explicit recheck is only a connection attempt. It cannot establish
+    /// that an unreachable Broker is idle, so it never changes registration,
+    /// clears recovery intent, or asks launchd to terminate the old process.
+    func recheckConnection() {
+        guard !isQuitting, !applicationUpdatePaused, serviceChangeTask == nil,
+              updateRecoveryTask == nil, applicationManagementGate.isAcceptingOperations else { return }
+        guard embeddedServiceAvailable, service.status() == .enabled else {
+            refresh()
+            return
+        }
+        guard !hostIsActive else { return }
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        retryAttempt = 0
+        isServiceRegistered = true
+        startHost(isReconnect: true)
     }
 
     static func resolvedState(
@@ -720,7 +739,7 @@ final class ActionBrokerServiceManager: ObservableObject {
         hostAttempt &+= 1
         let attempt = hostAttempt
         hostIsActive = true
-        state = isHealthCheck ? .recovering : (isReconnect ? .reconnecting : .connecting)
+        state = isHealthCheck ? .recoveryRequired : (isReconnect ? .reconnecting : .connecting)
         host.start(
             completion: { [weak self] result in
                 guard let self, self.isCurrentHostAttempt(attempt) else { return }
@@ -748,7 +767,7 @@ final class ActionBrokerServiceManager: ObservableObject {
         let delay: Duration
         if isHealthCheck {
             delay = retryPolicy.healthCheckDelay
-            state = .recovering
+            state = .recoveryRequired
         } else {
             delay = retryPolicy.delays[retryAttempt]
             retryAttempt += 1

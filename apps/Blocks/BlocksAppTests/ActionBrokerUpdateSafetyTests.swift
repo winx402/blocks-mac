@@ -344,6 +344,62 @@ final class ActionBrokerUpdateSafetyTests: XCTestCase {
         XCTAssertTrue(fixture.host.prepareTokens.isEmpty)
     }
 
+    func testExhaustedRetriesRequireRecoveryButKeepLowFrequencyConnectionChecksWithoutUnregistering() {
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.host.startError = ActionBrokerUpdateError.untrustedPeer
+        let retries = BrokerServiceRetryQueue()
+        let manager = fixture.makeManager(
+            retryPolicy: .init(delays: [.zero], healthCheckDelay: .seconds(30)),
+            retryScheduler: retries.schedule
+        )
+        XCTAssertEqual(manager.state, .reconnecting)
+        retries.fireNext()
+        XCTAssertEqual(manager.state, .recoveryRequired)
+        XCTAssertEqual(retries.nextDelay, .seconds(30))
+        let attempts = fixture.host.startCount
+        retries.fireNext()
+        XCTAssertEqual(fixture.host.startCount, attempts + 1)
+        XCTAssertEqual(manager.state, .recoveryRequired)
+        XCTAssertEqual(retries.nextDelay, .seconds(30))
+        XCTAssertTrue(manager.isEnabled, "unavailability must preserve enabled intent")
+        XCTAssertEqual(fixture.unregisterCount, 0)
+        XCTAssertEqual(fixture.registerCount, 0)
+        XCTAssertTrue(fixture.host.prepareTokens.isEmpty)
+        XCTAssertEqual(fixture.host.stopCount, 0)
+    }
+
+    func testExplicitConnectionRecheckDoesNotMutateServiceOrStopHostAndCanObserveRecoveredPeer() {
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.host.startError = ActionBrokerUpdateError.untrustedPeer
+        let retries = BrokerServiceRetryQueue()
+        let manager = fixture.makeManager(retryPolicy: .init(delays: []), retryScheduler: retries.schedule)
+        XCTAssertEqual(manager.state, .recoveryRequired)
+        let attempts = fixture.host.startCount
+        fixture.host.startError = nil
+        manager.recheckConnection()
+        XCTAssertEqual(fixture.host.startCount, attempts + 1)
+        XCTAssertEqual(manager.state, .enabled)
+        XCTAssertNil(retries.nextDelay, "explicit recheck must cancel the pending low-frequency retry")
+        XCTAssertEqual(fixture.unregisterCount, 0)
+        XCTAssertEqual(fixture.registerCount, 0)
+        XCTAssertEqual(fixture.host.stopCount, 0)
+        XCTAssertTrue(fixture.host.prepareTokens.isEmpty)
+        manager.recheckConnection()
+        XCTAssertEqual(fixture.host.startCount, attempts + 1, "do not replace an already healthy host")
+    }
+
+    func testConnectionRecheckAfterQuitCannotRetryOrMutateRegistration() {
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.host.startError = ActionBrokerUpdateError.untrustedPeer
+        let manager = fixture.makeManager(retryPolicy: .init(delays: []))
+        let attempts = fixture.host.startCount
+        manager.beginApplicationQuit()
+        manager.recheckConnection()
+        XCTAssertEqual(fixture.host.startCount, attempts)
+        XCTAssertEqual(fixture.unregisterCount, 0)
+        XCTAssertEqual(fixture.registerCount, 0)
+    }
+
     func testExplicitDisableDrainsAndPreservesModuleAuthorization() async throws {
         let suite = "BrokerDisable.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
@@ -698,7 +754,9 @@ private final class BrokerServiceUpdateFixture {
     let journal = ActionBrokerUpdateRecoveryJournal()
 
     func makeManager(moduleAccess: CLIModuleAccessPolicy? = nil, appOwned: Bool = false,
-                     legacyStatus: SMAppService.Status = .notRegistered) -> ActionBrokerServiceManager {
+                     legacyStatus: SMAppService.Status = .notRegistered,
+                     retryPolicy: ActionBrokerRetryPolicy = .default,
+                     retryScheduler: ActionBrokerRetryScheduler? = nil) -> ActionBrokerServiceManager {
         self.legacyStatus = legacyStatus
         let control = ActionBrokerServiceControl(status: { self.status }, register: {
             self.registerCount += 1
@@ -718,7 +776,8 @@ private final class BrokerServiceUpdateFixture {
             else { self.status = .notRegistered; self.processes = [] }
         })
         return ActionBrokerServiceManager(service: control, host: host,
-            retryScheduler: { _, _ in AnyCancellable {} }, updateRecoveryJournal: journal,
+            retryPolicy: retryPolicy,
+            retryScheduler: retryScheduler ?? { _, _ in AnyCancellable {} }, updateRecoveryJournal: journal,
             runningBrokerProcessIDs: { appOwned ? self.legacyProcesses : self.processes }, processHasExited: { !self.processes.contains($0) },
             moduleAccess: moduleAccess, usesAppOwnedService: appOwned,
             legacyService: .init(status: { self.legacyStatus }, register: { XCTFail("legacy service must never be registered") }, unregister: {},
@@ -737,6 +796,7 @@ private final class BrokerServiceUpdateFixture {
 
 @MainActor
 private final class BrokerServiceUpdateHost: ActionBrokerHosting {
+    var startCount = 0
     var stopCount = 0
     var drainCount = 0
     var drainError: Error?
@@ -751,6 +811,7 @@ private final class BrokerServiceUpdateHost: ActionBrokerHosting {
     var resumeTokens: [String] = []
     var didStart: (() -> Void)?
     func start(completion: @escaping (Result<Void, Error>) -> Void, onInvalidated: @escaping () -> Void) {
+        startCount += 1
         completion(startError.map { .failure($0) } ?? .success(())); didStart?()
     }
     func stop() { stopCount += 1 }
@@ -770,6 +831,35 @@ private final class BrokerServiceUpdateHost: ActionBrokerHosting {
         try await onResume?()
         if let resumeError { throw resumeError }
         successfulResumeCount += 1
+    }
+}
+
+@MainActor
+private final class BrokerServiceRetryQueue {
+    private final class Pending {
+        let delay: Duration
+        let action: @MainActor () -> Void
+        var cancelled = false
+        init(delay: Duration, action: @escaping @MainActor () -> Void) {
+            self.delay = delay
+            self.action = action
+        }
+    }
+    private var pending: [Pending] = []
+    var nextDelay: Duration? { pending.first(where: { !$0.cancelled })?.delay }
+
+    func schedule(_ delay: Duration, _ action: @escaping @MainActor () -> Void) -> AnyCancellable {
+        let work = Pending(delay: delay, action: action)
+        pending.append(work)
+        return AnyCancellable { work.cancelled = true }
+    }
+
+    func fireNext() {
+        while !pending.isEmpty {
+            let work = pending.removeFirst()
+            if !work.cancelled { work.action(); return }
+        }
+        XCTFail("no pending connection retry")
     }
 }
 

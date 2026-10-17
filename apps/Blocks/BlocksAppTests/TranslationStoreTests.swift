@@ -16,7 +16,7 @@ final class TranslationStoreTests: XCTestCase {
         XCTAssertEqual(
             TranslationPanelGeometry.preferredOpeningSize(
                 sourceText: "", serviceCount: 3, inputSource: .manual
-            ), CGSize(width: 520, height: 282)
+            ), CGSize(width: 520, height: 345)
         )
         XCTAssertEqual(
             TranslationPanelGeometry.preferredOpeningSize(

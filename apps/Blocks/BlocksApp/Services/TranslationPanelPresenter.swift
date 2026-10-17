@@ -58,6 +58,7 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
     private let resultOrderDragCoordinator =
         TranslationServiceOrderDragCoordinator()
     private var isSuspended = false
+    private var trackingLanguageMenus: Set<String> = []
     private var isForcingClose = false
     private var isClosePending = false
     private var didFinishClose = false
@@ -103,8 +104,16 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
             pluginManager: pluginManager,
             pluginRuntime: pluginRuntime,
             resultOrderDragCoordinator: resultOrderDragCoordinator,
+            onLanguageMenuTrackingChange: { [weak self] menu, active in
+                if active {
+                    self?.trackingLanguageMenus.insert(menu)
+                } else {
+                    self?.trackingLanguageMenus.remove(menu)
+                }
+                self?.updateDismissalHandling()
+            },
             onExit: { [weak self] in
-                self?.dismissalController.requestDismissIfAllowed()
+                self?.dismissalController.requestEscapeDismissIfAllowed(origin: "swiftui-exit")
             },
             onClose: { [weak self] in self?.requestAnimatedClose() }
         )
@@ -119,7 +128,7 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
             rootView: contentView
         )
         panel.onEscape = { [weak self] in
-            self?.dismissalController.requestDismissIfAllowed()
+            self?.dismissalController.requestEscapeDismissIfAllowed(origin: "panel-cancel")
         }
         panel.onRequestClose = { [weak self] in
             self?.requestAnimatedClose()
@@ -343,7 +352,8 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
                 isSystemInteractionActive:
                     systemInteraction ?? AppleTranslationSystemInteractionGuard.shared.isActive,
                 isDirectInteractionActive:
-                    directInteraction ?? (resultOrderDragCoordinator.activeServiceID != nil)
+                    !trackingLanguageMenus.isEmpty
+                        || (directInteraction ?? (resultOrderDragCoordinator.activeServiceID != nil))
             )
         )
     }
@@ -383,6 +393,7 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
     private func finishClose(panel closingPanel: NSPanel?) {
         guard !didFinishClose else { return }
         didFinishClose = true
+        trackingLanguageMenus.removeAll()
         isClosePending = false
         presentationCoordinator.reset()
         dismissalController.shutdown()
@@ -631,7 +642,7 @@ enum TranslationPanelGeometry {
         if inputSource == .screenshotOCR {
             height = 477
         } else if sourceText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            height = 282
+            height = 345
         } else if sourceText.count > 180 || sourceText.components(separatedBy: .newlines).count > 3 {
             height = 477
         } else {

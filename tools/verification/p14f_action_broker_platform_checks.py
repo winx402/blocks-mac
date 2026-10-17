@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 PROJECT = ROOT / "apps/Blocks/Blocks.xcodeproj/project.pbxproj"
 CORE = ROOT / "apps/Blocks/BlocksCore/ActionBrokerXPC.swift"
+IDENTITY = ROOT / "apps/Blocks/BlocksCore/ActionBrokerIdentity.swift"
 BROKER = ROOT / "apps/Blocks/BlocksActionBroker/main.swift"
 HOST = ROOT / "apps/Blocks/BlocksApp/Features/Screenshot/Integration/ScreenshotActionHost.swift"
 MANAGER = ROOT / "apps/Blocks/BlocksApp/Features/Screenshot/Integration/ActionBrokerServiceManager.swift"
@@ -38,15 +39,23 @@ require(BROKER, [
     "CommandLine.arguments.first",
     "ReplyOnce",
     "proxy.cancel(",
+    "effectiveUserIdentifier",
+    "ActionBrokerIdentityValidator<SecCode, SecStaticCode>(operations: .system)",
+    "connection.setCodeSigningRequirement(authorization.connectionRequirement)",
+    "case appHost",
+    "case client",
+], failures)
+require(IDENTITY, [
     "SecCodeCheckValidity(",
     "kSecCSStrictValidate",
     "SecCodeCopySigningInformation",
-    "effectiveUserIdentifier",
-    "!own.teamID.isEmpty",
+    "!identity.teamID.isEmpty",
     "peer.teamID == own.teamID",
     'case "app.blocks.cli", "blocks":',
-    "case appHost",
-    "case client",
+    "ownIdentity = Self.readIdentity(",
+    "anchor apple generic",
+    "processID > 0",
+    "effectiveUserID == currentUserID",
 ], failures)
 require(HOST, ["NSXPCListener.anonymous", "BlocksActionBrokerHostXPCProtocol", "registerHost(listener.endpoint)", "activeRequestID", "cancelCurrentAction", "task.cancel()", "waitForTask", "executeAction", "ActionBrokerTerminalResponse", "actionID: request.actionID"], failures)
 require(MANAGER, ["SMAppService.agent", "service.register()", "service.unregister()", "requiresApproval"], failures)
@@ -88,7 +97,7 @@ else:
     failures.append({"code": "missing_file", "path": str(ENTITLEMENTS.relative_to(ROOT))})
 
 combined_xpc_source = "\n".join(
-    path.read_text() for path in [CORE, BROKER, HOST, CLI] if path.exists()
+    path.read_text() for path in [CORE, IDENTITY, BROKER, HOST, CLI] if path.exists()
 )
 if "BlocksActionBrokerXPCProtocol" in combined_xpc_source:
     failures.append({"code": "combined_host_client_protocol_remaining"})
@@ -118,6 +127,7 @@ for token in [
     "CodeSignOnCopy",
     "app.blocks.action-broker.plist in Copy LaunchAgent",
     "ScreenshotActionHost.swift in Sources",
+    "ActionBrokerIdentity.swift in Sources",
     "ActionBrokerServiceManager.swift in Sources",
     "CODE_SIGN_ENTITLEMENTS = BlocksActionBroker/BlocksActionBroker.entitlements;",
     "CREATE_INFOPLIST_SECTION_IN_BINARY = YES;",

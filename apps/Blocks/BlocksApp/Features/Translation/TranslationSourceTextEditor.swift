@@ -47,7 +47,7 @@ struct TranslationSourceTextEditor:
         textView.insertionPointColor = .controlAccentColor
         textView.textContainerInset = NSSize(
             width: 0,
-            height: 8
+            height: TranslationPanelSourceLayout.editorTextVerticalInset
         )
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false

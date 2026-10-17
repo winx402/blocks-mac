@@ -50,6 +50,12 @@
 		B908U0000000000000000001 /* AppUpdateCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F908U0000000000000000001; };
 		B908U0000000000000000068 /* AppUpdatePreparationPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = F908U0000000000000000068; };
 		B908U0000000000000000002 /* AppUpdateCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F908U0000000000000000002; };
+		B69I00000000000000000001 /* ActionBrokerIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = F69I00000000000000000001; };
+		B69I00000000000000000002 /* BrokerIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F69I00000000000000000002; };
+		B71M00000000000000000001 /* TranslationLanguageMenuPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = F71M00000000000000000001; };
+		B71M00000000000000000002 /* TranslationPanelInteractionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F71M00000000000000000002; };
+		B72C00000000000000000001 /* ClipboardContextMenuInteractionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F72C00000000000000000001; };
+		B72C00000000000000000002 /* PanelRuntimePreviewTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F72C00000000000000000002; };
 		B9090000000000000000001 /* CompactSourceHeaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9090000000000000000001; };
 		B9090000000000000000002 /* MainWindowPresentationCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9090000000000000000002; };
 		B9090000000000000000003 /* ScreenshotEditorIssueLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9090000000000000000003; };
@@ -607,6 +613,12 @@
 		F908U0000000000000000001 /* AppUpdateCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/AppUpdateCoordinator.swift; sourceTree = "<group>"; };
 		F908U0000000000000000068 /* AppUpdatePreparationPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/AppUpdatePreparationPresentation.swift; sourceTree = "<group>"; };
 		F908U0000000000000000002 /* AppUpdateCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdateCoordinatorTests.swift; sourceTree = "<group>"; };
+		F69I00000000000000000001 /* ActionBrokerIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActionBrokerIdentity.swift; sourceTree = "<group>"; };
+		F69I00000000000000000002 /* BrokerIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrokerIdentityTests.swift; sourceTree = "<group>"; };
+		F71M00000000000000000001 /* TranslationLanguageMenuPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Translation/Panel/TranslationLanguageMenuPicker.swift; sourceTree = "<group>"; };
+		F71M00000000000000000002 /* TranslationPanelInteractionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranslationPanelInteractionTests.swift; sourceTree = "<group>"; };
+		F72C00000000000000000001 /* ClipboardContextMenuInteractionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardContextMenuInteractionTests.swift; sourceTree = "<group>"; };
+		F72C00000000000000000002 /* PanelRuntimePreviewTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PanelRuntimePreviewTests.swift; sourceTree = "<group>"; };
 		F9090000000000000000001 /* CompactSourceHeaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompactSourceHeaderTests.swift; sourceTree = "<group>"; };
 		F9090000000000000000002 /* MainWindowPresentationCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindowPresentationCoordinatorTests.swift; sourceTree = "<group>"; };
 		F9090000000000000000003 /* ScreenshotEditorIssueLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotEditorIssueLayoutTests.swift; sourceTree = "<group>"; };
@@ -1143,6 +1155,10 @@
 				F06500000000000000000002 /* ShortcutStartupLifecycleTests.swift */,
 				F06500000000000000000003 /* ClipboardPasteWindowRoutingTests.swift */,
 				F908U0000000000000000002 /* AppUpdateCoordinatorTests.swift */,
+				F69I00000000000000000002 /* BrokerIdentityTests.swift */,
+				F71M00000000000000000002 /* TranslationPanelInteractionTests.swift */,
+				F72C00000000000000000001 /* ClipboardContextMenuInteractionTests.swift */,
+				F72C00000000000000000002 /* PanelRuntimePreviewTests.swift */,
 				F9090000000000000000001 /* CompactSourceHeaderTests.swift */,
 				F9090000000000000000002 /* MainWindowPresentationCoordinatorTests.swift */,
 				F9090000000000000000003 /* ScreenshotEditorIssueLayoutTests.swift */,
@@ -1238,6 +1254,7 @@
 				F10100000000000000000018 /* PrivacyAppScanner.swift */,
 				F10100000000000000000019 /* PrivacyPathSanitizer.swift */,
 				F14F00000000000000000001 /* ActionBrokerXPC.swift */,
+				F69I00000000000000000001 /* ActionBrokerIdentity.swift */,
 				F28C00000000000000000001 /* ClipboardBrokerProtocol.swift */,
 				F27X00000000000000000001 /* SelectionAgentXPC.swift */,
 				F15L00000000000000000001 /* TranslationModels.swift */,
@@ -1390,6 +1407,7 @@
 				F27X00000000000000000003 /* TranslationSourceTextEditor.swift */,
 				F15U00000000000000000001 /* TranslationFloatingPanelComponents.swift */,
 				F15U00000000000000000002 /* TranslationPanelContentLayout.swift */,
+				F71M00000000000000000001 /* TranslationLanguageMenuPicker.swift */,
 				F15U00000000000000000003 /* TranslationPanelDismissalController.swift */,
 				F15L0000000000000000001A /* TranslationServiceRuntime.swift */,
 				F15L0000000000000000001E /* TranslationFavoritesPane.swift */,
@@ -2013,6 +2031,7 @@
 				B0010000000000000000001D /* PrivacyAppScanner.swift in Sources */,
 				B0010000000000000000001E /* PrivacyPathSanitizer.swift in Sources */,
 				B14F00000000000000000001 /* ActionBrokerXPC.swift in Sources */,
+				B69I00000000000000000001 /* ActionBrokerIdentity.swift in Sources */,
 				B28C00000000000000000001 /* ClipboardBrokerProtocol.swift in Sources */,
 				B27X00000000000000000001 /* SelectionAgentXPC.swift in Sources */,
 				B15L00000000000000000001 /* TranslationModels.swift in Sources */,
@@ -2090,6 +2109,7 @@
 				B27X00000000000000000003 /* TranslationSourceTextEditor.swift in Sources */,
 				B15U00000000000000000001 /* TranslationFloatingPanelComponents.swift in Sources */,
 				B15U00000000000000000002 /* TranslationPanelContentLayout.swift in Sources */,
+				B71M00000000000000000001 /* TranslationLanguageMenuPicker.swift in Sources */,
 				B15U00000000000000000003 /* TranslationPanelDismissalController.swift in Sources */,
 				B15L0000000000000000001A /* TranslationServiceRuntime.swift in Sources */,
 				B15L0000000000000000001E /* TranslationFavoritesPane.swift in Sources */,
@@ -2312,6 +2332,10 @@
 			buildActionMask = 2147483647;
 			files = (
 				B908U0000000000000000002 /* AppUpdateCoordinatorTests.swift in Sources */,
+				B69I00000000000000000002 /* BrokerIdentityTests.swift in Sources */,
+				B71M00000000000000000002 /* TranslationPanelInteractionTests.swift in Sources */,
+				B72C00000000000000000001 /* ClipboardContextMenuInteractionTests.swift in Sources */,
+				B72C00000000000000000002 /* PanelRuntimePreviewTests.swift in Sources */,
 				B9090000000000000000001 /* CompactSourceHeaderTests.swift in Sources */,
 				B9090000000000000000002 /* MainWindowPresentationCoordinatorTests.swift in Sources */,
 				B9090000000000000000003 /* ScreenshotEditorIssueLayoutTests.swift in Sources */,

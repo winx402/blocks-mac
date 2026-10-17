@@ -2936,6 +2936,11 @@ private struct ActionBrokerSettingsSection: View {
                         : ActionBrokerSettingsStatePresentation.detail(for: manager.state)
                 )
             ) {
+                if manager.state == .recoveryRequired {
+                    Button(L10n.string("settings.agentCLI.actionBroker.recheck")) {
+                        manager.recheckConnection()
+                    }
+                }
                 SettingsBooleanSwitch(L10n.string("settings.agentCLI.actionBroker.enable"), isOn: Binding(
                     get: { manager.isEnabled },
                     set: manager.setEnabled
@@ -2963,6 +2968,8 @@ enum ActionBrokerSettingsStatePresentation {
             L10n.string("settings.agentCLI.actionBroker.reconnecting")
         case .recovering:
             L10n.string("settings.agentCLI.actionBroker.recovering")
+        case .recoveryRequired:
+            L10n.string("settings.agentCLI.actionBroker.recoveryRequired")
         case .enabled:
             L10n.string("settings.agentCLI.actionBroker.enabled")
         case .unavailable:
@@ -2980,7 +2987,7 @@ enum ActionBrokerSettingsStatePresentation {
             .success
         case .requiresApproval, .connecting, .reconnecting, .recovering:
             .warning
-        case .failed, .unavailable:
+        case .failed, .unavailable, .recoveryRequired:
             .error
         case .disabled:
             .information

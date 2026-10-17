@@ -18,10 +18,56 @@ enum TranslationPanelSourceLayout {
         sourceTextHeaderHeight
     }
     static let sourceEditorMinimumHeight: CGFloat = 48
-    static let sourceEditorDefaultHeight: CGFloat = 52
-    static let screenshotEditorDefaultHeight: CGFloat = 96
+    static let sourceEditorDefaultHeight: CGFloat = 96
+    static let screenshotEditorDefaultHeight: CGFloat = 112
+    static let sourceEditorMaximumHeight: CGFloat = 160
+    static let sourceHorizontalInset: CGFloat = 12
+    static let sourceVerticalInset: CGFloat = 8
+    static let editorTextVerticalInset: CGFloat = 4
+    static let minimumResultsHeight: CGFloat = 48
     static let sourceEditorSpacing = BlocksVisualTokens.Spacing.xs
     static let languageBarHeight: CGFloat = 40
+
+    /// Measures only source text, never result state. The text container uses
+    /// the same font, padding and wrapping as TranslationSourceTextEditor.
+    static func preferredEditorHeight(
+        text: String,
+        width: CGFloat,
+        source: TranslationInputSource
+    ) -> CGFloat {
+        let storage = NSTextStorage(
+            string: text,
+            attributes: [.font: NSFont.systemFont(ofSize: 14)]
+        )
+        let manager = NSLayoutManager()
+        let container = NSTextContainer(size: NSSize(
+            width: max(1, width),
+            height: .greatestFiniteMagnitude
+        ))
+        storage.addLayoutManager(manager)
+        manager.addTextContainer(container)
+        manager.ensureLayout(for: container)
+        let measured = ceil(manager.usedRect(for: container).height)
+            + editorTextVerticalInset * 2
+        return min(
+            sourceEditorMaximumHeight,
+            max(expandedEditorHeight(for: source), measured)
+        )
+    }
+
+    static func boundedEditorHeight(
+        preferredHeight: CGFloat,
+        availableHeight: CGFloat,
+        source: TranslationInputSource
+    ) -> CGFloat {
+        let reservedHeight = sourceHeaderHeight(for: source)
+            + sourceEditorSpacing + sourceVerticalInset * 2
+            + languageBarHeight + minimumResultsHeight + 2
+        return min(
+            preferredHeight,
+            max(sourceEditorMinimumHeight, availableHeight - reservedHeight)
+        )
+    }
 
     static func expandedEditorHeight(
         for source: TranslationInputSource
@@ -342,18 +388,15 @@ struct TranslationPanelContentLayout<
 >: View {
     let inputSource: TranslationInputSource
     let sourceText: String
-    let isInitialSelectionResolved: Bool
     private let sourceContent: (CGFloat) -> SourceContent
     private let languageContent: () -> LanguageContent
     private let resultsContent: () -> ResultsContent
 
-    @State private var openingEditorHeight: CGFloat?
-    @State private var awaitsInitialSelection = false
+    @State private var requestedEditorHeight: CGFloat?
 
     init(
         inputSource: TranslationInputSource,
         sourceText: String = "",
-        isInitialSelectionResolved: Bool = false,
         @ViewBuilder sourceContent:
             @escaping (CGFloat) -> SourceContent,
         @ViewBuilder languageContent:
@@ -363,43 +406,42 @@ struct TranslationPanelContentLayout<
     ) {
         self.inputSource = inputSource
         self.sourceText = sourceText
-        self.isInitialSelectionResolved = isInitialSelectionResolved
         self.sourceContent = sourceContent
         self.languageContent = languageContent
         self.resultsContent = resultsContent
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            fixedControls
-            Divider()
-            resultsViewport
-        }
-        .accessibilityElement(children: .contain)
-        .onAppear {
-            // Adapt once on presentation, not on every streamed result or edit.
-            openingEditorHeight = preferredEditorHeight
-            awaitsInitialSelection = inputSource == .selection && sourceText.isEmpty
-        }
-        .onChange(of: sourceText) { _, text in
-            if awaitsInitialSelection, !text.isEmpty {
-                if isInitialSelectionResolved {
-                    openingEditorHeight = preferredEditorHeight
-                }
-                awaitsInitialSelection = false
+        GeometryReader { geometry in
+            VStack(spacing: 0) {
+                fixedControls(editorHeight: TranslationPanelSourceLayout.boundedEditorHeight(
+                    preferredHeight: requestedEditorHeight
+                        ?? TranslationPanelSourceLayout.expandedEditorHeight(for: inputSource),
+                    availableHeight: geometry.size.height,
+                    source: inputSource
+                ))
+                Divider()
+                resultsViewport
+            }
+            .accessibilityElement(children: .contain)
+            .onAppear { updateEditorHeight(width: geometry.size.width) }
+            .onChange(of: sourceText) { _, _ in
+                updateEditorHeight(width: geometry.size.width)
+            }
+            .onChange(of: geometry.size.width) { _, width in
+                updateEditorHeight(width: width)
             }
         }
     }
 
-    private var fixedControls: some View {
+    private func fixedControls(editorHeight: CGFloat) -> some View {
         VStack(
             alignment: .leading,
             spacing: 0
         ) {
-            sourceContent(sourceEditorHeight)
-                .padding(.horizontal, TranslationPanelMetrics.contentInset)
-                .padding(.top, 12)
-                .padding(.bottom, 13)
+            sourceContent(editorHeight)
+                .padding(.horizontal, TranslationPanelSourceLayout.sourceHorizontalInset)
+                .padding(.vertical, TranslationPanelSourceLayout.sourceVerticalInset)
             Divider()
             languageContent()
                 .frame(
@@ -428,14 +470,11 @@ struct TranslationPanelContentLayout<
         .accessibilitySortPriority(1)
     }
 
-    private var sourceEditorHeight: CGFloat {
-        openingEditorHeight ?? preferredEditorHeight
-    }
-
-    private var preferredEditorHeight: CGFloat {
-        if sourceText.count > 180 || sourceText.components(separatedBy: .newlines).count > 3 {
-            return 112
-        }
-        return TranslationPanelSourceLayout.expandedEditorHeight(for: inputSource)
+    private func updateEditorHeight(width: CGFloat) {
+        requestedEditorHeight = TranslationPanelSourceLayout.preferredEditorHeight(
+            text: sourceText,
+            width: width - TranslationPanelSourceLayout.sourceHorizontalInset * 2,
+            source: inputSource
+        )
     }
 }

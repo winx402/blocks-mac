@@ -77,7 +77,7 @@ final class TranslationPanelDismissalController {
     private let keyMonitorRegistrar: TranslationPanelKeyMonitorRegistering
     private lazy var escapeHotKeyController =
         BlocksGlobalEscapeHotKeyController { [weak self] in
-            self?.requestDismissIfAllowed()
+            self?.requestEscapeDismissIfAllowed(origin: "carbon-escape")
         }
 
     init(
@@ -162,6 +162,11 @@ final class TranslationPanelDismissalController {
         requestDismissIfAllowed(for: visibleSessionIdentifier)
     }
 
+    func requestEscapeDismissIfAllowed(origin: String) {
+        TranslationPanelInteractionDiagnostics.record(origin, isActive: state.isDirectInteractionActive)
+        requestDismissIfAllowed(for: visibleSessionIdentifier)
+    }
+
     private func requestDismissIfAllowed(for sessionIdentifier: UInt) {
         guard sessionIdentifier == visibleSessionIdentifier,
               state.allowsImplicitDismissal,
@@ -170,6 +175,7 @@ final class TranslationPanelDismissalController {
         }
         guard !hasRequestedDismissalForVisibleSession else { return }
         hasRequestedDismissalForVisibleSession = true
+        TranslationPanelInteractionDiagnostics.record("implicit-panel-dismiss", isActive: state.isDirectInteractionActive)
         onDismiss()
     }
 
@@ -184,6 +190,7 @@ final class TranslationPanelDismissalController {
         localEscapeMonitor = keyMonitorRegistrar.addLocalKeyDownMonitor {
             [weak self] event in
             guard Self.isUnmodifiedEscape(event) else { return event }
+            TranslationPanelInteractionDiagnostics.record("local-escape", isActive: self?.state.isDirectInteractionActive == true)
             Task { @MainActor [weak self] in
                 self?.requestDismissIfAllowed(for: sessionIdentifier)
             }
@@ -192,6 +199,7 @@ final class TranslationPanelDismissalController {
         globalEscapeMonitor = keyMonitorRegistrar.addGlobalKeyDownMonitor {
             [weak self] event in
             guard Self.isUnmodifiedEscape(event) else { return }
+            TranslationPanelInteractionDiagnostics.record("global-escape", isActive: self?.state.isDirectInteractionActive == true)
             Task { @MainActor [weak self] in
                 self?.requestDismissIfAllowed(for: sessionIdentifier)
             }

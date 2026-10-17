@@ -461,7 +461,12 @@ final class TranslationPanelSessionModel: ObservableObject, Identifiable {
     }
 
     func swapLanguagesAndRun() {
-        guard let sourceLanguage else { return }
+        guard let sourceLanguage else {
+            operationError = L10n.string(
+                "translation.panel.swapLanguages.automaticSourceHint"
+            )
+            return
+        }
         let previousTarget = targetLanguage
         self.sourceLanguage = previousTarget
         targetLanguage = sourceLanguage

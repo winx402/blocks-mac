@@ -6,8 +6,9 @@ import SwiftUI
 /// double-click before forwarding semantic actions to SwiftUI.
 ///
 /// SwiftUI remains the source of truth for selection and record actions. This
-/// view owns only the native gesture-recognizer lifecycle so callers never
-/// inspect a transient application event or infer double-clicks from timestamps.
+/// view owns the native gesture-recognizer lifecycle and leaves secondary
+/// clicks to the existing SwiftUI context menu. Callers never inspect transient
+/// application events or infer double-clicks from timestamps.
 struct ClipboardRecordPointerSurface: NSViewRepresentable {
     let panelSessionID: UUID?
     let recordID: String
@@ -52,8 +53,11 @@ final class ClipboardRecordPointerSurfaceView: NSView, NSGestureRecognizerDelega
     let singleClickRecognizer = NSClickGestureRecognizer()
     let doubleClickRecognizer = NSClickGestureRecognizer()
 
+    /// Injectable for hit-testing contracts without posting synthetic UI events.
+    var eventProvider: () -> NSEvent? = { NSApp.currentEvent }
+
+    private let diagnosticControlID = UUID()
     private var panelSessionID: UUID?
-    private var recordID = ""
     private var source = ClipboardPanelActivationSource.bottomCard
     private var onPointerPress: () -> Void = {}
     private var onSingleClick: () -> Void = {}
@@ -95,16 +99,38 @@ final class ClipboardRecordPointerSurfaceView: NSView, NSGestureRecognizerDelega
         true
     }
 
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let hit = super.hitTest(point) else { return nil }
+        guard let event = eventProvider(), Self.isContextMenuPointerEvent(event) else {
+            return hit
+        }
+        // This native overlay owns primary gestures only. Returning nil here
+        // lets the hosting view resolve its existing SwiftUI contextMenu,
+        // including business and plugin actions, instead of swallowing the hit.
+        logSecondaryRouting(event)
+        return nil
+    }
+
+    private static func isContextMenuPointerEvent(_ event: NSEvent) -> Bool {
+        switch event.type {
+        case .rightMouseDown, .rightMouseUp, .rightMouseDragged:
+            true
+        case .leftMouseDown, .leftMouseUp, .leftMouseDragged:
+            event.modifierFlags.contains(.control)
+        default:
+            false
+        }
+    }
+
     func configure(
         panelSessionID: UUID?,
-        recordID: String,
+        recordID _: String,
         source: ClipboardPanelActivationSource,
         onPointerPress: @escaping () -> Void,
         onSingleClick: @escaping () -> Void,
         onDoubleClick: @escaping () -> Void
     ) {
         self.panelSessionID = panelSessionID
-        self.recordID = recordID
         self.source = source
         self.onPointerPress = onPointerPress
         self.onSingleClick = onSingleClick
@@ -132,7 +158,7 @@ final class ClipboardRecordPointerSurfaceView: NSView, NSGestureRecognizerDelega
     ) -> Bool {
         let isPrimaryPointerEvent = switch event.type {
         case .leftMouseDown, .leftMouseUp, .leftMouseDragged:
-            event.buttonNumber == 0
+            event.buttonNumber == 0 && !event.modifierFlags.contains(.control)
         default:
             false
         }
@@ -194,7 +220,15 @@ final class ClipboardRecordPointerSurfaceView: NSView, NSGestureRecognizerDelega
             recognizerName = "unknown"
         }
         Self.logger.debug(
-            "session=\(self.panelSessionID?.uuidString ?? "none", privacy: .public) record=\(String(self.recordID.suffix(8)), privacy: .public) source=\(self.source.rawValue, privacy: .public) stage=\(stage, privacy: .public) recognizer=\(recognizerName, privacy: .public) state=\(self.recognizerStateName(recognizer.state), privacy: .public) committed=\(committed, privacy: .public)"
+            "session=\(self.panelSessionID?.uuidString ?? "none", privacy: .public) control=\(self.diagnosticControlID.uuidString, privacy: .public) source=\(self.source.rawValue, privacy: .public) stage=\(stage, privacy: .public) recognizer=\(recognizerName, privacy: .public) state=\(self.recognizerStateName(recognizer.state), privacy: .public) committed=\(committed, privacy: .public)"
+        )
+#endif
+    }
+
+    private func logSecondaryRouting(_ event: NSEvent) {
+#if DEBUG
+        Self.logger.debug(
+            "session=\(self.panelSessionID?.uuidString ?? "none", privacy: .public) control=\(self.diagnosticControlID.uuidString, privacy: .public) source=\(self.source.rawValue, privacy: .public) stage=secondary-pass-through eventType=\(event.type.rawValue, privacy: .public) controlClick=\(event.modifierFlags.contains(.control), privacy: .public) window=\(self.window?.windowNumber ?? -1, privacy: .public)"
         )
 #endif
     }

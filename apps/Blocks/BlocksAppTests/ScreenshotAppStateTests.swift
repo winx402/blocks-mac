@@ -10496,7 +10496,7 @@ final class ScreenshotAppStateTests: XCTestCase {
             )
         )
         fixture.host.completeLatest(.failure(TestFailure.expected))
-        XCTAssertEqual(fixture.manager.state, .recovering)
+        XCTAssertEqual(fixture.manager.state, .recoveryRequired)
 
         fixture.manager.setEnabled(false)
         await fixture.manager.serviceChangeTask?.value
@@ -10540,7 +10540,7 @@ final class ScreenshotAppStateTests: XCTestCase {
         fixture.scheduler.fireNext()
         fixture.host.completeLatest(.failure(TestFailure.expected))
 
-        XCTAssertEqual(fixture.manager.state, .recovering)
+        XCTAssertEqual(fixture.manager.state, .recoveryRequired)
         XCTAssertEqual(fixture.host.startCount, 3)
         XCTAssertEqual(fixture.scheduler.pendingCount, 1)
 
