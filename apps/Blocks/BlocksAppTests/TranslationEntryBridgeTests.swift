@@ -9308,11 +9308,11 @@ final class TranslationEntryBridgeTests: XCTestCase {
         presenter.present()
         let panel = try XCTUnwrap(presenter.panelForTesting)
         let expected = TranslationPanelGeometry.centeredFrame(
-            preferredSize: CGSize(width: 520, height: 282),
+            preferredSize: CGSize(width: 520, height: 345),
             visibleFrame: visible
         )
         // AppKit aligns native window origins to device pixels. CI's 1x
-        // 1024x677 visible area has a half-point ideal center (188.5 -> 188).
+        // display can have a half-point ideal center for other visible sizes.
         // Permit at most half a physical pixel, never a saved-origin offset.
         XCTAssertGreaterThan(panel.backingScaleFactor, 0)
         let pixelTolerance = 0.5 / panel.backingScaleFactor
