@@ -6,12 +6,21 @@
 
 ## 安装与发行状态
 
-首版目标为 Apple Silicon / macOS 14+。目前尚未发布可供普通用户下载的官方
-签名、公证安装包，不要把源码构建产物当作正式发行版。
+官方 Beta 已在 [GitHub Releases](https://github.com/winx402/blocks-mac/releases) 提供
+Developer ID 签名、公证的 DMG，支持 Apple Silicon / macOS 14+。普通用户不需要 Xcode
+或开发证书：下载最新 Beta，正常退出正在运行的 Blocks 和划词助手后，将 Blocks 拖入
+“应用程序”；升级时替换已有安装，不另外保留一份旧 App。
 
-`LocalDevelopment`、统一安装/发布入口、内置 Helper 和 App 内更新代码已接入。
-源码版已完成无开发证书构建、安装启动及原地重装验证；完整功能与官方发行仍在验收，
-不会把未验证能力标为通过。源码构建需要完整 Xcode 26+，不需要 Apple 开发证书。
+App 提供“检查更新”和更新设置；Beta 更新需要在设置中主动开启。若应用内更新被旧版
+后台服务阻塞，请保留现有数据和诊断，不要强杀服务或清除配对来绕过检查。
+仓库内的安装脚本也支持用 `--version` 指定完整的已发布标签，详见
+[源码安装与独立发布](docs/技术知识库/源码安装与独立发布.md)。
+
+## 从源码开发
+
+源码构建需要完整 Xcode 26+，不需要 Apple 开发证书。`LocalDevelopment` 使用独立运行身份，
+不被官方自动更新覆盖。无证书构建、安装启动及原地重装已有验证，具体功能与权限组合的
+验收边界见项目记录，不将源码构建产物当作官方发行包。
 
 ```sh
 git clone https://github.com/winx402/blocks-mac.git
