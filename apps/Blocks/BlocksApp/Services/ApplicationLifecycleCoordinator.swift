@@ -17,6 +17,7 @@ final class ApplicationLifecycleCoordinator {
     enum State: Equatable { case active, preparing, prepared, resuming }
     enum Intent: String { case update, quit }
     enum DiagnosticEvent: Equatable {
+        enum AdmissionCheckpoint: String { case preHook = "pre_hook", postHook = "post_hook" }
         enum ParticipantState: String { case started, completed }
         enum FailureCategory: String {
             case missingParticipants = "missing_participants"
@@ -31,6 +32,7 @@ final class ApplicationLifecycleCoordinator {
         case participant(Intent, id: String, state: ParticipantState)
         case completed(Intent)
         case failed(Intent, FailureCategory)
+        case admission(AdmissionCheckpoint, ApplicationOperationAdmissionGate.DiagnosticSnapshot)
         case recoveryStarted(Intent)
         case recoveryCompleted(Intent)
     }
@@ -85,6 +87,9 @@ final class ApplicationLifecycleCoordinator {
     private var participants: [Participant] = []
     private var pausedParticipants: [Participant] = []
     private var recoveryTask: Task<Void, Never>?
+    private var pendingUpdatePreparationID: UUID?
+    private var usesOwnedUpdateAdmission = false
+    private var updateAdmission: ApplicationOperationAdmissionGate.UpdatePause?
     private let diagnosticRecorder: DiagnosticRecorder
 
     init(requiredParticipantIDs: Set<String>, diagnosticRecorder: @escaping DiagnosticRecorder = { _ in }) {
@@ -112,12 +117,39 @@ final class ApplicationLifecycleCoordinator {
     func beginQuit() {
         quitCommitted = true
         ApplicationOperationAdmissionGate.closeAdmissionForQuit()
+        if pendingUpdatePreparationID != nil {
+            // The update has not entered any participant yet. Relinquish its
+            // lifecycle slot synchronously so the ordinary Quit dispatcher can
+            // drain; its late Hook/wait continuation cannot mutate that owner.
+            pendingUpdatePreparationID = nil
+            usesOwnedUpdateAdmission = false
+            state = .active
+            intent = nil
+        }
         // Only real quit may cancel recovery. A cancelled update caller must
         // never pass its cancellation bit into remote resume commands.
         recoveryTask?.cancel()
     }
 
     func prepare(for requestedIntent: Intent = .update) async throws {
+        try await prepare(for: requestedIntent, beforeUpdateDrain: nil, admissionWaitLimit: .zero)
+    }
+
+    /// Reserve lifecycle ownership before the Hook can suspend. The Hook runs
+    /// once, with its existing admission/side-effect semantics; only the short
+    /// race after it is absorbed by an event-driven all-idle atomic cutoff.
+    func prepareForUpdate(
+        admissionWaitLimit: Duration = .milliseconds(750),
+        beforeDrain: @escaping @MainActor () async -> Void
+    ) async throws {
+        try await prepare(for: .update, beforeUpdateDrain: beforeDrain, admissionWaitLimit: admissionWaitLimit)
+    }
+
+    private func prepare(
+        for requestedIntent: Intent,
+        beforeUpdateDrain: (@MainActor () async -> Void)?,
+        admissionWaitLimit: Duration
+    ) async throws {
         record(.started(requestedIntent))
         if requestedIntent == .quit {
             beginQuit()
@@ -144,9 +176,17 @@ final class ApplicationLifecycleCoordinator {
         }
         if requestedIntent == .update {
             do {
-                try ApplicationOperationAdmissionGate.pauseAllIfIdle()
+                if beforeUpdateDrain != nil {
+                    record(.admission(.preHook, ApplicationOperationAdmissionGate.diagnosticSnapshot))
+                    // Keep the conservative pre-Hook refusal. No Hook runs
+                    // while already-admitted business work is active.
+                    try Task.checkCancellation()
+                    try ApplicationOperationAdmissionGate.ensureAllIdle()
+                } else {
+                    try ApplicationOperationAdmissionGate.pauseAllIfIdle()
+                }
             } catch {
-                record(.failed(requestedIntent, globalAdmissionFailureCategory(for: error)))
+                record(.failed(requestedIntent, error is CancellationError ? .cancelled : globalAdmissionFailureCategory(for: error)))
                 throw error
             }
         } else {
@@ -154,7 +194,22 @@ final class ApplicationLifecycleCoordinator {
         }
         intent = requestedIntent
         state = .preparing
+        let pendingUpdateID = beforeUpdateDrain.map { _ in UUID() }
+        pendingUpdatePreparationID = pendingUpdateID
+        usesOwnedUpdateAdmission = pendingUpdateID != nil
+        var participantsStarted = false
         do {
+            if let beforeUpdateDrain, let pendingUpdateID {
+                await beforeUpdateDrain()
+                try Task.checkCancellation()
+                guard !quitCommitted, pendingUpdatePreparationID == pendingUpdateID else { throw CancellationError() }
+                record(.admission(.postHook, ApplicationOperationAdmissionGate.diagnosticSnapshot))
+                updateAdmission = try await ApplicationOperationAdmissionGate.pauseAllWhenIdle(for: admissionWaitLimit)
+                try Task.checkCancellation()
+                guard !quitCommitted, pendingUpdatePreparationID == pendingUpdateID,
+                      updateAdmission?.isCurrent == true else { throw CancellationError() }
+                pendingUpdatePreparationID = nil
+            }
             if requestedIntent == .quit {
                 while ApplicationOperationAdmissionGate.totalActiveOperationCount > 0 {
                     try await Task.sleep(for: .milliseconds(20))
@@ -168,6 +223,7 @@ final class ApplicationLifecycleCoordinator {
             }
             let ordered = participants.filter { $0.id != "database" }
                 + participants.filter { $0.id == "database" }
+            participantsStarted = true
             for participant in ordered {
                 try Task.checkCancellation()
                 // Include the currently preparing participant: it may have
@@ -191,8 +247,17 @@ final class ApplicationLifecycleCoordinator {
             state = .prepared
             record(.completed(requestedIntent))
         } catch {
-            record(.failed(requestedIntent, preparationFailureCategory(for: error)))
-            if requestedIntent == .update, !quitCommitted { await recoverPausedParticipants() }
+            let category: DiagnosticEvent.FailureCategory
+            if !participantsStarted, error is ApplicationOperationAdmissionGate.AdmissionError {
+                category = globalAdmissionFailureCategory(for: error)
+            } else {
+                category = preparationFailureCategory(for: error)
+            }
+            record(.failed(requestedIntent, category))
+            if requestedIntent == .update, !quitCommitted {
+                pendingUpdatePreparationID = nil
+                await recoverPausedParticipants()
+            }
             throw error
         }
     }
@@ -237,7 +302,12 @@ final class ApplicationLifecycleCoordinator {
             await database.resume()
         }
         guard !quitCommitted else { return }
-        ApplicationOperationAdmissionGate.resumeAll()
+        if usesOwnedUpdateAdmission {
+            updateAdmission?.resumeIfOwned()
+            updateAdmission = nil
+        } else {
+            ApplicationOperationAdmissionGate.resumeAll()
+        }
         for participant in toResume where participant.id != "database" {
             guard !quitCommitted else { return }
             await participant.resume()
@@ -245,6 +315,7 @@ final class ApplicationLifecycleCoordinator {
         guard !quitCommitted else { return }
         state = .active
         intent = nil
+        usesOwnedUpdateAdmission = false
         record(.recoveryCompleted(.update))
     }
 
@@ -276,6 +347,11 @@ final class ApplicationLifecycleCoordinator {
             Self.logger.info("application-lifecycle event=completed intent=\(intent.rawValue, privacy: .public)")
         case let .failed(intent, category):
             Self.logger.error("application-lifecycle event=failed intent=\(intent.rawValue, privacy: .public) category=\(category.rawValue, privacy: .public)")
+        case let .admission(checkpoint, snapshot):
+            Self.logger.info("application-lifecycle event=admission_snapshot checkpoint=\(checkpoint.rawValue, privacy: .public) globally_paused=\(snapshot.globallyPaused, privacy: .public) active_gate_count=\(snapshot.activeGates.count, privacy: .public)")
+            for activity in snapshot.activeGates {
+                Self.logger.info("application-lifecycle event=admission_busy checkpoint=\(checkpoint.rawValue, privacy: .public) gate=\(activity.gateID, privacy: .public) active_count=\(activity.activeCount, privacy: .public) globally_paused=\(snapshot.globallyPaused, privacy: .public)")
+            }
         case let .recoveryStarted(intent):
             Self.logger.info("application-lifecycle event=recovery_started intent=\(intent.rawValue, privacy: .public)")
         case let .recoveryCompleted(intent):

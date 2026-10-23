@@ -6,6 +6,371 @@ import XCTest
 
 @MainActor
 final class ActionBrokerUpdateSafetyTests: XCTestCase {
+    func testPostHookAdmissionWaitRunsHookOnceAndCutsOffBeforeOrderedParticipants() async throws {
+        defer { ApplicationOperationAdmissionGate.resumeAll() }
+        let gate = ApplicationOperationAdmissionGate(name: "Clipboard live capture")
+        let workEntered = expectation(description: "post-Hook work is suspended")
+        let postHook = expectation(description: "post-Hook snapshot")
+        var releaseWork: CheckedContinuation<Void, Never>?
+        var work: Task<Void, Never>?
+        var hookCount = 0
+        var cancelledWork = false
+        var prepared: [String] = []
+        var resumed: [String] = []
+        var snapshots: [ApplicationOperationAdmissionGate.DiagnosticSnapshot] = []
+        let lifecycle = ApplicationLifecycleCoordinator(requiredParticipantIDs: ["producer", "database"], diagnosticRecorder: {
+            if case let .admission(checkpoint, snapshot) = $0 {
+                snapshots.append(snapshot)
+                if checkpoint == .postHook { postHook.fulfill() }
+            }
+        })
+        // Storage must remain last even when registered first.
+        for id in ["database", "producer"] {
+            try lifecycle.register(.init(id: id, pauseAndDrain: {
+                XCTAssertTrue(ApplicationOperationAdmissionGate.diagnosticSnapshot.globallyPaused)
+                XCTAssertNil(gate.begin(), "the cutoff must precede every participant")
+                prepared.append(id)
+            }, resume: { resumed.append(id) }))
+        }
+        let preparation = Task {
+            try await lifecycle.prepareForUpdate {
+                hookCount += 1
+                let hookLease = gate.begin()
+                XCTAssertNotNil(hookLease, "the Hook retains normal admission")
+                hookLease?.release()
+                work = gate.task {
+                    await withCheckedContinuation { releaseWork = $0; workEntered.fulfill() }
+                    cancelledWork = Task.isCancelled
+                }
+            }
+        }
+        await fulfillment(of: [workEntered, postHook], timeout: 1)
+        XCTAssertEqual(lifecycle.state, .preparing)
+        XCTAssertTrue(prepared.isEmpty)
+        XCTAssertFalse(ApplicationOperationAdmissionGate.diagnosticSnapshot.globallyPaused)
+        releaseWork?.resume()
+        try await preparation.value
+        await work?.value
+        XCTAssertEqual(hookCount, 1)
+        XCTAssertFalse(cancelledWork)
+        XCTAssertEqual(prepared, ["producer", "database"])
+        XCTAssertEqual(snapshots.count, 2)
+        XCTAssertTrue(snapshots.first?.activeGates.isEmpty == true)
+        XCTAssertEqual(snapshots.last?.activeGates.first?.gateID, "clipboard_capture")
+        XCTAssertEqual(snapshots.last?.activeGates.first?.activeCount, 1)
+        await lifecycle.resumeAfterCancelledUpdate()
+        XCTAssertEqual(resumed, ["database", "producer"])
+        XCTAssertEqual(lifecycle.state, .active)
+        let recovered = try gate.requireLease()
+        recovered.release()
+    }
+
+    func testPostHookBusyDeadlineDoesNotPauseOrCancelAdmittedWork() async throws {
+        defer { ApplicationOperationAdmissionGate.resumeAll() }
+        let gate = ApplicationOperationAdmissionGate(name: "Clipboard live capture")
+        let workEntered = expectation(description: "admitted work reached its continuation")
+        var releaseWork: CheckedContinuation<Void, Never>?
+        var work: Task<Void, Never>?
+        var cancelledWork = false
+        var prepared = 0
+        var resumed = 0
+        let lifecycle = ApplicationLifecycleCoordinator(requiredParticipantIDs: ["producer"])
+        try lifecycle.register(.init(id: "producer", pauseAndDrain: { prepared += 1 }, resume: { resumed += 1 }))
+        do {
+            try await lifecycle.prepareForUpdate(admissionWaitLimit: .milliseconds(30)) {
+                work = gate.task {
+                    await withCheckedContinuation { releaseWork = $0; workEntered.fulfill() }
+                    cancelledWork = Task.isCancelled
+                }
+            }
+            XCTFail("a still-busy deadline must refuse preparation")
+        } catch ApplicationOperationAdmissionGate.AdmissionError.busy { }
+        await fulfillment(of: [workEntered], timeout: 1)
+        XCTAssertEqual(prepared, 0)
+        XCTAssertEqual(resumed, 0)
+        XCTAssertEqual(lifecycle.state, .active)
+        XCTAssertEqual(gate.activeOperationCount, 1)
+        XCTAssertFalse(ApplicationOperationAdmissionGate.diagnosticSnapshot.globallyPaused)
+        let stillAdmitted = try gate.requireLease()
+        stillAdmitted.release()
+        releaseWork?.resume()
+        await work?.value
+        XCTAssertFalse(cancelledWork)
+    }
+
+    func testPostHookPreflightStillRefusesExistingWorkWithoutRunningHook() async throws {
+        defer { ApplicationOperationAdmissionGate.resumeAll() }
+        let gate = ApplicationOperationAdmissionGate(name: "preflight-fixture")
+        let lease = try gate.requireLease()
+        defer { lease.release() }
+        var hookCount = 0
+        let lifecycle = ApplicationLifecycleCoordinator(requiredParticipantIDs: [])
+        do {
+            try await lifecycle.prepareForUpdate { hookCount += 1 }
+            XCTFail("pre-Hook work must retain the conservative refusal")
+        } catch ApplicationOperationAdmissionGate.AdmissionError.busy { }
+        XCTAssertEqual(hookCount, 0)
+        XCTAssertEqual(lifecycle.state, .active)
+        XCTAssertFalse(ApplicationOperationAdmissionGate.diagnosticSnapshot.globallyPaused)
+    }
+
+    func testPostHookCancellationBeforePreparationRunsNoHookAndLeavesAdmissionOpen() async throws {
+        defer { ApplicationOperationAdmissionGate.resumeAll() }
+        var hookCount = 0
+        let lifecycle = ApplicationLifecycleCoordinator(requiredParticipantIDs: [])
+        let preparation = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            try await lifecycle.prepareForUpdate { hookCount += 1 }
+        }
+        do { try await preparation.value; XCTFail("cancelled preparation was admitted") }
+        catch is CancellationError { }
+        XCTAssertEqual(hookCount, 0)
+        XCTAssertEqual(lifecycle.state, .active)
+        XCTAssertFalse(ApplicationOperationAdmissionGate.diagnosticSnapshot.globallyPaused)
+    }
+
+    func testPostHookCancellationDuringWaitRemovesWaiterWithoutCancellingWork() async throws {
+        defer { ApplicationOperationAdmissionGate.resumeAll() }
+        let gate = ApplicationOperationAdmissionGate(name: "wait-cancellation-fixture")
+        let postHook = expectation(description: "wait registered before actor yields")
+        var lease: ApplicationOperationAdmissionGate.Lease?
+        var prepared = 0
+        let lifecycle = ApplicationLifecycleCoordinator(requiredParticipantIDs: ["producer"], diagnosticRecorder: {
+            if case .admission(.postHook, _) = $0 { postHook.fulfill() }
+        })
+        try lifecycle.register(.init(id: "producer", pauseAndDrain: { prepared += 1 }, resume: {}))
+        let preparation = Task { try await lifecycle.prepareForUpdate { lease = gate.begin() } }
+        await fulfillment(of: [postHook], timeout: 1)
+        preparation.cancel()
+        do { try await preparation.value; XCTFail("cancelled waiter prepared") }
+        catch is CancellationError { }
+        XCTAssertEqual(lifecycle.state, .active)
+        XCTAssertEqual(prepared, 0)
+        XCTAssertEqual(gate.activeOperationCount, 1)
+        lease?.release()
+        XCTAssertFalse(ApplicationOperationAdmissionGate.diagnosticSnapshot.globallyPaused,
+                       "a cancelled waiter must not acquire a late cutoff")
+    }
+
+    func testPostHookCancellationAfterAtomicAcquireBeforeActorResumesReleasesOnlyItsCutoff() async throws {
+        defer { ApplicationOperationAdmissionGate.resumeAll() }
+        let gate = ApplicationOperationAdmissionGate(name: "acquire-cancellation-fixture")
+        let postHook = expectation(description: "wait registered")
+        var lease: ApplicationOperationAdmissionGate.Lease?
+        var prepared = 0
+        let lifecycle = ApplicationLifecycleCoordinator(requiredParticipantIDs: ["producer"], diagnosticRecorder: {
+            if case .admission(.postHook, _) = $0 { postHook.fulfill() }
+        })
+        try lifecycle.register(.init(id: "producer", pauseAndDrain: { prepared += 1 }, resume: {}))
+        let preparation = Task { try await lifecycle.prepareForUpdate { lease = gate.begin() } }
+        await fulfillment(of: [postHook], timeout: 1)
+        lease?.release()
+        // No await between release and cancellation: the continuation has
+        // resolved successfully, but its MainActor receiver has not run.
+        XCTAssertTrue(ApplicationOperationAdmissionGate.diagnosticSnapshot.globallyPaused)
+        preparation.cancel()
+        do { try await preparation.value; XCTFail("cancelled acquired cutoff prepared") }
+        catch is CancellationError { }
+        XCTAssertEqual(prepared, 0)
+        XCTAssertEqual(lifecycle.state, .active)
+        XCTAssertFalse(ApplicationOperationAdmissionGate.diagnosticSnapshot.globallyPaused)
+    }
+
+    func testPostHookQuitDuringWaitWinsWithoutResumeAndLateWaiterCannotMutateQuit() async throws {
+        defer { ApplicationOperationAdmissionGate.resumeAll() }
+        let gate = ApplicationOperationAdmissionGate(name: "quit-wait-fixture")
+        let postHook = expectation(description: "update waits")
+        let quitHookEntered = expectation(description: "ordinary Quit owns lifecycle")
+        var lease: ApplicationOperationAdmissionGate.Lease?
+        var releaseQuitHook: CheckedContinuation<Void, Never>?
+        var prepared = 0
+        var resumed = 0
+        let lifecycle = ApplicationLifecycleCoordinator(requiredParticipantIDs: ["producer"], diagnosticRecorder: {
+            if case .admission(.postHook, _) = $0 { postHook.fulfill() }
+        })
+        try lifecycle.register(.init(id: "producer", pauseAndDrain: { prepared += 1 }, resume: { resumed += 1 }))
+        lifecycle.beforeQuitDrain = {
+            await withCheckedContinuation { releaseQuitHook = $0; quitHookEntered.fulfill() }
+        }
+        let update = Task { try await lifecycle.prepareForUpdate { lease = gate.begin() } }
+        await fulfillment(of: [postHook], timeout: 1)
+        lifecycle.beginQuit()
+        let quit = Task { try await lifecycle.prepare(for: .quit) }
+        lease?.release()
+        await fulfillment(of: [quitHookEntered], timeout: 1)
+        do { try await update.value; XCTFail("update survived committed Quit") } catch { }
+        XCTAssertEqual(lifecycle.state, .preparing)
+        XCTAssertEqual(lifecycle.intent, .quit)
+        XCTAssertEqual(resumed, 0)
+        XCTAssertTrue(ApplicationOperationAdmissionGate.diagnosticSnapshot.globallyPaused)
+        releaseQuitHook?.resume()
+        try await quit.value
+        XCTAssertEqual(prepared, 1)
+        XCTAssertEqual(lifecycle.state, .prepared)
+        await lifecycle.resumeAfterCancelledUpdate()
+        XCTAssertEqual(resumed, 0)
+        XCTAssertNil(gate.begin())
+    }
+
+    func testPostHookQuitAfterAcquirePreventsCancelledTokenFromReopeningAdmission() async throws {
+        defer { ApplicationOperationAdmissionGate.resumeAll() }
+        let gate = ApplicationOperationAdmissionGate(name: "quit-acquire-fixture")
+        let postHook = expectation(description: "update waits")
+        var lease: ApplicationOperationAdmissionGate.Lease?
+        let lifecycle = ApplicationLifecycleCoordinator(requiredParticipantIDs: [], diagnosticRecorder: {
+            if case .admission(.postHook, _) = $0 { postHook.fulfill() }
+        })
+        let update = Task { try await lifecycle.prepareForUpdate { lease = gate.begin() } }
+        await fulfillment(of: [postHook], timeout: 1)
+        lease?.release()
+        XCTAssertTrue(ApplicationOperationAdmissionGate.diagnosticSnapshot.globallyPaused)
+        lifecycle.beginQuit()
+        update.cancel()
+        do { try await update.value; XCTFail("update survived Quit/cancellation") } catch { }
+        XCTAssertTrue(ApplicationOperationAdmissionGate.diagnosticSnapshot.globallyPaused)
+        XCTAssertNil(gate.begin())
+        try await lifecycle.prepare(for: .quit)
+        XCTAssertEqual(lifecycle.state, .prepared)
+    }
+
+    func testPostHookCompetingPreparationCannotRunSecondHookOrReleaseFirstOwner() async throws {
+        defer { ApplicationOperationAdmissionGate.resumeAll() }
+        let gate = ApplicationOperationAdmissionGate(name: "competing-prepare-fixture")
+        let postHook = expectation(description: "first preparation waits")
+        var lease: ApplicationOperationAdmissionGate.Lease?
+        var secondHookCount = 0
+        let lifecycle = ApplicationLifecycleCoordinator(requiredParticipantIDs: [], diagnosticRecorder: {
+            if case .admission(.postHook, _) = $0 { postHook.fulfill() }
+        })
+        let first = Task { try await lifecycle.prepareForUpdate { lease = gate.begin() } }
+        await fulfillment(of: [postHook], timeout: 1)
+        do {
+            try await lifecycle.prepareForUpdate { secondHookCount += 1 }
+            XCTFail("a second lifecycle owner was admitted")
+        } catch ApplicationLifecycleCoordinator.SafetyError.preparationInProgress { }
+        XCTAssertEqual(secondHookCount, 0)
+        XCTAssertEqual(lifecycle.state, .preparing)
+        lease?.release()
+        try await first.value
+        XCTAssertTrue(ApplicationOperationAdmissionGate.diagnosticSnapshot.globallyPaused)
+        await lifecycle.resumeAfterCancelledUpdate()
+        XCTAssertFalse(ApplicationOperationAdmissionGate.diagnosticSnapshot.globallyPaused)
+    }
+
+    func testPostHookTwoCoordinatorsCannotRecoverAnotherCoordinatorsAcquiredCutoff() async throws {
+        defer { ApplicationOperationAdmissionGate.resumeAll() }
+        let gate = ApplicationOperationAdmissionGate(name: "two-coordinators-fixture")
+        let firstHookEntered = expectation(description: "first Hook is suspended without work")
+        let firstPostHook = expectation(description: "first waiter")
+        let secondPostHook = expectation(description: "second waiter")
+        var finishFirstHook: CheckedContinuation<Void, Never>?
+        var lease: ApplicationOperationAdmissionGate.Lease?
+        let firstLifecycle = ApplicationLifecycleCoordinator(requiredParticipantIDs: [], diagnosticRecorder: {
+            if case .admission(.postHook, _) = $0 { firstPostHook.fulfill() }
+        })
+        let secondLifecycle = ApplicationLifecycleCoordinator(requiredParticipantIDs: [], diagnosticRecorder: {
+            if case .admission(.postHook, _) = $0 { secondPostHook.fulfill() }
+        })
+        let first = Task { () -> Result<Void, Error> in
+            do {
+                try await firstLifecycle.prepareForUpdate {
+                    await withCheckedContinuation { finishFirstHook = $0; firstHookEntered.fulfill() }
+                }
+                return .success(())
+            } catch { return .failure(error) }
+        }
+        await fulfillment(of: [firstHookEntered], timeout: 1)
+        let second = Task { () -> Result<Void, Error> in
+            do {
+                try await secondLifecycle.prepareForUpdate { lease = gate.begin() }
+                return .success(())
+            } catch { return .failure(error) }
+        }
+        await fulfillment(of: [secondPostHook], timeout: 1)
+        finishFirstHook?.resume()
+        await fulfillment(of: [firstPostHook], timeout: 1)
+        lease?.release()
+        let outcomes = [await first.value, await second.value]
+        var successes = 0
+        var pausedFailures = 0
+        for result in outcomes {
+            switch result {
+            case .success: successes += 1
+            case .failure(let error):
+                if case ApplicationOperationAdmissionGate.AdmissionError.paused = error {
+                    pausedFailures += 1
+                } else {
+                    XCTFail("unexpected cutoff result: \(type(of: error))")
+                }
+            }
+        }
+        XCTAssertEqual(successes, 1)
+        XCTAssertEqual(pausedFailures, 1)
+        XCTAssertEqual([firstLifecycle.state, secondLifecycle.state].filter { $0 == .prepared }.count, 1)
+        XCTAssertTrue(ApplicationOperationAdmissionGate.diagnosticSnapshot.globallyPaused,
+                      "the failed coordinator must not reopen the winning cutoff")
+        await firstLifecycle.resumeAfterCancelledUpdate()
+        await secondLifecycle.resumeAfterCancelledUpdate()
+        XCTAssertFalse(ApplicationOperationAdmissionGate.diagnosticSnapshot.globallyPaused)
+    }
+
+    func testAdmissionWaitObservesBackgroundLeaseReleaseWithoutPolling() async throws {
+        defer { ApplicationOperationAdmissionGate.resumeAll() }
+        let gate = ApplicationOperationAdmissionGate(name: "background-finish-fixture")
+        let lease = try gate.requireLease()
+        let entered = expectation(description: "MainActor waiter is registered")
+        let pending = Task {
+            entered.fulfill()
+            return try await ApplicationOperationAdmissionGate.pauseAllWhenIdle(for: .seconds(1))
+        }
+        await fulfillment(of: [entered], timeout: 1)
+        let releasedOffMainActor = await Task.detached {
+            let offMainThread = !Thread.isMainThread
+            lease.release()
+            return offMainThread
+        }.value
+        let cutoff = try await pending.value
+        XCTAssertTrue(releasedOffMainActor)
+        XCTAssertTrue(cutoff.isCurrent)
+        XCTAssertNil(gate.begin())
+        XCTAssertTrue(cutoff.resumeIfOwned())
+    }
+
+    func testAdmissionZeroWaitIsOneImmediateAttemptAndSynchronousBusyAPIRemainsImmediate() async throws {
+        defer { ApplicationOperationAdmissionGate.resumeAll() }
+        let gate = ApplicationOperationAdmissionGate(name: "zero-wait-fixture")
+        let lease = try gate.requireLease()
+        XCTAssertThrowsError(try ApplicationOperationAdmissionGate.pauseAllIfIdle())
+        do {
+            _ = try await ApplicationOperationAdmissionGate.pauseAllWhenIdle(for: .zero)
+            XCTFail("zero wait must refuse active work")
+        } catch ApplicationOperationAdmissionGate.AdmissionError.busy { }
+        XCTAssertFalse(ApplicationOperationAdmissionGate.diagnosticSnapshot.globallyPaused)
+        lease.release()
+        let cutoff = try await ApplicationOperationAdmissionGate.pauseAllWhenIdle(for: .zero)
+        XCTAssertTrue(cutoff.isCurrent)
+        XCTAssertTrue(cutoff.resumeIfOwned())
+    }
+
+    func testAdmissionSnapshotsAllowlistGateNamesAndAggregateUnknownsWithoutContent() throws {
+        defer { ApplicationOperationAdmissionGate.resumeAll() }
+        let known = ApplicationOperationAdmissionGate(name: "Clipboard live capture")
+        let unknown = ApplicationOperationAdmissionGate(name: "/private/customer/secret.txt")
+        let plugin = ApplicationOperationAdmissionGate(name: "plugin:private-customer-id")
+        let leases = try [known.requireLease(), known.requireLease(), unknown.requireLease(), plugin.requireLease()]
+        defer { leases.forEach { $0.release() } }
+        let snapshot = ApplicationOperationAdmissionGate.diagnosticSnapshot
+        XCTAssertFalse(snapshot.globallyPaused)
+        XCTAssertEqual(snapshot.activeGates.map(\.gateID), ["clipboard_capture", "other"])
+        XCTAssertEqual(snapshot.activeGates.map(\.activeCount), [2, 2])
+        let rendered = String(describing: snapshot)
+        XCTAssertFalse(rendered.contains("customer"))
+        XCTAssertFalse(rendered.contains("secret.txt"))
+        XCTAssertFalse(rendered.contains("private-customer-id"))
+        ApplicationOperationAdmissionGate.closeAdmissionForQuit()
+        XCTAssertTrue(ApplicationOperationAdmissionGate.diagnosticSnapshot.globallyPaused)
+    }
+
     func testLocalCancellationUsesTheActionRequestIdentifierContract() {
         let generated = ActionRequestID.make().rawValue
         XCTAssertTrue(generated.hasPrefix("req_"))

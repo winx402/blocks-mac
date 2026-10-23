@@ -420,14 +420,9 @@ final class AppModel: ObservableObject {
     }
 
     private func prepareApplicationLifecycle() async throws {
-        if applicationLifecycle.state == .active {
-            // Keep the existing will-terminate hook, but never cancel admitted
-            // plugin/host work to get there. All-feature admission is checked
-            // again atomically after the hook has completed.
-            try ApplicationOperationAdmissionGate.ensureAllIdle()
+        try await applicationLifecycle.prepareForUpdate { [pluginRuntimeCoordinator] in
             _ = await pluginRuntimeCoordinator.dispatch(.init(name: .appWillTerminate))
         }
-        try await applicationLifecycle.prepare()
     }
 
     func resumeAfterCancelledApplicationUpdate() async {
