@@ -98,7 +98,7 @@ def release(tag: str = "v1.2.3", *, prerelease: bool = False, draft: bool = Fals
     }
 
 
-def fake_command(arguments, *, capture=False):
+def fake_command(arguments, *, capture=False, timeout=120):
     """In-process stand-ins for every external system tool used by the entry."""
     args = list(arguments)
     name = Path(args[0]).name
@@ -151,6 +151,18 @@ def fake_command(arguments, *, capture=False):
         status = 1 if os.environ.get("FIXTURE_BAD_GATEKEEPER") == "1" else 0
     elif name == "pgrep":
         status = 2 if os.environ.get("FIXTURE_PGREP_FAILURE") == "1" else (0 if os.environ.get("FIXTURE_BUSY") == "1" else 1)
+    elif name == "ps":
+        assert args == ["/bin/ps", "-axww", "-o", "pid=,comm="] and capture and timeout == 10
+        status = 2 if os.environ.get("FIXTURE_PGREP_FAILURE") == "1" else 0
+        if os.environ.get("FIXTURE_BUSY") == "1":
+            stdout = f'201 {os.environ["FIXTURE_INSTALL_DESTINATION"]}/Contents/MacOS/Blocks\n'
+    elif name == "launchctl":
+        assert args[:2] == ["/bin/launchctl", "print"] and capture and timeout == 10
+        kind, uid, label = args[2].split("/")
+        assert kind in {"gui", "user"} and uid == str(os.getuid()) and label == "app.blocks.action-broker"
+        description = f"user gui: {uid}" if kind == "gui" else f"uid: {uid}"
+        status = 113
+        stderr = f'Bad request.\nCould not find service "{label}" in domain for {description}\n'
     else:
         raise AssertionError(f"unexpected external tool: {args}")
     return __import__("subprocess").CompletedProcess(args, status, stdout, stderr)
@@ -166,11 +178,12 @@ def patched(module: ModuleType, name: str, value: object):
         setattr(module, name, original)
 
 
-def expect_refusal(call, expected: str) -> None:
+def expect_refusal(call, expected: str) -> Exception:
     try:
         call()
     except Exception as error:  # fixture checks assert the public refusal text
         assert expected in str(error), str(error)
+        return error
     else:
         raise AssertionError(f"expected refusal containing: {expected}")
 
@@ -192,11 +205,13 @@ def main() -> None:
             "FIXTURE_MOUNT": str(mount),
         }
         helper = load_helper()
+        real_command = helper.command
         # Exercise the real command wrapper, not the basename-only fakes below:
         # those fakes cannot detect a trusted executable pinned to the wrong
         # system directory. Never resolve security tools through caller PATH.
         expected_tools = {
             "spctl": "/usr/sbin/spctl",
+            "ps": "/bin/ps", "launchctl": "/bin/launchctl",
             **{name: f"/usr/bin/{name}" for name in
                ("curl", "hdiutil", "lipo", "codesign", "openssl", "pgrep")},
         }
@@ -210,6 +225,7 @@ def main() -> None:
                 arguments, options = invocations[-1]
                 assert arguments == [expected_path, "--fixture-argument"]
                 assert options["timeout"] == 120 and options["check"] is False
+                assert options["env"]["LC_ALL"] == options["env"]["LANG"] == "C"
                 if sys.platform == "darwin":
                     assert Path(expected_path).is_file(), expected_path
         reports.append({"case": "system_tools_use_existing_pinned_paths", "ok": True})
@@ -219,6 +235,7 @@ def main() -> None:
           with patched(helper, "command", fake_command):
             trusted = helper.load_policy(config)
             target_root = root / "installed"
+            os.environ["FIXTURE_INSTALL_DESTINATION"] = str(target_root / "Blocks.app")
             selected = helper.resolve_release(trusted, None)
 
             physical_work = root / "physical-attach-work"
@@ -446,6 +463,165 @@ def main() -> None:
             )
             os.environ.pop("FIXTURE_PGREP_FAILURE")
             reports.append({"case": "process_query_failure_never_treated_as_idle", "ok": True})
+
+            # All inventory is fake: never query or change a real process/job.
+            # A refused first or second fence may not even move the old app.
+            def fence_refusal(case, override, expected, *, second=False):
+                before_identity = (installed.stat().st_dev, installed.stat().st_ino)
+                before_info = (installed / "Contents/Info.plist").read_bytes()
+                before_stages = set(target_root.glob(".Blocks-official-install-*"))
+                seen = []
+                counts = {"ps": 0, "launchctl": 0}
+                def inventory(arguments, **options):
+                    args = list(arguments)
+                    tool = Path(args[0]).name
+                    assert tool not in {"pgrep", "kill", "pkill"}, "no process mutation or argv identity fallback"
+                    if tool in counts:
+                        counts[tool] += 1
+                        seen.append(args)
+                        response = override(args, counts)
+                        if response is not None:
+                            return response
+                    return fake_command(args, **options)
+                def no_rename(*_args):
+                    raise AssertionError("refused fence moved or promoted an app")
+                def no_pgrep(*_args):
+                    raise AssertionError("production fence fell back to argv/pgrep identity")
+                with patched(helper, "command", inventory), patched(helper, "rename_without_replacing", no_rename), patched(helper, "running", no_pgrep):
+                    error = expect_refusal(
+                        lambda: helper.install_to(target_root, mount / "Blocks.app", selected, trusted, root), expected,
+                    )
+                assert "PRIVATE_USER_CONTENT" not in str(error)
+                assert (installed.stat().st_dev, installed.stat().st_ino) == before_identity
+                assert (installed / "Contents/Info.plist").read_bytes() == before_info
+                assert set(target_root.glob(".Blocks-official-install-*")) == before_stages
+                assert not (target_root / ".Blocks-official-install.lock").exists()
+                assert all(args[0] in {"/bin/ps", "/bin/launchctl"} for args in seen)
+                assert all(args[1] == "print" for args in seen if args[0] == "/bin/launchctl")
+                if second:
+                    assert counts["ps"] == 2
+                reports.append({"case": case, "ok": True})
+                return seen
+
+            def result(args, status=0, stdout="", stderr=""):
+                return helper.subprocess.CompletedProcess(args, status, stdout, stderr)
+
+            # The main app is absent in every row; arbitrary same-bundle
+            # executables, including future helper names, must still fence it.
+            for executable in (
+                "Contents/MacOS/BlocksActionBroker",
+                "Contents/MacOS/BlocksClipboardBroker",
+                "Contents/Helpers/blocksHelper.app/Contents/MacOS/blocksHelper",
+                "Contents/Resources/CLI/blocks",
+                "Contents/PlugIns/BlocksPluginRunner",
+                "Contents/Resources/future-unlisted-worker",
+            ):
+                fence_refusal(
+                    "main_stopped_but_" + Path(executable).name + "_running",
+                    lambda args, _counts, executable=executable: result(args, stdout=f"202 {installed}/{executable}\n") if args[0] == "/bin/ps" else None,
+                    "installed_process_present, pid=202",
+                )
+
+            for kind in ("gui", "user"):
+                fence_refusal(
+                    f"empty_ps_but_{kind}_official_job_loaded_without_pid",
+                    lambda args, _counts, kind=kind: result(args, stdout="state = not running\n") if args[0] == "/bin/launchctl" and args[2].startswith(kind + "/") else None,
+                    "official_action_broker_loaded",
+                )
+
+            # A precise absent-service reply for *both* domains is required.
+            for label, status, stdout, stderr in (
+                ("missing_domain", 113, "", "Could not find domain\n"),
+                ("eperm", 1, "", "Operation not permitted PRIVATE_USER_CONTENT\n"),
+                ("unknown", 113, "", "PRIVATE_USER_CONTENT\n"),
+                ("empty_reply", 113, "", ""),
+                ("wrong_service", 113, "", f'Could not find service "app.blocks.dev.action-broker" in domain for uid: {os.getuid()}\n'),
+                ("wrong_domain", 113, "", f'Could not find service "app.blocks.action-broker" in domain for user gui: {os.getuid() + 1}\n'),
+                ("mixed_output", 113, "PRIVATE_USER_CONTENT", f'Could not find service "app.blocks.action-broker" in domain for user gui: {os.getuid()}\n'),
+                ("mixed_diagnostic", 113, "", f'Could not find service "app.blocks.action-broker" in domain for user gui: {os.getuid()}\nOperation not permitted\n'),
+            ):
+                for kind in ("gui", "user"):
+                    fence_refusal(
+                        f"{kind}_job_{label}_not_absence",
+                        lambda args, _counts, kind=kind, status=status, stdout=stdout, stderr=stderr: result(args, status, stdout, stderr) if args[0] == "/bin/launchctl" and args[2].startswith(kind + "/") else None,
+                        "official_action_broker_unknown",
+                    )
+
+            for label, stdout in (("malformed", "PRIVATE_USER_CONTENT\n"), ("invalid_pid", "-1 /unrelated\n"), ("missing_comm", "203\n")):
+                fence_refusal(
+                    "ps_" + label + "_not_idle",
+                    lambda args, _counts, stdout=stdout: result(args, stdout=stdout) if args[0] == "/bin/ps" else None,
+                    "process_query_malformed",
+                )
+            fence_refusal(
+                "ps_success_with_warning_not_idle",
+                lambda args, _counts: result(args, stderr="PRIVATE_USER_CONTENT") if args[0] == "/bin/ps" else None,
+                "process_query_unknown",
+            )
+
+            for tool in ("ps", "launchctl"):
+                for failure in ("permission", "timeout", "missing_tool", "invalid_encoding"):
+                    def query_failure(args, _counts, tool=tool, failure=failure):
+                        if Path(args[0]).name != tool:
+                            return None
+                        def failing_run(*_args, **_options):
+                            if failure == "permission":
+                                raise PermissionError("PRIVATE_USER_CONTENT")
+                            if failure == "missing_tool":
+                                raise FileNotFoundError(2, "PRIVATE_USER_CONTENT", args[0])
+                            if failure == "invalid_encoding":
+                                raise UnicodeError("PRIVATE_USER_CONTENT")
+                            raise helper.subprocess.TimeoutExpired(args + ["PRIVATE_USER_CONTENT"], 10)
+                        with patched(helper.subprocess, "run", failing_run):
+                            return real_command(args, capture=True, timeout=10)
+                    fence_refusal(
+                        f"{tool}_{failure}_not_idle", query_failure,
+                        "process_query_unknown" if tool == "ps" else "official_action_broker_unknown",
+                    )
+
+            fence_refusal(
+                "process_appears_at_second_fence_preserves_original",
+                lambda args, counts: result(args, stdout=f"204 {installed}/Contents/Resources/CLI/blocks\n") if args[0] == "/bin/ps" and counts["ps"] == 2 else None,
+                "installed_process_present", second=True,
+            )
+            for kind in ("gui", "user"):
+                fence_refusal(
+                    f"{kind}_job_appears_at_second_fence_preserves_original",
+                    lambda args, counts, kind=kind: result(args) if args[0] == "/bin/launchctl" and counts["ps"] == 2 and args[2].startswith(kind + "/") else None,
+                    "official_action_broker_loaded", second=True,
+                )
+
+            # Similar paths, a known development namespace, and unrelated
+            # non-path comm values must not be guessed to be our installation.
+            idle_seen = []
+            def unrelated_inventory(arguments, **options):
+                args = list(arguments)
+                idle_seen.append(args)
+                if args[0] == "/bin/ps":
+                    return result(args, stdout=(
+                        f"301 {installed}.old/Contents/MacOS/BlocksActionBroker\n"
+                        f"302 {target_root}/Blocks Dev.app/Contents/MacOS/BlocksActionBroker\n"
+                        "303 /unknown/BlocksActionBroker\n0 kernel_task\n"
+                    ))
+                return fake_command(args, **options)
+            with patched(helper, "command", unrelated_inventory):
+                helper.require_installation_idle(installed)
+            assert [args[2] for args in idle_seen if args[0] == "/bin/launchctl"] == [
+                f"gui/{os.getuid()}/app.blocks.action-broker", f"user/{os.getuid()}/app.blocks.action-broker",
+            ]
+            reports.append({"case": "similar_paths_and_independent_development_namespace_not_blocked", "ok": True})
+
+            idle_root = root / "two-fence-success"
+            bundle(idle_root / "Blocks.app", "0.9.0")
+            idle_seen.clear()
+            with patched(helper, "command", unrelated_inventory):
+                helper.install_to(idle_root, mount / "Blocks.app", selected, trusted, root)
+            assert [args for args in idle_seen if args[0] in {"/bin/ps", "/bin/launchctl"}] == [
+                ["/bin/ps", "-axww", "-o", "pid=,comm="],
+                ["/bin/launchctl", "print", f"gui/{os.getuid()}/app.blocks.action-broker"],
+                ["/bin/launchctl", "print", f"user/{os.getuid()}/app.blocks.action-broker"],
+            ] * 2
+            reports.append({"case": "successful_upgrade_checks_all_processes_and_both_domains_twice", "ok": True})
 
             # A promotion error with no competing destination restores the old
             # bundle and may clean the staging directory only after that fact.

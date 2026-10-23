@@ -98,12 +98,14 @@ def fail(message: str) -> None:
     raise InstallError(message)
 
 
-def command(arguments: Iterable[str], *, capture: bool = False) -> subprocess.CompletedProcess[str]:
+def command(arguments: Iterable[str], *, capture: bool = False, timeout: int = 120) -> subprocess.CompletedProcess[str]:
     command_line = list(arguments)
     # Installer trust decisions must not be redirected by a caller-controlled
     # PATH. Every tool below is supplied by macOS, not the release artifact.
     if command_line and command_line[0] == "spctl":
         command_line[0] = "/usr/sbin/spctl"
+    elif command_line and command_line[0] in {"ps", "launchctl"}:
+        command_line[0] = f"/bin/{command_line[0]}"
     elif command_line and command_line[0] in {"curl", "hdiutil", "lipo", "codesign", "openssl", "pgrep"}:
         command_line[0] = f"/usr/bin/{command_line[0]}"
     try:
@@ -113,7 +115,8 @@ def command(arguments: Iterable[str], *, capture: bool = False) -> subprocess.Co
             stdout=subprocess.PIPE if capture else None,
             stderr=subprocess.PIPE if capture else None,
             check=False,
-            timeout=120,
+            timeout=timeout,
+            env={**os.environ, "LC_ALL": "C", "LANG": "C"},
         )
     except FileNotFoundError as error:
         fail(f"required system tool is unavailable: {error.filename}")
@@ -493,6 +496,65 @@ def running(binary: Path) -> bool:
     fail(f"cannot determine whether Blocks is running; refusing replacement{suffix}")
 
 
+def require_installation_idle(destination: Path) -> None:
+    """Read-only replacement fence; no PID is not proof of service absence.
+
+    comm deliberately excludes argv, which may contain user input. Inspect all
+    executables in this installation, not just the main app or known helpers.
+    The official Mach label also fences a sleeping job from a different path;
+    the independent app.blocks.dev namespace is intentionally not queried.
+    """
+    try:
+        result = command(["/bin/ps", "-axww", "-o", "pid=,comm="], capture=True, timeout=10)
+    except (InstallError, OSError, UnicodeError):
+        fail("cannot determine whether Blocks is running (process_query_unknown); refusing replacement")
+    if result.returncode != 0 or not isinstance(result.stdout, str) or result.stderr != "":
+        fail("cannot determine whether Blocks is running (process_query_unknown); refusing replacement")
+    roots = {str(destination.absolute()), str(destination.resolve())}
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        fields = line.strip().split(None, 1)
+        if len(fields) != 2 or not re.fullmatch(r"(?:0|[1-9][0-9]*)", fields[0]):
+            fail("cannot determine whether Blocks is running (process_query_malformed); refusing replacement")
+        executable = fields[1]
+        if not os.path.isabs(executable):
+            # Kernel processes and unrelated unresolvable names are not
+            # evidence of a Blocks process and are never used as identity.
+            continue
+        paths = {os.path.normpath(executable)}
+        try:
+            paths.add(str(Path(executable).resolve()))
+        except (OSError, RuntimeError):
+            # The lexical target-tree match below remains sufficient to
+            # refuse; an unrelated process is not guessed to be our Broker.
+            pass
+        if any(path == root or path.startswith(root + "/") for root in roots for path in paths):
+            fail(f"Blocks is running (installed_process_present, pid={fields[0]}); quit it yourself and retry. "
+                 "The installer will not terminate applications or change services.")
+
+    uid = os.getuid()
+    label = "app.blocks.action-broker"
+    for kind in ("gui", "user"):
+        domain = f"{kind}/{uid}"
+        try:
+            result = command(["/bin/launchctl", "print", f"{domain}/{label}"], capture=True, timeout=10)
+        except (InstallError, OSError, UnicodeError):
+            fail(f"official_action_broker_unknown (domain={kind}, uid={uid}); refusing replacement without changing services")
+        if result.returncode == 0:
+            fail(f"official_action_broker_loaded (domain={kind}, uid={uid}); refusing replacement even without a PID. "
+                 "Disable the main CLI integration switch in Blocks Settings, then quit and retry; no service was changed.")
+        description = f"user gui: {uid}" if kind == "gui" else f"uid: {uid}"
+        missing = f'Could not find service "{label}" in domain for {description}'
+        # This is the existing development installer's documented macOS
+        # missing-service contract, tightened to reject mixed diagnostics.
+        # Missing domain, EPERM, timeout, or arbitrary rc=113 is not absence.
+        diagnostics = result.stderr.strip().splitlines() if isinstance(result.stderr, str) else []
+        if (result.returncode != 113 or result.stdout != ""
+                or diagnostics not in ([missing], ["Bad request.", missing])):
+            fail(f"official_action_broker_unknown (domain={kind}, uid={uid}); refusing replacement without changing services")
+
+
 def existing_managed_bundle(destination: Path, policy: Policy, work: Path) -> tuple[int, int] | None:
     """Return a stable identity only for an app this user may replace safely."""
     if not destination.exists() and not destination.is_symlink():
@@ -550,8 +612,7 @@ def install_to(directory: Path, candidate: Path, release: Release, policy: Polic
     except PermissionError as error:
         raise NotWritable(f"cannot create install lock in {directory}: {error}") from error
     try:
-        if original_identity is not None and running(destination / "Contents/MacOS/Blocks"):
-            fail("Blocks is running; quit it yourself and retry. The installer will not terminate applications.")
+        require_installation_idle(destination)
         stage_root = Path(tempfile.mkdtemp(prefix=".Blocks-official-install-", dir=directory))
         retain_stage = False
         old_bundle_moved = False
@@ -568,8 +629,7 @@ def install_to(directory: Path, candidate: Path, release: Release, policy: Polic
             current_identity = existing_managed_bundle(destination, policy, work)
             if current_identity != original_identity:
                 fail("Blocks destination changed during staging; refusing replacement")
-            if current_identity is not None and running(destination / "Contents/MacOS/Blocks"):
-                fail("Blocks started while the update was preparing; no files were changed")
+            require_installation_idle(destination)
             if current_identity is not None:
                 # Mark recovery as required before the filesystem operation so
                 # even an asynchronous interruption between rename(2) and the
