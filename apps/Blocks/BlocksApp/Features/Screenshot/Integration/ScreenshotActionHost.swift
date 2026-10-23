@@ -221,7 +221,7 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 let reply = ActionBrokerLifecycleReply(continuation)
                 let proxy = connection.remoteObjectProxyWithErrorHandler { _ in
-                    reply.finish(.failure(ActionBrokerUpdateError.unsupportedPeer))
+                    reply.finish(.failure(ActionBrokerUpdateError.connectionUnavailable))
                 } as? BlocksActionBrokerHostXPCProtocol
                 guard let proxy else { reply.finish(.failure(ActionBrokerUpdateError.unsupportedPeer)); return }
                 let invoked: Void? = proxy.probeUpdateLifecycle?(withReply: {
@@ -239,7 +239,7 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
                 if invoked == nil { reply.finish(.failure(ActionBrokerUpdateError.unsupportedPeer)) }
                 Task {
                     try? await Task.sleep(for: .seconds(2))
-                    reply.finish(.failure(ActionBrokerUpdateError.unsupportedPeer))
+                    reply.finish(.failure(ActionBrokerUpdateError.timedOut))
                 }
             }
             return connection
@@ -252,11 +252,11 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             let reply = ActionBrokerLifecycleReply(continuation)
             let proxy = connection.remoteObjectProxyWithErrorHandler { _ in
-                reply.finish(.failure(ActionBrokerUpdateError.unsupportedPeer))
+                reply.finish(.failure(ActionBrokerUpdateError.connectionUnavailable))
             } as? BlocksActionBrokerHostXPCProtocol
             guard let proxy else { reply.finish(.failure(ActionBrokerUpdateError.unsupportedPeer)); return }
-            let completion: (Bool, String?) -> Void = { accepted, _ in
-                reply.finish(accepted ? .success(()) : .failure(ActionBrokerUpdateError.busy))
+            let completion: (Bool, String?) -> Void = { accepted, code in
+                reply.finish(accepted ? .success(()) : .failure(ActionBrokerUpdateError.rejection(wireCode: code)))
             }
             let invoked: Void? = preparing
                 ? proxy.prepareForApplicationUpdate?(token, withReply: completion)
@@ -264,7 +264,7 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
             if invoked == nil { reply.finish(.failure(ActionBrokerUpdateError.unsupportedPeer)) }
             Task {
                 try? await Task.sleep(for: .seconds(2))
-                reply.finish(.failure(ActionBrokerUpdateError.unsupportedPeer))
+                reply.finish(.failure(ActionBrokerUpdateError.timedOut))
             }
         }
     }

@@ -27,20 +27,38 @@ public enum BlocksActionBrokerXPC {
     )
 }
 
-public enum ActionBrokerUpdateError: Error, LocalizedError {
-    case unsupportedPeer
-    case untrustedPeer
+public enum ActionBrokerUpdateError: String, Error, LocalizedError, CaseIterable, Sendable {
+    case unsupportedPeer = "unsupported_peer"
+    case untrustedPeer = "untrusted_peer"
+    case connectionUnavailable = "connection_unavailable"
+    case timedOut = "timed_out"
+    case preparationRejected = "preparation_rejected"
+    case preparationInProgress = "preparation_in_progress"
     case busy
-    case invalidRecoveryState
-    case requiresApproval
-    case serviceDidNotStop
-    case legacyRegistrationRequiresMigration
+    case invalidRecoveryState = "invalid_recovery_state"
+    case requiresApproval = "requires_approval"
+    case serviceDidNotStop = "service_did_not_stop"
+    case legacyRegistrationRequiresMigration = "legacy_registration_requires_migration"
+
+    /// Keep the existing optional Bool/String RPC compatible with old peers.
+    /// Never parse a localized error, OS exception or arbitrary remote string
+    /// as evidence that work is busy. Old clients already ignore this field.
+    public var wireCode: String { "blocks.action-broker.update.v1." + rawValue }
+
+    public static func rejection(wireCode: String?) -> Self {
+        guard let wireCode else { return .preparationRejected }
+        return allCases.first { $0.wireCode == wireCode } ?? .preparationRejected
+    }
 
     public var errorDescription: String? {
         switch self {
         case .unsupportedPeer:
             return "The running Action Broker does not support safe update preparation. Finish its work and quit or upgrade the old Broker, then retry."
         case .untrustedPeer: return "The Action Broker peer could not be authenticated. No service was stopped."
+        case .connectionUnavailable: return "The Action Broker connection failed. This does not establish whether the service is busy or supports update preparation. No service was stopped."
+        case .timedOut: return "The Action Broker did not answer within the update preparation time limit. Its activity is unknown; no service was stopped."
+        case .preparationRejected: return "The Action Broker declined update preparation without a recognized reason. Its activity is unknown; no service was stopped."
+        case .preparationInProgress: return "Another Action Broker update preparation owns the service. Wait for that operation or its recovery to finish."
         case .busy: return "Action Broker still has active requests. Wait for them to finish and retry."
         case .invalidRecoveryState: return "Action Broker update recovery state is invalid; the enabled preference was not discarded."
         case .requiresApproval: return "Action Broker requires approval in System Settings > Login Items. The enabled preference has been retained."
@@ -68,7 +86,7 @@ public final class ActionBrokerUpdateAdmission: @unchecked Sendable {
                 throw ActionBrokerUpdateError.invalidRecoveryState
             }
             if let preparedToken {
-                guard preparedToken == token else { throw ActionBrokerUpdateError.busy }
+                guard preparedToken == token else { throw ActionBrokerUpdateError.preparationInProgress }
                 return
             }
             do { try operations.pauseIfIdle() } catch { throw ActionBrokerUpdateError.busy }
@@ -79,7 +97,7 @@ public final class ActionBrokerUpdateAdmission: @unchecked Sendable {
     public func resume(token: String) throws {
         try lock.withLock {
             guard UUID(uuidString: token) != nil else { throw ActionBrokerUpdateError.invalidRecoveryState }
-            if let preparedToken, preparedToken != token { throw ActionBrokerUpdateError.busy }
+            if let preparedToken, preparedToken != token { throw ActionBrokerUpdateError.preparationInProgress }
             preparedToken = nil
             if !cancelledTokens.contains(token) { cancelledTokens.append(token) }
             if cancelledTokens.count > 128 { cancelledTokens.removeFirst(cancelledTokens.count - 128) }

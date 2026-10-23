@@ -402,7 +402,19 @@ final class AppUpdateCoordinatorTests: XCTestCase {
             ("helper", ApplicationOperationAdmissionGate.AdmissionError.busy(secret), .helperBusy),
             ("helper", SelectionAgentServiceFailure.connectionFailed, .helperUnavailable),
             ("actionBroker", ActionBrokerUpdateError.legacyRegistrationRequiresMigration, .brokerMigration),
-            ("actionBroker", ActionBrokerUpdateError.busy, .brokerUnavailable),
+            ("actionBroker", ActionBrokerUpdateError.busy, .brokerBusy),
+            ("actionBroker", ActionBrokerUpdateError.untrustedPeer, .brokerUntrusted),
+            ("actionBroker", ActionBrokerUpdateError.unsupportedPeer, .brokerUnsupported),
+            ("actionBroker", ActionBrokerUpdateError.connectionUnavailable, .brokerUnavailable),
+            ("actionBroker", ActionBrokerUpdateError.timedOut, .brokerTimeout),
+            ("actionBroker", ActionBrokerUpdateError.preparationRejected, .brokerRejected),
+            ("actionBroker", ActionBrokerUpdateError.invalidRecoveryState, .brokerRecovery),
+            ("actionBroker", ActionBrokerUpdateError.preparationInProgress, .brokerRecovery),
+            ("actionBroker", ActionBrokerUpdateError.requiresApproval, .brokerApproval),
+            ("actionBroker", ActionBrokerUpdateError.serviceDidNotStop, .brokerShutdown),
+            ("actionBroker", ApplicationOperationAdmissionGate.AdmissionError.busy(secret), .brokerBusy),
+            ("actionBroker", ApplicationOperationAdmissionGate.AdmissionError.paused(secret), .brokerRecovery),
+            ("actionBroker", raw, .brokerUnavailable),
             ("database", raw, .database),
             ("translation", ApplicationOperationAdmissionGate.AdmissionError.busy(secret), .busy),
         ]
@@ -413,6 +425,48 @@ final class AppUpdateCoordinatorTests: XCTestCase {
             XCTAssertFalse(failure.message.contains(secret))
             XCTAssertNotEqual(failure.message, "updates.preparation.\(reason.rawValue)")
         }
+    }
+
+    func testBrokerLifecycleRejectionsOnlyAcceptExactVersionedAllowlistCodes() {
+        for error in ActionBrokerUpdateError.allCases {
+            XCTAssertEqual(ActionBrokerUpdateError.rejection(wireCode: error.wireCode), error)
+            XCTAssertFalse(error.wireCode.contains(" "))
+        }
+        // Old Brokers return localized prose, including prose that sounds
+        // busy. It is not stable protocol evidence and must remain unknown.
+        for code in [nil, "", "busy", "Action Broker still has active requests.",
+                     "CLI 服务忙碌", "blocks.action-broker.update.v2.busy",
+                     "blocks.action-broker.update.v1.busy\n",
+                     "secret endpoint /Users/private/file"] as [String?] {
+            let rejection = ActionBrokerUpdateError.rejection(wireCode: code)
+            XCTAssertEqual(rejection, .preparationRejected)
+            let failure = AppUpdatePreparationFailure(error: rejection)
+            XCTAssertEqual(failure.reason, .brokerRejected)
+            XCTAssertFalse(failure.message.contains("/Users/private"))
+        }
+    }
+
+    func testBrokerPreparationOwnershipConflictIsNotReportedAsActiveWork() throws {
+        let gate = ActionBrokerUpdateAdmission()
+        let first = UUID().uuidString
+        let second = UUID().uuidString
+        let work = try XCTUnwrap(gate.begin())
+        XCTAssertThrowsError(try gate.prepare(token: first)) {
+            XCTAssertEqual($0 as? ActionBrokerUpdateError, .busy)
+        }
+        work.release()
+        try gate.prepare(token: first)
+        try gate.prepare(token: first) // Same transaction remains idempotent.
+        for operation in [{ try gate.prepare(token: second) }, { try gate.resume(token: second) }] {
+            XCTAssertThrowsError(try operation()) {
+                XCTAssertEqual($0 as? ActionBrokerUpdateError, .preparationInProgress)
+                XCTAssertEqual(AppUpdatePreparationFailure(error: $0).reason, .brokerRecovery)
+            }
+            XCTAssertNil(gate.begin(), "a competing transaction must not reopen admission")
+        }
+        try gate.resume(token: first)
+        let resumed = try XCTUnwrap(gate.begin())
+        resumed.release()
     }
 
     func testSynchronousInstallerAbortRecoversOnceWithoutReopeningStaleActions() async {

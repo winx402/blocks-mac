@@ -142,6 +142,608 @@ final class ActionBrokerUpdateSafetyTests: XCTestCase {
         guard case .failed = manager.state else { return XCTFail("reappearing job must block disable") }
     }
 
+    func testAppOwnedLoadedLegacyMigrationPersistsIdentityBeforePrepareAndAwaitsUnregister() async throws {
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.enableReachableLegacy()
+        fixture.legacySession.onPrepare = {
+            let ticket = try XCTUnwrap(fixture.migrationJournal.load())
+            XCTAssertEqual(ticket.identity, fixture.legacySession.identity)
+            XCTAssertEqual([ticket.token], fixture.legacySession.prepareTokens)
+            XCTAssertEqual(fixture.legacyUnregisterCount, 0)
+        }
+        let entered = expectation(description: "legacy async unregister")
+        var release: CheckedContinuation<Void, Never>?
+        fixture.legacyUnregister = {
+            XCTAssertEqual(try fixture.migrationJournal.load()?.phase, .unregisterStarted,
+                           "irreversible OS boundary must already be durable")
+            await withCheckedContinuation { release = $0; entered.fulfill() }
+            fixture.legacyStatus = .notRegistered
+            fixture.legacyProcesses = []
+            fixture.legacyJobAbsent = true
+        }
+        let manager = fixture.makeManager(appOwned: true, legacyStatus: .enabled)
+        var completed = false
+        let preparation = Task { try await manager.prepareForApplicationUpdate(); completed = true }
+        await fulfillment(of: [entered], timeout: 1)
+        XCTAssertFalse(completed)
+        XCTAssertTrue(manager.isEnabled)
+        XCTAssertNotNil(try fixture.migrationJournal.load())
+        XCTAssertEqual(fixture.host.stopCount, 0)
+        release?.resume()
+        try await preparation.value
+        XCTAssertEqual(fixture.legacyUnregisterCount, 1)
+        XCTAssertEqual(fixture.host.stopCount, 1)
+        XCTAssertNil(try fixture.migrationJournal.load())
+        await manager.resumeAfterCancelledApplicationUpdate()
+        XCTAssertEqual(manager.state, .enabled)
+        XCTAssertTrue(manager.isEnabled)
+        XCTAssertEqual(fixture.registerCount, 0)
+        XCTAssertTrue(fixture.legacySession.resumeTokens.isEmpty, "a removed legacy service must not be revived")
+    }
+
+    func testLegacyMigrationJournalSaveFailureNeverPausesOrUnregistersPeer() async throws {
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.enableReachableLegacy()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("LegacyJournal-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        fixture.migrationJournal = .init(url: root.appendingPathComponent("Migration.json"))
+        fixture.legacyOnConnect = {
+            // The initial journal read succeeded. Make publication fail only
+            // after authentication, without relying on CI user permissions.
+            try FileManager.default.removeItem(at: root)
+            try Data().write(to: root)
+        }
+        let manager = fixture.makeManager(appOwned: true, legacyStatus: .enabled)
+        do { try await manager.prepareForApplicationUpdate(); XCTFail("journal failure was ignored") }
+        catch { }
+        XCTAssertEqual(fixture.legacyConnectExpectedIdentities.count, 1)
+        XCTAssertTrue(fixture.legacySession.prepareTokens.isEmpty)
+        XCTAssertEqual(fixture.legacyUnregisterCount, 0)
+        XCTAssertEqual(fixture.legacySession.invalidateCount, 1)
+        XCTAssertTrue(manager.isEnabled)
+    }
+
+    func testLegacyUnregisterPhaseSaveFailureCannotBypassDurabilityDuringRecoveryRetry() async throws {
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.enableReachableLegacy()
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("LegacyPhaseFailure-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        fixture.migrationJournal = .init(url: root.appendingPathComponent("Migration.json"))
+        var firstPreparation = true
+        fixture.legacySession.onPrepare = {
+            guard firstPreparation else { return }
+            firstPreparation = false
+            XCTAssertEqual(try fixture.migrationJournal.load()?.phase, .preparing,
+                           "the initial durable save must succeed before this injected failure")
+            try FileManager.default.removeItem(at: root)
+            try Data().write(to: root)
+        }
+        let manager = fixture.makeManager(appOwned: true, legacyStatus: .enabled)
+        manager.setEnabled(false)
+        await manager.serviceChangeTask?.value
+        XCTAssertEqual(fixture.legacySession.prepareTokens.count, 2,
+                       "the recovery continuation must itself encounter the durable phase guard")
+        XCTAssertEqual(fixture.legacyUnregisterCount, 0)
+        XCTAssertEqual(fixture.unregisterCount, 0)
+        XCTAssertTrue(fixture.legacySession.resumeTokens.isEmpty)
+        XCTAssertTrue(manager.isEnabled)
+        guard case .failed = manager.state else { return XCTFail("phase persistence failure must remain visible") }
+    }
+
+    func testLegacyMigrationJournalDurablyRoundTripsPrivateTicketAndRejectsConflictsAndSymlinks() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("LegacyJournal-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("Migration.json")
+        let journal = ActionBrokerLegacyMigrationJournal(url: url)
+        let identity = ActionBrokerLegacyProcessIdentity(processID: 77, startSeconds: 100, startMicroseconds: 123)
+        let ticket = ActionBrokerLegacyMigrationTicket(identity: identity, owner: identity)
+        try journal.save(ticket)
+        XCTAssertEqual(try ActionBrokerLegacyMigrationJournal(url: url).load(), ticket,
+                       "a new journal reader must recover the on-disk token and lifetime")
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        XCTAssertThrowsError(try journal.save(.init(identity: identity, owner: identity)), "another token must not replace pending recovery")
+        XCTAssertEqual(try journal.load(), ticket)
+        let link = root.appendingPathComponent("LinkedMigration.json")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: url)
+        XCTAssertThrowsError(try ActionBrokerLegacyMigrationJournal(url: link).load())
+        try journal.clear(expected: ticket)
+        XCTAssertNil(try journal.load())
+    }
+
+    func testIndependentLegacyJournalsRaceWithoutOverwritingOrClearingAnotherToken() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("LegacyJournalRace-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("Migration.json")
+        let identity = ActionBrokerLegacyProcessIdentity(processID: 77, startSeconds: 100, startMicroseconds: 123)
+        let first = ActionBrokerLegacyMigrationTicket(identity: identity, owner: identity)
+        let second = ActionBrokerLegacyMigrationTicket(identity: identity, owner: identity)
+        let ready = expectation(description: "two independent writers ready")
+        ready.expectedFulfillmentCount = 2
+        let start = BrokerFixtureStartBarrier()
+        let writerA = Task.detached {
+            let journal = ActionBrokerLegacyMigrationJournal(url: url)
+            ready.fulfill()
+            await start.wait()
+            do { try journal.save(first); return true } catch { return false }
+        }
+        let writerB = Task.detached {
+            let journal = ActionBrokerLegacyMigrationJournal(url: url)
+            ready.fulfill()
+            await start.wait()
+            do { try journal.save(second); return true } catch { return false }
+        }
+        await fulfillment(of: [ready], timeout: 1)
+        await start.open()
+        let results = await [writerA.value, writerB.value]
+        XCTAssertEqual(results.filter { $0 }.count, 1)
+        let winner = results[0] ? first : second
+        let loser = results[0] ? second : first
+        let reader = ActionBrokerLegacyMigrationJournal(url: url)
+        XCTAssertEqual(try reader.load(), winner)
+        XCTAssertThrowsError(try ActionBrokerLegacyMigrationJournal(url: url).clear(expected: loser))
+        XCTAssertEqual(try reader.load(), winner, "a losing transaction must not discard the owner's recovery token")
+        try reader.clear(expected: winner)
+        XCTAssertNil(try reader.load())
+    }
+
+    func testLegacyJournalPhaseIsMonotonicAndOldPhaseCannotClearAdvancedTransaction() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("LegacyPhase-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let journal = ActionBrokerLegacyMigrationJournal(url: root.appendingPathComponent("Migration.json"))
+        let identity = ActionBrokerLegacyProcessIdentity(processID: 77, startSeconds: 100, startMicroseconds: 123)
+        let preparing = ActionBrokerLegacyMigrationTicket(identity: identity, owner: identity)
+        try journal.save(preparing)
+        var stopping = preparing
+        stopping.phase = .unregisterStarted
+        try journal.save(stopping)
+        XCTAssertThrowsError(try journal.save(preparing), "the OS boundary may never be rolled back")
+        XCTAssertThrowsError(try journal.clear(expected: preparing))
+        XCTAssertEqual(try journal.load(), stopping)
+        try journal.clear(expected: stopping)
+    }
+
+    func testIndependentStartupClaimersAtomicallyTransferOwnerOnlyOnce() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("LegacyClaimRace-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("Migration.json")
+        let broker = ActionBrokerLegacyProcessIdentity(processID: 77, startSeconds: 100, startMicroseconds: 123)
+        let old = ActionBrokerLegacyMigrationTicket(identity: broker, owner: broker, phase: .unregisterStarted)
+        try ActionBrokerLegacyMigrationJournal(url: url).save(old)
+        let firstOwner = ActionBrokerLegacyProcessIdentity(processID: 99, startSeconds: 200, startMicroseconds: 123)
+        let secondOwner = ActionBrokerLegacyProcessIdentity(processID: 100, startSeconds: 300, startMicroseconds: 123)
+        let ready = expectation(description: "two independent recovery claimers ready")
+        ready.expectedFulfillmentCount = 2
+        let start = BrokerFixtureStartBarrier()
+        let first = Task.detached {
+            ready.fulfill()
+            await start.wait()
+            return try? ActionBrokerLegacyMigrationJournal(url: url).claim(expected: old, newOwner: firstOwner)
+        }
+        let second = Task.detached {
+            ready.fulfill()
+            await start.wait()
+            return try? ActionBrokerLegacyMigrationJournal(url: url).claim(expected: old, newOwner: secondOwner)
+        }
+        await fulfillment(of: [ready], timeout: 1)
+        await start.open()
+        let claims = await [first.value, second.value].compactMap { $0 }
+        XCTAssertEqual(claims.count, 1)
+        let claimed = try XCTUnwrap(claims.first)
+        let journal = ActionBrokerLegacyMigrationJournal(url: url)
+        XCTAssertEqual(try journal.load(), claimed)
+        XCTAssertEqual(claimed.token, old.token)
+        XCTAssertEqual(claimed.phase, .unregisterStarted)
+        XCTAssertThrowsError(try journal.clear(expected: old))
+        XCTAssertThrowsError(try journal.claim(expected: old, newOwner: broker))
+        try journal.clear(expected: claimed)
+    }
+
+    func testLegacyProcessLifetimeDistinguishesReplacementAndUnknownKernelState() {
+        let identity = ActionBrokerLegacyProcessIdentity(processID: 77, startSeconds: 100, startMicroseconds: 123)
+        let same = ActionBrokerServiceManager.BrokerProcessSnapshot(processID: 77, startSeconds: 100, startMicroseconds: 123, status: 2)
+        let replacement = ActionBrokerServiceManager.BrokerProcessSnapshot(processID: 77, startSeconds: 200, startMicroseconds: 123, status: 2)
+        let zombie = ActionBrokerServiceManager.BrokerProcessSnapshot(processID: 77, startSeconds: 100, startMicroseconds: 123, status: 5)
+        XCTAssertEqual(ActionBrokerServiceManager.processLifetimeState(identity, snapshot: same, hasExited: { false }), .same)
+        XCTAssertEqual(ActionBrokerServiceManager.processLifetimeState(identity, snapshot: replacement, hasExited: { false }), .ended)
+        XCTAssertEqual(ActionBrokerServiceManager.processLifetimeState(identity, snapshot: zombie, hasExited: { false }), .ended)
+        XCTAssertEqual(ActionBrokerServiceManager.processLifetimeState(identity, snapshot: nil, hasExited: { true }), .ended)
+        XCTAssertEqual(ActionBrokerServiceManager.processLifetimeState(identity, snapshot: nil, hasExited: { false }), .unknown)
+    }
+
+    func testLegacyStartupCannotTakeOverLiveOrUnverifiableOwner() throws {
+        for ownerState in [ActionBrokerServiceManager.LegacyProcessLifetimeState.same, .unknown] {
+            let fixture = BrokerServiceUpdateFixture()
+            fixture.enableReachableLegacy()
+            fixture.legacyOwnerState = ownerState
+            let ticket = ActionBrokerLegacyMigrationTicket(identity: fixture.legacySession.identity, owner: fixture.legacyOwnerIdentity)
+            try fixture.migrationJournal.save(ticket)
+            let manager = fixture.makeManager(appOwned: true, legacyStatus: .enabled)
+            guard case .failed = manager.state else { return XCTFail("an active or unknown owner must retain its transaction") }
+            XCTAssertEqual(try fixture.migrationJournal.load(), ticket)
+            XCTAssertTrue(fixture.legacyConnectExpectedIdentities.isEmpty)
+            XCTAssertTrue(fixture.legacySession.resumeTokens.isEmpty)
+            XCTAssertEqual(fixture.legacyUnregisterCount, 0)
+            XCTAssertEqual(fixture.registerCount, 0)
+        }
+    }
+
+    func testFailedCompetingLegacyAttemptDoesNotAdoptAnotherManagersJournal() async throws {
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.enableReachableLegacy()
+        let manager = fixture.makeManager(appOwned: true, legacyStatus: .enabled)
+        let other = ActionBrokerLegacyMigrationTicket(identity: fixture.legacySession.identity, owner: fixture.legacyOwnerIdentity)
+        try fixture.migrationJournal.save(other)
+        manager.setEnabled(false)
+        await manager.serviceChangeTask?.value
+        XCTAssertEqual(try fixture.migrationJournal.load(), other)
+        XCTAssertTrue(fixture.legacyConnectExpectedIdentities.isEmpty)
+        XCTAssertTrue(fixture.legacySession.resumeTokens.isEmpty)
+        XCTAssertEqual(fixture.legacyUnregisterCount, 0)
+        XCTAssertEqual(fixture.registerCount, 0)
+        XCTAssertTrue(manager.isEnabled)
+    }
+
+    func testLegacyCrashAfterOSBoundaryNeverResumesAndOnlyClearsAfterCompleteLifetimeRemoval() async throws {
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.enableReachableLegacy()
+        let ticket = ActionBrokerLegacyMigrationTicket(identity: fixture.legacySession.identity,
+            owner: fixture.legacyOwnerIdentity, phase: .unregisterStarted)
+        try fixture.migrationJournal.save(ticket)
+        let started = expectation(description: "local host recovers independently of stopping legacy")
+        fixture.host.didStart = { started.fulfill() }
+        let manager = fixture.makeManager(appOwned: true, legacyStatus: .notRegistered)
+        await fulfillment(of: [started], timeout: 1)
+        fixture.host.didStart = nil
+        XCTAssertEqual(try fixture.migrationJournal.load()?.token, ticket.token)
+        XCTAssertEqual(try fixture.migrationJournal.load()?.owner, fixture.legacyCurrentOwnerIdentity)
+        XCTAssertTrue(fixture.legacyConnectExpectedIdentities.isEmpty)
+        XCTAssertTrue(fixture.legacySession.resumeTokens.isEmpty)
+        XCTAssertEqual(fixture.legacyUnregisterCount, 0, "recovery must not issue another asynchronous stop")
+        fixture.legacyStatus = .notRegistered
+        fixture.legacyProcesses = []
+        fixture.legacyJobAbsent = true
+        await manager.resumeAfterCancelledApplicationUpdate()
+        XCTAssertNil(try fixture.migrationJournal.load())
+        XCTAssertEqual(manager.state, .enabled)
+        XCTAssertTrue(fixture.legacySession.resumeTokens.isEmpty)
+        XCTAssertEqual(fixture.registerCount, 0)
+    }
+
+    func testLegacyCrashBeforeOSCallRepreparesSameTokenBeforeContinuingUnregister() async throws {
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.enableReachableLegacy()
+        let ticket = ActionBrokerLegacyMigrationTicket(identity: fixture.legacySession.identity,
+            owner: fixture.legacyOwnerIdentity, phase: .unregisterStarted)
+        try fixture.migrationJournal.save(ticket)
+        fixture.legacySession.onPrepare = {
+            let claimed = try XCTUnwrap(fixture.migrationJournal.load())
+            XCTAssertEqual(claimed.phase, .unregisterStarted)
+            XCTAssertEqual(claimed.owner, fixture.legacyCurrentOwnerIdentity)
+            XCTAssertEqual(claimed.token, ticket.token)
+            XCTAssertEqual(fixture.legacyUnregisterCount, 0)
+        }
+        let started = expectation(description: "local host starts after completing crash-cutpoint migration")
+        fixture.host.didStart = { started.fulfill() }
+        let manager = fixture.makeManager(appOwned: true, legacyStatus: .enabled)
+        await fulfillment(of: [started], timeout: 1)
+        XCTAssertEqual(fixture.legacySession.prepareTokens, [ticket.token])
+        XCTAssertTrue(fixture.legacySession.resumeTokens.isEmpty)
+        XCTAssertEqual(fixture.legacyUnregisterCount, 1)
+        XCTAssertEqual(fixture.registerCount, 0)
+        XCTAssertNil(try fixture.migrationJournal.load())
+        XCTAssertEqual(manager.state, .enabled)
+    }
+
+    func testLegacyOSBoundaryRecoveryRetainsTicketOnReprepareRefusalOrRepeatedUnregisterFailure() async throws {
+        for failure in ["busy", "unsupported", "untrusted", "unknown", "unregister"] {
+            let fixture = BrokerServiceUpdateFixture()
+            fixture.enableReachableLegacy()
+            let ticket = ActionBrokerLegacyMigrationTicket(identity: fixture.legacySession.identity,
+                owner: fixture.legacyOwnerIdentity, phase: .unregisterStarted)
+            try fixture.migrationJournal.save(ticket)
+            switch failure {
+            case "busy": fixture.legacySession.prepareError = ActionBrokerUpdateError.busy
+            case "unsupported": fixture.legacySession.prepareError = ActionBrokerUpdateError.unsupportedPeer
+            case "untrusted": fixture.legacyConnectError = ActionBrokerUpdateError.untrustedPeer
+            case "unknown": fixture.legacyVerificationError = ActionBrokerUpdateError.legacyRegistrationRequiresMigration
+            default: fixture.legacyUnregisterError = ActionBrokerUpdateError.serviceDidNotStop
+            }
+            let started = expectation(description: "local host starts after fail-closed recovery")
+            fixture.host.didStart = { started.fulfill() }
+            let manager = fixture.makeManager(appOwned: true, legacyStatus: .enabled)
+            await fulfillment(of: [started], timeout: 1)
+            XCTAssertEqual(try fixture.migrationJournal.load()?.token, ticket.token)
+            XCTAssertEqual(try fixture.migrationJournal.load()?.phase, .unregisterStarted)
+            XCTAssertEqual(fixture.legacyUnregisterCount, failure == "unregister" ? 1 : 0)
+            XCTAssertTrue(fixture.legacySession.resumeTokens.isEmpty)
+            XCTAssertEqual(fixture.registerCount, 0)
+            guard case .failed = manager.state else { return XCTFail("recovery failure must remain visible: \(failure)") }
+        }
+    }
+
+    func testLegacyRecoveryAllowsUnrelatedReusedNumericPIDButRetainsUnknownLifetime() async throws {
+        for lifetime in [ActionBrokerServiceManager.LegacyProcessLifetimeState.ended, .unknown] {
+            let fixture = BrokerServiceUpdateFixture()
+            fixture.legacyLifetimeOverride = lifetime
+            fixture.legacyProcessExitConfirmed = false // kill(pid, 0) would still succeed for a reused PID.
+            let ticket = ActionBrokerLegacyMigrationTicket(identity: fixture.legacySession.identity,
+                owner: fixture.legacyOwnerIdentity, phase: .unregisterStarted)
+            try fixture.migrationJournal.save(ticket)
+            let started = expectation(description: "local host starts after lifetime inspection")
+            fixture.host.didStart = { started.fulfill() }
+            let manager = fixture.makeManager(appOwned: true)
+            await fulfillment(of: [started], timeout: 1)
+            if lifetime == .ended {
+                XCTAssertNil(try fixture.migrationJournal.load())
+                XCTAssertEqual(manager.state, .enabled)
+            } else {
+                XCTAssertEqual(try fixture.migrationJournal.load()?.token, ticket.token)
+                guard case .failed = manager.state else { return XCTFail("unknown kernel lifetime must remain unresolved") }
+            }
+            XCTAssertTrue(fixture.legacyConnectExpectedIdentities.isEmpty)
+            XCTAssertTrue(fixture.legacySession.resumeTokens.isEmpty)
+            XCTAssertEqual(fixture.registerCount, 0)
+        }
+    }
+
+    func testLoadedLegacyPrepareCancellationResumesSameTokenWithoutCancellationBit() async throws {
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.enableReachableLegacy()
+        fixture.legacySession.onResume = { try Task.checkCancellation() }
+        let entered = expectation(description: "legacy prepare suspended")
+        var release: CheckedContinuation<Void, Never>?
+        fixture.legacySession.onPrepare = {
+            await withCheckedContinuation { release = $0; entered.fulfill() }
+        }
+        let manager = fixture.makeManager(appOwned: true, legacyStatus: .enabled)
+        manager.setEnabled(false)
+        let operation = manager.serviceChangeTask
+        await fulfillment(of: [entered], timeout: 1)
+        operation?.cancel()
+        release?.resume()
+        await operation?.value
+        XCTAssertEqual(fixture.legacyUnregisterCount, 0)
+        XCTAssertEqual(fixture.legacySession.resumeTokens, fixture.legacySession.prepareTokens)
+        XCTAssertNil(try fixture.migrationJournal.load())
+        XCTAssertEqual(fixture.legacyConnectExpectedIdentities.count, 1, "direct recovery must retain the authenticated connection")
+        XCTAssertEqual(fixture.host.stopCount, 0)
+        XCTAssertTrue(manager.isEnabled)
+    }
+
+    func testQuitFencesLoadedLegacyPrepareAndLeavesDurableRecoveryWithoutRemoteMutation() async throws {
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.enableReachableLegacy()
+        let entered = expectation(description: "legacy prepare suspended at quit")
+        var release: CheckedContinuation<Void, Never>?
+        fixture.legacySession.onPrepare = {
+            await withCheckedContinuation { release = $0; entered.fulfill() }
+        }
+        let manager = fixture.makeManager(appOwned: true, legacyStatus: .enabled)
+        manager.setEnabled(false)
+        let operation = manager.serviceChangeTask
+        await fulfillment(of: [entered], timeout: 1)
+        manager.beginApplicationQuit()
+        release?.resume()
+        await operation?.value
+        try await manager.prepareForApplicationUpdate(stopService: false)
+        await manager.resumeAfterCancelledApplicationUpdate()
+        XCTAssertEqual(fixture.legacyUnregisterCount, 0)
+        XCTAssertEqual(fixture.unregisterCount, 0)
+        XCTAssertTrue(fixture.legacySession.resumeTokens.isEmpty)
+        XCTAssertNotNil(try fixture.migrationJournal.load())
+    }
+
+    func testLoadedLegacyBusyUnsupportedUntrustedAndUnknownPeersNeverReachUnregister() async throws {
+        for error in [ActionBrokerUpdateError.busy, .unsupportedPeer, .untrustedPeer,
+                      .connectionUnavailable, .timedOut, .preparationRejected, .preparationInProgress] {
+            let fixture = BrokerServiceUpdateFixture()
+            fixture.enableReachableLegacy()
+            fixture.legacySession.prepareError = error
+            let manager = fixture.makeManager(appOwned: true, legacyStatus: .enabled)
+            do { try await manager.prepareForApplicationUpdate(); XCTFail("unsafe legacy peer accepted: \(error)") }
+            catch { XCTAssertEqual(error as? ActionBrokerUpdateError, fixture.legacySession.prepareError as? ActionBrokerUpdateError) }
+            XCTAssertEqual(fixture.legacyUnregisterCount, 0)
+            XCTAssertEqual(fixture.unregisterCount, 0)
+            XCTAssertNotNil(try fixture.migrationJournal.load())
+            await manager.resumeAfterCancelledApplicationUpdate()
+            XCTAssertEqual(fixture.legacySession.resumeTokens, fixture.legacySession.prepareTokens)
+            XCTAssertEqual(fixture.registerCount, 0)
+        }
+    }
+
+    func testLegacyMigrationRefusesAnotherProcessOrUnknownDomainEvenWithReachablePeer() async throws {
+        for unknownDomain in [false, true] {
+            let fixture = BrokerServiceUpdateFixture()
+            fixture.enableReachableLegacy()
+            if unknownDomain { fixture.legacyVerificationError = ActionBrokerUpdateError.legacyRegistrationRequiresMigration }
+            else { fixture.legacyProcesses = [77, 88] }
+            let manager = fixture.makeManager(appOwned: true, legacyStatus: .enabled)
+            do { try await manager.prepareForApplicationUpdate(); XCTFail("ambiguous legacy state accepted") }
+            catch { }
+            XCTAssertTrue(fixture.legacySession.prepareTokens.isEmpty)
+            XCTAssertEqual(fixture.legacyUnregisterCount, 0)
+            XCTAssertNil(try fixture.migrationJournal.load())
+        }
+    }
+
+    func testLegacyUnregisterPartialSuccessNeverReregistersRemovedBroker() async throws {
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.enableReachableLegacy()
+        fixture.legacyUnregister = {
+            fixture.legacyStatus = .notRegistered
+            fixture.legacyProcesses = []
+            fixture.legacyJobAbsent = true
+            throw ActionBrokerUpdateError.serviceDidNotStop
+        }
+        let manager = fixture.makeManager(appOwned: true, legacyStatus: .enabled)
+        manager.setEnabled(false)
+        await manager.serviceChangeTask?.value
+        XCTAssertEqual(fixture.legacyUnregisterCount, 1)
+        XCTAssertEqual(fixture.legacyStatus, .notRegistered)
+        XCTAssertTrue(fixture.legacySession.resumeTokens.isEmpty)
+        XCTAssertEqual(fixture.registerCount, 0)
+        XCTAssertNil(try fixture.migrationJournal.load())
+        XCTAssertTrue(manager.isEnabled, "failed explicit disable must retain app-owned intent")
+        guard case .failed = manager.state else { return XCTFail("partial failure must remain visible") }
+    }
+
+    func testLegacyUnregisterPartialFailureNeverResumesAdmissionWhileOSKillMayStillBePending() async throws {
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.enableReachableLegacy()
+        fixture.legacyUnregister = {
+            fixture.legacyStatus = .notRegistered
+            throw ActionBrokerUpdateError.serviceDidNotStop
+        }
+        let manager = fixture.makeManager(appOwned: true, legacyStatus: .enabled)
+        manager.setEnabled(false)
+        await manager.serviceChangeTask?.value
+        XCTAssertTrue(fixture.legacySession.resumeTokens.isEmpty)
+        XCTAssertEqual(fixture.legacyConnectExpectedIdentities.count, 1)
+        XCTAssertEqual(fixture.registerCount, 0)
+        XCTAssertEqual(try fixture.migrationJournal.load()?.phase, .unregisterStarted)
+        XCTAssertTrue(manager.isEnabled)
+    }
+
+    func testLegacyRecoveryDoesNotResumeAfterOSBoundaryEvenWhenHeldConnectionStillExists() async throws {
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.enableReachableLegacy()
+        fixture.legacyUnregister = {
+            fixture.legacyStatus = .notRegistered
+            fixture.legacyVerificationError = ActionBrokerUpdateError.legacyRegistrationRequiresMigration
+        }
+        let manager = fixture.makeManager(appOwned: true, legacyStatus: .enabled)
+        manager.setEnabled(false)
+        await manager.serviceChangeTask?.value
+        XCTAssertTrue(fixture.legacySession.resumeTokens.isEmpty)
+        XCTAssertEqual(fixture.legacyConnectExpectedIdentities.count, 1)
+        XCTAssertEqual(try fixture.migrationJournal.load()?.phase, .unregisterStarted)
+        XCTAssertEqual(fixture.registerCount, 0)
+        XCTAssertEqual(fixture.unregisterCount, 0)
+        XCTAssertTrue(manager.isEnabled)
+        guard case .failed = manager.state else { return XCTFail("diagnostic failure must remain visible") }
+    }
+
+    func testLegacyMigrationNeedsExitAndStableJobAbsenceAndNeverResumesReplacementLifetime() async throws {
+        for failure in ["pid-exit-unproved", "job-reappeared", "pid-reused"] {
+            let fixture = BrokerServiceUpdateFixture()
+            fixture.enableReachableLegacy()
+            fixture.legacyUnregister = {
+                fixture.legacyStatus = .notRegistered
+                fixture.legacyProcesses = []
+                fixture.legacyJobAbsent = true
+                if failure == "pid-exit-unproved" { fixture.legacyProcessExitConfirmed = false }
+                if failure == "job-reappeared" { fixture.legacyJobAbsent = false }
+                if failure == "pid-reused" {
+                    fixture.legacyProcesses = [77]
+                    fixture.legacyJobAbsent = false
+                    fixture.legacySession.identity = .init(processID: 77, startSeconds: 200, startMicroseconds: 123)
+                }
+            }
+            let manager = fixture.makeManager(appOwned: true, legacyStatus: .enabled)
+            manager.setEnabled(false)
+            await manager.serviceChangeTask?.value
+            XCTAssertNotNil(try fixture.migrationJournal.load(), failure)
+            XCTAssertTrue(fixture.legacySession.resumeTokens.isEmpty, failure)
+            XCTAssertEqual(fixture.registerCount, 0)
+            XCTAssertEqual(fixture.unregisterCount, 0)
+            XCTAssertTrue(manager.isEnabled)
+            guard case .failed = manager.state else { return XCTFail("unproved retirement must fail: \(failure)") }
+        }
+    }
+
+    func testLegacyMigrationCrashRecoveryResumesOnlySavedLifetimeAndDoesNotRegister() async throws {
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.enableReachableLegacy()
+        let ticket = ActionBrokerLegacyMigrationTicket(identity: fixture.legacySession.identity, owner: fixture.legacyOwnerIdentity)
+        try fixture.migrationJournal.save(ticket)
+        let started = expectation(description: "local host starts after legacy recovery")
+        fixture.host.didStart = { started.fulfill() }
+        let manager = fixture.makeManager(appOwned: true, legacyStatus: .enabled)
+        await fulfillment(of: [started], timeout: 1)
+        XCTAssertEqual(fixture.legacyConnectExpectedIdentities, [ticket.identity])
+        XCTAssertEqual(fixture.legacySession.resumeTokens, [ticket.token])
+        XCTAssertTrue(fixture.legacySession.prepareTokens.isEmpty)
+        XCTAssertEqual(fixture.registerCount, 0)
+        XCTAssertEqual(fixture.legacyUnregisterCount, 0)
+        XCTAssertNil(try fixture.migrationJournal.load())
+        XCTAssertEqual(manager.state, .enabled)
+    }
+
+    func testLegacyMigrationCrashRecoveryConsumesGoneInstanceWithoutConnectingOrRegistering() async throws {
+        let fixture = BrokerServiceUpdateFixture()
+        let ticket = ActionBrokerLegacyMigrationTicket(identity: fixture.legacySession.identity, owner: fixture.legacyOwnerIdentity)
+        try fixture.migrationJournal.save(ticket)
+        let started = expectation(description: "local host starts without resurrecting legacy")
+        fixture.host.didStart = { started.fulfill() }
+        let manager = fixture.makeManager(appOwned: true)
+        await fulfillment(of: [started], timeout: 1)
+        XCTAssertTrue(fixture.legacyConnectExpectedIdentities.isEmpty)
+        XCTAssertTrue(fixture.legacySession.resumeTokens.isEmpty)
+        XCTAssertEqual(fixture.registerCount, 0)
+        XCTAssertEqual(fixture.legacyUnregisterCount, 0)
+        XCTAssertNil(try fixture.migrationJournal.load())
+        XCTAssertEqual(manager.state, .enabled)
+    }
+
+    func testLegacyMigrationCrashRecoveryRetainsTicketWhenIdentityChangedOrResumeFails() async throws {
+        for changedIdentity in [false, true] {
+            let fixture = BrokerServiceUpdateFixture()
+            fixture.enableReachableLegacy()
+            let ticket = ActionBrokerLegacyMigrationTicket(identity: fixture.legacySession.identity, owner: fixture.legacyOwnerIdentity)
+            try fixture.migrationJournal.save(ticket)
+            if changedIdentity { fixture.legacyIdentityMatches = false }
+            else { fixture.legacySession.resumeError = ActionBrokerUpdateError.connectionUnavailable }
+            let started = expectation(description: "local host recovers independently")
+            fixture.host.didStart = { started.fulfill() }
+            let manager = fixture.makeManager(appOwned: true, legacyStatus: .enabled)
+            await fulfillment(of: [started], timeout: 1)
+            XCTAssertEqual(try fixture.migrationJournal.load()?.token, ticket.token)
+            XCTAssertEqual(fixture.legacySession.resumeTokens.count, changedIdentity ? 0 : 1)
+            XCTAssertEqual(fixture.registerCount, 0)
+            XCTAssertEqual(fixture.legacyUnregisterCount, 0)
+            guard case .failed = manager.state else { return XCTFail("unresolved migration must remain visible") }
+        }
+    }
+
+    func testLegacyRecoveryAfterConnectionFailureReauthenticatesSameLifetimeAndToken() async throws {
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.enableReachableLegacy()
+        let ticket = ActionBrokerLegacyMigrationTicket(identity: fixture.legacySession.identity, owner: fixture.legacyOwnerIdentity)
+        try fixture.migrationJournal.save(ticket)
+        fixture.legacySession.resumeError = ActionBrokerUpdateError.connectionUnavailable
+        let started = expectation(description: "local host starts after failed legacy recovery")
+        fixture.host.didStart = { started.fulfill() }
+        let manager = fixture.makeManager(appOwned: true, legacyStatus: .enabled)
+        await fulfillment(of: [started], timeout: 1)
+        fixture.host.didStart = nil
+        fixture.legacySession.resumeError = nil
+        await manager.resumeAfterCancelledApplicationUpdate()
+        XCTAssertEqual(fixture.legacyConnectExpectedIdentities, [ticket.identity, ticket.identity])
+        XCTAssertEqual(fixture.legacySession.resumeTokens, [ticket.token, ticket.token])
+        XCTAssertGreaterThanOrEqual(fixture.legacySession.invalidateCount, 2)
+        XCTAssertNil(try fixture.migrationJournal.load())
+        XCTAssertEqual(fixture.registerCount, 0)
+        XCTAssertEqual(manager.state, .enabled)
+    }
+
+    func testAppOwnedStartupNeverReplaysOfficialJournalToRegisterLegacy() throws {
+        let fixture = BrokerServiceUpdateFixture()
+        try fixture.journal.save(.init(processID: 77))
+        let manager = fixture.makeManager(appOwned: true, legacyStatus: .enabled)
+        XCTAssertEqual(manager.state, .enabled)
+        XCTAssertEqual(fixture.registerCount, 0)
+        XCTAssertTrue(fixture.host.resumeTokens.isEmpty)
+        XCTAssertTrue(fixture.legacyConnectExpectedIdentities.isEmpty)
+        XCTAssertNotNil(try fixture.journal.load())
+    }
+
     func testLegacyJobAbsenceDoesNotConfuseMissingDomainOrPermissionFailureWithMissingJob() {
         let missing = "Could not find service \"\(BlocksActionBrokerXPC.launchAgentLabel)\" in domain for user gui: 501"
         XCTAssertTrue(ActionBrokerServiceManager.legacyJobIsAbsent(exitCode: 113, standardError: "Bad request.\n\(missing)\n", domain: "gui/501", uid: 501))
@@ -149,6 +751,10 @@ final class ActionBrokerUpdateSafetyTests: XCTestCase {
         XCTAssertFalse(ActionBrokerServiceManager.legacyJobIsAbsent(exitCode: 112, standardError: "Could not find domain for user gui: 501", domain: "gui/501", uid: 501))
         XCTAssertFalse(ActionBrokerServiceManager.legacyJobIsAbsent(exitCode: 113, standardError: missing, domain: "user/501", uid: 501))
         XCTAssertFalse(ActionBrokerServiceManager.legacyJobIsAbsent(exitCode: 1, standardError: "Operation not permitted", domain: "gui/501", uid: 501))
+        XCTAssertFalse(ActionBrokerServiceManager.legacyJobIsAbsent(exitCode: 113,
+            standardError: "\(missing)\nOperation not permitted\n", domain: "gui/501", uid: 501))
+        XCTAssertFalse(ActionBrokerServiceManager.legacyJobIsAbsent(exitCode: 113,
+            standardError: "Could not find domain for user gui: 501\n\(missing)\n", domain: "gui/501", uid: 501))
     }
 
     func testBrokerProcessScanExcludesOnlyPositivelyUnrelatedUnlinkedProcessNames() throws {
@@ -735,6 +1341,24 @@ final class ActionBrokerUpdateSafetyTests: XCTestCase {
     }
 }
 
+private actor BrokerFixtureStartBarrier {
+    private var opened = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        guard !opened else { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func open() {
+        guard !opened else { return }
+        opened = true
+        let pending = waiters
+        waiters.removeAll()
+        pending.forEach { $0.resume() }
+    }
+}
+
 @MainActor
 private final class BrokerServiceUpdateFixture {
     var status: SMAppService.Status = .enabled
@@ -750,8 +1374,26 @@ private final class BrokerServiceUpdateFixture {
     var legacyUnregisterError: Error?
     var legacyVerificationError: Error?
     var legacyReappearsAfterUnregister = false
+    var legacyUnregister: (() async throws -> Void)?
+    var legacyConnectError: Error? = ActionBrokerUpdateError.unsupportedPeer
+    var legacyOnConnect: (() throws -> Void)?
+    var legacyConnectExpectedIdentities: [ActionBrokerLegacyProcessIdentity?] = []
+    var legacyIdentityMatches = true
+    var legacyProcessExitConfirmed = true
+    var legacyLifetimeOverride: ActionBrokerServiceManager.LegacyProcessLifetimeState?
+    var legacyOwnerState: ActionBrokerServiceManager.LegacyProcessLifetimeState = .ended
+    let legacyOwnerIdentity = ActionBrokerLegacyProcessIdentity(processID: 99, startSeconds: 50, startMicroseconds: 123)
+    let legacyCurrentOwnerIdentity = ActionBrokerLegacyProcessIdentity(processID: 100, startSeconds: 60, startMicroseconds: 123)
+    var migrationJournal = ActionBrokerLegacyMigrationJournal()
+    let legacySession = BrokerLegacyMigrationSession()
     let host = BrokerServiceUpdateHost()
     let journal = ActionBrokerUpdateRecoveryJournal()
+
+    func enableReachableLegacy() {
+        legacyConnectError = nil
+        legacyJobAbsent = false
+        legacyProcesses = [77]
+    }
 
     func makeManager(moduleAccess: CLIModuleAccessPolicy? = nil, appOwned: Bool = false,
                      legacyStatus: SMAppService.Status = .notRegistered,
@@ -778,20 +1420,63 @@ private final class BrokerServiceUpdateFixture {
         return ActionBrokerServiceManager(service: control, host: host,
             retryPolicy: retryPolicy,
             retryScheduler: retryScheduler ?? { _, _ in AnyCancellable {} }, updateRecoveryJournal: journal,
-            runningBrokerProcessIDs: { appOwned ? self.legacyProcesses : self.processes }, processHasExited: { !self.processes.contains($0) },
+            runningBrokerProcessIDs: { appOwned ? self.legacyProcesses : self.processes },
+            processHasExited: { appOwned ? self.legacyProcessExitConfirmed && !self.legacyProcesses.contains($0) : !self.processes.contains($0) },
             moduleAccess: moduleAccess, usesAppOwnedService: appOwned,
             legacyService: .init(status: { self.legacyStatus }, register: { XCTFail("legacy service must never be registered") }, unregister: {},
                 unregisterAndWait: {
                     self.legacyUnregisterCount += 1
+                    if let unregister = self.legacyUnregister { try await unregister(); return }
                     if let error = self.legacyUnregisterError { throw error }
                     self.legacyStatus = .notRegistered
-                    if self.legacyReappearsAfterUnregister { self.legacyJobAbsent = false }
+                    self.legacyProcesses = []
+                    self.legacyJobAbsent = !self.legacyReappearsAfterUnregister
                 }),
             legacyLaunchdJobsAreAbsent: {
                 if let error = self.legacyVerificationError { throw error }
                 return self.legacyJobAbsent
-            })
+            }, legacyMigrationJournal: migrationJournal,
+            legacyMigrationConnect: { expected in
+                self.legacyConnectExpectedIdentities.append(expected)
+                if let error = self.legacyConnectError { throw error }
+                try self.legacyOnConnect?()
+                return self.legacySession
+            },
+            legacyProcessLifetimeState: {
+                if $0 == self.legacyOwnerIdentity { return self.legacyOwnerState }
+                if $0 == self.legacyCurrentOwnerIdentity { return .same }
+                if let state = self.legacyLifetimeOverride { return state }
+                guard self.legacyIdentityMatches else { return .unknown }
+                if self.legacyProcesses.contains($0.processID) {
+                    return $0 == self.legacySession.identity ? .same : .ended
+                }
+                return self.legacyProcessExitConfirmed ? .ended : .unknown
+            }, legacyMigrationOwnerIdentity: { self.legacyCurrentOwnerIdentity }, legacyMigrationVerificationTimeout: .zero)
     }
+}
+
+@MainActor
+private final class BrokerLegacyMigrationSession: ActionBrokerLegacyMigrationSession {
+    var identity = ActionBrokerLegacyProcessIdentity(processID: 77, startSeconds: 100, startMicroseconds: 123)
+    var prepareTokens: [String] = []
+    var resumeTokens: [String] = []
+    var invalidateCount = 0
+    var prepareError: Error?
+    var resumeError: Error?
+    var onPrepare: (() async throws -> Void)?
+    var onResume: (() async throws -> Void)?
+
+    func prepare(token: String) async throws {
+        prepareTokens.append(token)
+        try await onPrepare?()
+        if let prepareError { throw prepareError }
+    }
+    func resume(token: String) async throws {
+        resumeTokens.append(token)
+        try await onResume?()
+        if let resumeError { throw resumeError }
+    }
+    func invalidate() { invalidateCount += 1 }
 }
 
 @MainActor

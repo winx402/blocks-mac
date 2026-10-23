@@ -58,15 +58,15 @@ private final class BrokerConnectionService: NSObject, BlocksActionBrokerHostXPC
     }
 
     func prepareForApplicationUpdate(_ token: String, withReply reply: @escaping (Bool, String?) -> Void) {
-        guard hostProcessID != nil else { reply(false, "Only the authenticated Blocks App may prepare the Broker."); return }
+        guard hostProcessID != nil else { reply(false, ActionBrokerUpdateError.untrustedPeer.wireCode); return }
         do { try updateAdmission.prepare(token: token); reply(true, nil) }
-        catch { reply(false, error.localizedDescription) }
+        catch { reply(false, ((error as? ActionBrokerUpdateError) ?? .preparationRejected).wireCode) }
     }
 
     func resumeAfterCancelledApplicationUpdate(_ token: String, withReply reply: @escaping (Bool, String?) -> Void) {
-        guard hostProcessID != nil else { reply(false, "Only the authenticated Blocks App may resume the Broker."); return }
+        guard hostProcessID != nil else { reply(false, ActionBrokerUpdateError.untrustedPeer.wireCode); return }
         do { try updateAdmission.resume(token: token); reply(true, nil) }
-        catch { reply(false, error.localizedDescription) }
+        catch { reply(false, ((error as? ActionBrokerUpdateError) ?? .preparationRejected).wireCode) }
     }
 
     private let router: ActionHostRouter

@@ -22,11 +22,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--products", type=Path, required=True)
     parser.add_argument("--preparation-delay", type=float, default=3)
+    parser.add_argument("--scenario", choices=("helper", "broker"), default="helper",
+                        help="synthetic failures only; neither scenario performs an upgrade")
     args = parser.parse_args()
     if not 0 < args.preparation_delay <= 30:
         raise SystemExit("preparation delay must be between 0 and 30 seconds")
     products = args.products.resolve(strict=True)
-    for name in ("Sparkle.framework", "BlocksCore.framework", "Blocks.app/Contents/Resources"):
+    for name in ("Sparkle.framework/Sparkle", "BlocksCore.framework/BlocksCore", "Blocks.app/Contents/Resources"):
         if not (products / name).exists():
             raise SystemExit(f"Missing built product: {name}")
     root = Path(tempfile.mkdtemp(prefix="blocks-update-recovery-probe-"))
@@ -41,6 +43,7 @@ def main():
         "CFBundlePackageType": "APPL", "CFBundleVersion": "1", "CFBundleShortVersionString": "1.0",
         "NSPrincipalClass": "NSApplication", "LSMinimumSystemVersion": "14.0",
         "ProbeMarker": str(marker), "ProbeDelay": args.preparation_delay,
+        "ProbeScenario": args.scenario,
     }))
     frameworks = contents / "Frameworks"
     frameworks.mkdir()

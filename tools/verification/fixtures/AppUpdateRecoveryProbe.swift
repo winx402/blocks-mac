@@ -41,6 +41,19 @@ enum SelectionAgentServiceFailure: Error { case keychainUnavailable }
             record("prepare")
             let delay = Bundle.main.object(forInfoDictionaryKey: "ProbeDelay") as? Double ?? 3
             try await Task.sleep(for: .seconds(delay))
+            if Bundle.main.object(forInfoDictionaryKey: "ProbeScenario") as? String == "broker" {
+                let failures: [ActionBrokerUpdateError] = [
+                    .connectionUnavailable, .timedOut, .preparationRejected, .untrustedPeer,
+                    .unsupportedPeer, .busy, .preparationInProgress, .requiresApproval, .serviceDidNotStop,
+                ]
+                if attempts <= failures.count {
+                    let error = failures[attempts - 1]
+                    record("failure-" + error.rawValue)
+                    throw ApplicationLifecycleCoordinator.ParticipantDrainError(
+                        participantID: "actionBroker", underlying: error)
+                }
+                return
+            }
             if attempts == 1 {
                 throw ApplicationLifecycleCoordinator.ParticipantDrainError(
                     participantID: "helper", underlying: SelectionHelperUpdatePreparationFailure.helperNotPaired)

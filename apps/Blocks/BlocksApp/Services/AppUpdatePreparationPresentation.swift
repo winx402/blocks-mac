@@ -11,6 +11,14 @@ struct AppUpdatePreparationFailure: Equatable {
         case helperBusy = "helper_busy"
         case brokerMigration = "broker_migration"
         case brokerUnavailable = "broker_unavailable"
+        case brokerBusy = "broker_busy"
+        case brokerUntrusted = "broker_untrusted"
+        case brokerUnsupported = "broker_unsupported"
+        case brokerTimeout = "broker_timeout"
+        case brokerRejected = "broker_rejected"
+        case brokerRecovery = "broker_recovery"
+        case brokerApproval = "broker_approval"
+        case brokerShutdown = "broker_shutdown"
         case database = "database"
         case busy = "busy"
         case other = "other"
@@ -34,11 +42,28 @@ struct AppUpdatePreparationFailure: Equatable {
             reason = .helperKeyUnavailable
         } else if participant == "helper" {
             reason = underlying is ApplicationOperationAdmissionGate.AdmissionError ? .helperBusy : .helperUnavailable
-        } else if let broker = underlying as? ActionBrokerUpdateError,
-                  case .legacyRegistrationRequiresMigration = broker {
-            reason = .brokerMigration
+        } else if let broker = underlying as? ActionBrokerUpdateError {
+            switch broker {
+            case .legacyRegistrationRequiresMigration: reason = .brokerMigration
+            case .busy: reason = .brokerBusy
+            case .untrustedPeer: reason = .brokerUntrusted
+            case .unsupportedPeer: reason = .brokerUnsupported
+            case .connectionUnavailable: reason = .brokerUnavailable
+            case .timedOut: reason = .brokerTimeout
+            case .preparationRejected: reason = .brokerRejected
+            case .preparationInProgress, .invalidRecoveryState: reason = .brokerRecovery
+            case .requiresApproval: reason = .brokerApproval
+            case .serviceDidNotStop: reason = .brokerShutdown
+            }
         } else if participant == "actionBroker" {
-            reason = .brokerUnavailable
+            if let admission = underlying as? ApplicationOperationAdmissionGate.AdmissionError,
+               case .busy = admission {
+                reason = .brokerBusy
+            } else if underlying is ApplicationOperationAdmissionGate.AdmissionError {
+                reason = .brokerRecovery
+            } else {
+                reason = .brokerUnavailable
+            }
         } else if participant == "database" {
             reason = .database
         } else if underlying is ApplicationOperationAdmissionGate.AdmissionError {

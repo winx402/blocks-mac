@@ -103,6 +103,284 @@ typealias ActionBrokerRetryScheduler = (
     _ action: @escaping @MainActor () -> Void
 ) -> AnyCancellable
 
+/// A PID alone can be reused while the app is not running. Recovery is allowed
+/// to address only the kernel lifetime authenticated before the remote pause.
+struct ActionBrokerLegacyProcessIdentity: Codable, Equatable, Sendable {
+    let processID: Int32
+    let startSeconds: Int64
+    let startMicroseconds: Int64
+
+    var isValid: Bool { processID > 0 && startSeconds > 0 && (0..<1_000_000).contains(startMicroseconds) }
+}
+
+struct ActionBrokerLegacyMigrationTicket: Codable, Equatable, Sendable {
+    enum Phase: String, Codable, Sendable { case preparing, unregisterStarted }
+    let schemaVersion: Int
+    let serviceLabel: String
+    let token: String
+    let identity: ActionBrokerLegacyProcessIdentity
+    let owner: ActionBrokerLegacyProcessIdentity
+    var phase: Phase
+
+    init(token: String = UUID().uuidString, identity: ActionBrokerLegacyProcessIdentity,
+         owner: ActionBrokerLegacyProcessIdentity, phase: Phase = .preparing) {
+        schemaVersion = 2
+        serviceLabel = BlocksActionBrokerXPC.launchAgentLabel
+        self.token = token
+        self.identity = identity
+        self.owner = owner
+        self.phase = phase
+    }
+
+    var isValid: Bool {
+        schemaVersion == 2 && serviceLabel == BlocksActionBrokerXPC.launchAgentLabel
+            && UUID(uuidString: token) != nil && identity.isValid && owner.isValid
+    }
+
+    func canReplace(_ existing: Self) -> Bool {
+        schemaVersion == existing.schemaVersion && serviceLabel == existing.serviceLabel
+            && token == existing.token && identity == existing.identity && owner == existing.owner
+            && (phase == existing.phase || existing.phase == .preparing && phase == .unregisterStarted)
+    }
+}
+
+/// Deliberately separate from the official update journal: migration recovery
+/// must never interpret saved intent as permission to register the old agent.
+final class ActionBrokerLegacyMigrationJournal {
+    private let url: URL?
+    private var memoryTicket: ActionBrokerLegacyMigrationTicket?
+
+    init(url: URL? = nil) { self.url = url }
+
+    func load() throws -> ActionBrokerLegacyMigrationTicket? {
+        guard url != nil else { return memoryTicket }
+        return try withLockedFile { try loadLocked(directory: $0) }
+    }
+
+    private func loadLocked(directory: Int32) throws -> ActionBrokerLegacyMigrationTicket? {
+        let descriptor = openat(directory, url!.lastPathComponent, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        if descriptor < 0, errno == ENOENT { return nil }
+        guard descriptor >= 0 else { throw ActionBrokerUpdateError.invalidRecoveryState }
+        defer { _ = close(descriptor) }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, info.st_uid == getuid(),
+              info.st_mode & S_IFMT == S_IFREG, info.st_mode & 0o077 == 0,
+              info.st_size > 0, info.st_size <= 4096 else { throw ActionBrokerUpdateError.invalidRecoveryState }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
+        guard let data = try handle.read(upToCount: 4097), data.count <= 4096,
+              let ticket = try? JSONDecoder().decode(ActionBrokerLegacyMigrationTicket.self, from: data),
+              ticket.isValid else { throw ActionBrokerUpdateError.invalidRecoveryState }
+        return ticket
+    }
+
+    func save(_ ticket: ActionBrokerLegacyMigrationTicket) throws {
+        guard ticket.isValid else { throw ActionBrokerUpdateError.invalidRecoveryState }
+        guard let url else {
+            if let memoryTicket, !ticket.canReplace(memoryTicket) { throw ActionBrokerUpdateError.invalidRecoveryState }
+            memoryTicket = ticket
+            return
+        }
+        try withLockedFile { directory in
+            if let existing = try loadLocked(directory: directory), !ticket.canReplace(existing) {
+                throw ActionBrokerUpdateError.invalidRecoveryState
+            }
+            try saveLocked(ticket, directory: directory, fileName: url.lastPathComponent)
+        }
+    }
+
+    /// Startup proves the old owner ended, then atomically claims that exact
+    /// ticket. Two replacement Apps cannot both adopt the dead owner's token.
+    func claim(expected ticket: ActionBrokerLegacyMigrationTicket,
+               newOwner: ActionBrokerLegacyProcessIdentity) throws -> ActionBrokerLegacyMigrationTicket {
+        let claimed = ActionBrokerLegacyMigrationTicket(token: ticket.token, identity: ticket.identity,
+            owner: newOwner, phase: ticket.phase)
+        guard claimed.isValid else { throw ActionBrokerUpdateError.invalidRecoveryState }
+        guard let url else {
+            guard memoryTicket == ticket else { throw ActionBrokerUpdateError.invalidRecoveryState }
+            memoryTicket = claimed
+            return claimed
+        }
+        return try withLockedFile { directory in
+            guard try loadLocked(directory: directory) == ticket else { throw ActionBrokerUpdateError.invalidRecoveryState }
+            try saveLocked(claimed, directory: directory, fileName: url.lastPathComponent)
+            return claimed
+        }
+    }
+
+    private func saveLocked(_ ticket: ActionBrokerLegacyMigrationTicket, directory: Int32, fileName: String) throws {
+        // The stable lock covers conflict/ownership checks through publication.
+        let temporary = ".legacy-migration-\(UUID().uuidString)"
+        let descriptor = openat(directory, temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { throw ActionBrokerUpdateError.invalidRecoveryState }
+        defer { _ = close(descriptor); _ = unlinkat(directory, temporary, 0) }
+        let data = try JSONEncoder().encode(ticket)
+        try data.withUnsafeBytes { bytes in
+            var offset = 0
+            while offset < bytes.count {
+                let count = write(descriptor, bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
+                if count < 0, errno == EINTR { continue }
+                guard count > 0 else { throw ActionBrokerUpdateError.invalidRecoveryState }
+                offset += count
+            }
+        }
+        guard fsync(descriptor) == 0, renameat(directory, temporary, directory, fileName) == 0,
+              fsync(directory) == 0 else { throw ActionBrokerUpdateError.invalidRecoveryState }
+    }
+
+    func clear(expected ticket: ActionBrokerLegacyMigrationTicket) throws {
+        guard let url else {
+            if let memoryTicket, memoryTicket != ticket { throw ActionBrokerUpdateError.invalidRecoveryState }
+            memoryTicket = nil
+            return
+        }
+        try withLockedFile { directory in
+            guard let existing = try loadLocked(directory: directory) else { return }
+            guard existing == ticket else { throw ActionBrokerUpdateError.invalidRecoveryState }
+            guard unlinkat(directory, url.lastPathComponent, 0) == 0, fsync(directory) == 0 else {
+                throw ActionBrokerUpdateError.invalidRecoveryState
+            }
+        }
+    }
+
+    private func withLockedFile<Value>(_ operation: (Int32) throws -> Value) throws -> Value {
+        let url = url!
+        let parent = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        let directory = open(parent.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard directory >= 0 else { throw ActionBrokerUpdateError.invalidRecoveryState }
+        defer { _ = close(directory) }
+        var directoryInfo = stat()
+        guard fstat(directory, &directoryInfo) == 0, directoryInfo.st_uid == getuid(),
+              directoryInfo.st_mode & S_IFMT == S_IFDIR, directoryInfo.st_mode & 0o022 == 0 else {
+            throw ActionBrokerUpdateError.invalidRecoveryState
+        }
+        // Never unlink this lock on clear: replacing the inode would let a
+        // concurrent process hold a different lock for the same journal path.
+        let descriptor = openat(directory, url.lastPathComponent + ".lock", O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { throw ActionBrokerUpdateError.invalidRecoveryState }
+        defer { _ = close(descriptor) }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, info.st_uid == getuid(), info.st_mode & S_IFMT == S_IFREG,
+              info.st_mode & 0o077 == 0, info.st_nlink == 1,
+              flock(descriptor, LOCK_EX | LOCK_NB) == 0 else { throw ActionBrokerUpdateError.invalidRecoveryState }
+        defer { _ = flock(descriptor, LOCK_UN) }
+        // File-only synchronous critical section. Contention fails closed;
+        // no lock is held across an XPC wait or SMAppService mutation.
+        return try operation(directory)
+    }
+}
+
+@MainActor
+protocol ActionBrokerLegacyMigrationSession: AnyObject {
+    var identity: ActionBrokerLegacyProcessIdentity { get }
+    func prepare(token: String) async throws
+    func resume(token: String) async throws
+    func invalidate()
+}
+
+typealias ActionBrokerLegacyMigrationConnector = @MainActor (
+    _ expectedIdentity: ActionBrokerLegacyProcessIdentity?
+) async throws -> any ActionBrokerLegacyMigrationSession
+
+private final class LegacyMigrationReply<Value: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value, Error>?
+    init(_ continuation: CheckedContinuation<Value, Error>) { self.continuation = continuation }
+    func finish(_ result: Result<Value, Error>) {
+        let continuation = lock.withLock { defer { self.continuation = nil }; return self.continuation }
+        continuation?.resume(with: result)
+    }
+}
+
+/// Holds one authenticated connection across prepare and cancellation. Unlike
+/// the official host adapter, recovery may not reconnect to a replacement PID.
+@MainActor
+private final class ActionBrokerLegacyMigrationConnection: ActionBrokerLegacyMigrationSession {
+    let identity: ActionBrokerLegacyProcessIdentity
+    private let connection: NSXPCConnection
+
+    private init(connection: NSXPCConnection, identity: ActionBrokerLegacyProcessIdentity) {
+        self.connection = connection
+        self.identity = identity
+    }
+
+    static func connect(expectedIdentity: ActionBrokerLegacyProcessIdentity?) async throws -> any ActionBrokerLegacyMigrationSession {
+        #if BLOCKS_LOCAL_DEVELOPMENT
+        guard let requirement = BlocksLocalBuildTrust.connectionRequirement(role: "broker") else {
+            throw ActionBrokerUpdateError.untrustedPeer
+        }
+        if let expectedIdentity, !ActionBrokerServiceManager.legacyProcessMatches(expectedIdentity) {
+            throw ActionBrokerUpdateError.untrustedPeer
+        }
+        let connection = NSXPCConnection(machServiceName: BlocksActionBrokerXPC.machServiceName)
+        // Applied before resume: each RPC remains bound to the peer's audit
+        // identity and registered CDHash, not just a reusable numeric PID.
+        connection.setCodeSigningRequirement(requirement)
+        connection.remoteObjectInterface = NSXPCInterface(with: BlocksActionBrokerHostXPCProtocol.self)
+        connection.resume()
+        do {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                let reply = LegacyMigrationReply(continuation)
+                connection.invalidationHandler = { reply.finish(.failure(ActionBrokerUpdateError.connectionUnavailable)) }
+                connection.interruptionHandler = { reply.finish(.failure(ActionBrokerUpdateError.connectionUnavailable)) }
+                let proxy = connection.remoteObjectProxyWithErrorHandler { _ in
+                    reply.finish(.failure(ActionBrokerUpdateError.connectionUnavailable))
+                } as? BlocksActionBrokerHostXPCProtocol
+                guard let proxy else { reply.finish(.failure(ActionBrokerUpdateError.unsupportedPeer)); return }
+                let invoked: Void? = proxy.probeUpdateLifecycle?(withReply: { reply.finish(.success(())) })
+                if invoked == nil { reply.finish(.failure(ActionBrokerUpdateError.unsupportedPeer)) }
+                Task {
+                    try? await Task.sleep(for: .seconds(2))
+                    reply.finish(.failure(ActionBrokerUpdateError.timedOut))
+                }
+            }
+            try Task.checkCancellation()
+            guard !AppTerminationCoordinator.shared.isQuitting,
+                  connection.effectiveUserIdentifier == getuid(),
+                  BlocksLocalBuildTrust.accepts(processIdentifier: connection.processIdentifier,
+                    userIdentifier: connection.effectiveUserIdentifier, role: "broker"),
+                  let identity = ActionBrokerServiceManager.legacyProcessIdentity(connection.processIdentifier),
+                  expectedIdentity.map({ $0 == identity }) ?? true else { throw ActionBrokerUpdateError.untrustedPeer }
+            return Self(connection: connection, identity: identity)
+        } catch { connection.invalidate(); throw error }
+        #else
+        throw ActionBrokerUpdateError.unsupportedPeer
+        #endif
+    }
+
+    func prepare(token: String) async throws { try await command(token: token, preparing: true) }
+    func resume(token: String) async throws { try await command(token: token, preparing: false) }
+    func invalidate() { connection.invalidate() }
+
+    private func command(token: String, preparing: Bool) async throws {
+        try Task.checkCancellation()
+        guard !AppTerminationCoordinator.shared.isQuitting,
+              connection.processIdentifier == identity.processID,
+              ActionBrokerServiceManager.legacyProcessMatches(identity) else { throw ActionBrokerUpdateError.untrustedPeer }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let reply = LegacyMigrationReply(continuation)
+            connection.invalidationHandler = { reply.finish(.failure(ActionBrokerUpdateError.connectionUnavailable)) }
+            connection.interruptionHandler = { reply.finish(.failure(ActionBrokerUpdateError.connectionUnavailable)) }
+            let proxy = connection.remoteObjectProxyWithErrorHandler { _ in
+                reply.finish(.failure(ActionBrokerUpdateError.connectionUnavailable))
+            } as? BlocksActionBrokerHostXPCProtocol
+            guard let proxy else { reply.finish(.failure(ActionBrokerUpdateError.unsupportedPeer)); return }
+            let completion: (Bool, String?) -> Void = { accepted, code in
+                reply.finish(accepted ? .success(()) : .failure(ActionBrokerUpdateError.rejection(wireCode: code)))
+            }
+            let invoked: Void? = preparing
+                ? proxy.prepareForApplicationUpdate?(token, withReply: completion)
+                : proxy.resumeAfterCancelledApplicationUpdate?(token, withReply: completion)
+            if invoked == nil { reply.finish(.failure(ActionBrokerUpdateError.unsupportedPeer)) }
+            Task {
+                try? await Task.sleep(for: .seconds(2))
+                reply.finish(.failure(ActionBrokerUpdateError.timedOut))
+            }
+        }
+    }
+}
+
 @MainActor
 final class ActionBrokerServiceManager: ObservableObject {
     enum State: Equatable {
@@ -136,6 +414,13 @@ final class ActionBrokerServiceManager: ObservableObject {
     let usesAppOwnedService: Bool
     private let legacyService: ActionBrokerServiceControl
     private let legacyLaunchdJobsAreAbsent: () async throws -> Bool
+    private let legacyMigrationJournal: ActionBrokerLegacyMigrationJournal
+    private let legacyMigrationConnect: ActionBrokerLegacyMigrationConnector
+    private let legacyProcessLifetimeState: @MainActor (ActionBrokerLegacyProcessIdentity) -> LegacyProcessLifetimeState
+    private let legacyMigrationOwnerIdentity: @MainActor () -> ActionBrokerLegacyProcessIdentity?
+    private let legacyMigrationVerificationTimeout: Duration
+    private var legacyMigrationTicket: ActionBrokerLegacyMigrationTicket?
+    private var legacyMigrationSession: (any ActionBrokerLegacyMigrationSession)?
     var hasLegacyServiceRegistration: Bool {
         usesAppOwnedService && (legacyService.status() == .enabled || legacyService.status() == .requiresApproval)
     }
@@ -169,6 +454,8 @@ final class ActionBrokerServiceManager: ObservableObject {
         updateRecoveryTask?.cancel()
         updateRecoveryTask = nil
         serviceChangeTask?.cancel()
+        legacyMigrationSession?.invalidate()
+        legacyMigrationSession = nil
         applicationUpdatePaused = true
         reconnectTask?.cancel()
         reconnectTask = nil
@@ -189,7 +476,7 @@ final class ActionBrokerServiceManager: ObservableObject {
         try await host.pauseAndDrainForApplicationUpdate()
         guard stopService else { return }
         if usesAppOwnedService {
-            try await retireInactiveLegacyService()
+            try await retireLegacyService()
             cancelReconnectAndStopHost()
             isServiceRegistered = false
             return
@@ -272,6 +559,12 @@ final class ActionBrokerServiceManager: ObservableObject {
         updateRecoveryStorageAvailable = storage != nil
         updateRecoveryJournal = ActionBrokerUpdateRecoveryJournal(url: storage?.rootDirectory
             .appendingPathComponent("ActionBrokerUpdateRecovery.json"))
+        legacyMigrationJournal = ActionBrokerLegacyMigrationJournal(url: storage?.rootDirectory
+            .appendingPathComponent("ActionBrokerLegacyMigration.json"))
+        legacyMigrationConnect = ActionBrokerLegacyMigrationConnection.connect
+        legacyProcessLifetimeState = Self.legacyProcessLifetimeState
+        legacyMigrationOwnerIdentity = { Self.legacyProcessIdentity(getpid()) }
+        legacyMigrationVerificationTimeout = .seconds(3)
         let processScanPolicy = Self.brokerProcessScanPolicy(
             usesAppOwnedService: usesAppOwnedService, bundleURL: Bundle.main.bundleURL
         )
@@ -294,7 +587,12 @@ final class ActionBrokerServiceManager: ObservableObject {
         moduleAccess: CLIModuleAccessPolicy? = nil,
         usesAppOwnedService: Bool = false,
         legacyService: ActionBrokerServiceControl? = nil,
-        legacyLaunchdJobsAreAbsent: @escaping () async throws -> Bool = { true }
+        legacyLaunchdJobsAreAbsent: @escaping () async throws -> Bool = { true },
+        legacyMigrationJournal: ActionBrokerLegacyMigrationJournal = .init(),
+        legacyMigrationConnect: @escaping ActionBrokerLegacyMigrationConnector = ActionBrokerLegacyMigrationConnection.connect,
+        legacyProcessLifetimeState: @escaping @MainActor (ActionBrokerLegacyProcessIdentity) -> LegacyProcessLifetimeState = ActionBrokerServiceManager.legacyProcessLifetimeState,
+        legacyMigrationOwnerIdentity: @escaping @MainActor () -> ActionBrokerLegacyProcessIdentity? = { ActionBrokerServiceManager.legacyProcessIdentity(getpid()) },
+        legacyMigrationVerificationTimeout: Duration = .seconds(3)
     ) {
         // Isolated tests may inject their own policy through the additional
         // initializer argument; no module defaults are written by this path.
@@ -305,6 +603,11 @@ final class ActionBrokerServiceManager: ObservableObject {
         self.usesAppOwnedService = usesAppOwnedService
         self.legacyService = legacyService ?? .init(status: { .notRegistered }, register: {}, unregister: {})
         self.legacyLaunchdJobsAreAbsent = legacyLaunchdJobsAreAbsent
+        self.legacyMigrationJournal = legacyMigrationJournal
+        self.legacyMigrationConnect = legacyMigrationConnect
+        self.legacyProcessLifetimeState = legacyProcessLifetimeState
+        self.legacyMigrationOwnerIdentity = legacyMigrationOwnerIdentity
+        self.legacyMigrationVerificationTimeout = legacyMigrationVerificationTimeout
         self.host = host
         self.embeddedServiceAvailable = embeddedServiceAvailable
         self.retryPolicy = retryPolicy
@@ -328,10 +631,33 @@ final class ActionBrokerServiceManager: ObservableObject {
 
     private func beginStartupUpdateRecoveryIfNeeded() -> Bool {
         if usesAppOwnedService {
-            // Intent was imported once into the local preference. Never resume
-            // an obsolete Broker just to bring up the new in-process endpoint.
-            if !hasLegacyServiceRegistration { try? updateRecoveryJournal.clear() }
-            return false
+            do {
+                guard let ticket = try legacyMigrationJournal.load() else {
+                    // Importing old intent never authorizes registering a job.
+                    if !hasLegacyServiceRegistration { try? updateRecoveryJournal.clear() }
+                    return false
+                }
+                // A new App process may recover a crashed owner, but may not
+                // cancel another still-live App's preparation transaction.
+                guard legacyProcessLifetimeState(ticket.owner) == .ended else {
+                    throw ActionBrokerUpdateError.invalidRecoveryState
+                }
+                guard let owner = legacyMigrationOwnerIdentity(), owner.isValid else {
+                    throw ActionBrokerUpdateError.invalidRecoveryState
+                }
+                legacyMigrationTicket = try legacyMigrationJournal.claim(expected: ticket, newOwner: owner)
+                try applicationManagementGate.pauseIfIdle()
+                applicationUpdatePaused = true
+                state = .recovering
+                updateRecoveryTask = Task { @MainActor [weak self] in
+                    await self?.restoreServiceAfterUpdate()
+                    self?.updateRecoveryTask = nil
+                }
+                return true
+            } catch {
+                state = .failed(error.localizedDescription)
+                return true
+            }
         }
         do {
             guard let ticket = try updateRecoveryJournal.load() else { return false }
@@ -353,6 +679,16 @@ final class ActionBrokerServiceManager: ObservableObject {
     private func restoreServiceAfterUpdate() async {
         guard !isQuitting else { return }
         if usesAppOwnedService {
+            let generation = recoveryGeneration
+            do {
+                try await recoverLegacyMigration()
+                guard !isQuitting, recoveryGeneration == generation else { return }
+                try Task.checkCancellation()
+                updateRecoveryFailureMessage = nil
+            } catch {
+                guard !isQuitting, recoveryGeneration == generation else { return }
+                updateRecoveryFailureMessage = error.localizedDescription
+            }
             applicationUpdatePaused = false
             applicationManagementGate.resume()
             // A busy drain has not stopped the host. Stopping it here would
@@ -360,6 +696,8 @@ final class ActionBrokerServiceManager: ObservableObject {
             // did stop it, refresh() observes hostIsActive == false and restarts.
             host.resumeAfterCancelledApplicationUpdate()
             refresh()
+            if let updateRecoveryFailureMessage { state = .failed(updateRecoveryFailureMessage) }
+            else if isServiceRegistered, hostIsActive, successfulHostAttempt == hostAttempt { state = .enabled }
             return
         }
         let generation = recoveryGeneration
@@ -503,6 +841,34 @@ final class ActionBrokerServiceManager: ObservableObject {
             status: Int32(info.kp_proc.p_stat))
     }
 
+    static func legacyProcessIdentity(_ processID: Int32) -> ActionBrokerLegacyProcessIdentity? {
+        guard let snapshot = kernelProcessSnapshot(processID), !snapshot.isZombie else { return nil }
+        return .init(processID: processID, startSeconds: snapshot.startSeconds, startMicroseconds: snapshot.startMicroseconds)
+    }
+
+    static func legacyProcessMatches(_ identity: ActionBrokerLegacyProcessIdentity) -> Bool {
+        legacyProcessLifetimeState(identity) == .same
+    }
+
+    enum LegacyProcessLifetimeState: Equatable { case same, ended, unknown }
+
+    static func legacyProcessLifetimeState(_ identity: ActionBrokerLegacyProcessIdentity) -> LegacyProcessLifetimeState {
+        processLifetimeState(identity, snapshot: kernelProcessSnapshot(identity.processID),
+            hasExited: { kill(identity.processID, 0) != 0 && errno == ESRCH })
+    }
+
+    static func processLifetimeState(_ identity: ActionBrokerLegacyProcessIdentity,
+                                    snapshot: BrokerProcessSnapshot?, hasExited: () -> Bool) -> LegacyProcessLifetimeState {
+        guard identity.isValid else { return .unknown }
+        if let snapshot, snapshot.processID == identity.processID {
+            if snapshot.startSeconds != identity.startSeconds || snapshot.startMicroseconds != identity.startMicroseconds {
+                return .ended // The numeric PID now denotes a different lifetime.
+            }
+            return snapshot.isZombie ? .ended : .same
+        }
+        return hasExited() ? .ended : .unknown
+    }
+
     static func processExecutablePath(_ processID: Int32) -> String? {
         // proc_info.h defines PROC_PIDPATHINFO_MAXSIZE as 4 * MAXPATHLEN;
         // that macro is not imported by this Swift SDK.
@@ -520,21 +886,59 @@ final class ActionBrokerServiceManager: ObservableObject {
         return String(bytes: buffer.prefix(terminator), encoding: .utf8)
     }
 
-    /// A missing PID (or an RPC timeout) is not an idle proof: an on-demand
-    /// launchd job can start between inspection and unregister, which kills it.
-    /// Only a job already absent in *both* user domains can have its stale SM
-    /// record retired. This path never bootouts, disables or kills a Broker.
-    private func retireInactiveLegacyService() async throws {
+    /// An absent job needs no RPC. A loaded job needs a trusted, bounded session,
+    /// a durable recovery token, and the peer's global idle/admission proof.
+    /// No branch bootouts, force-kills, registers or changes pairing metadata.
+    private func retireLegacyService() async throws {
         guard usesAppOwnedService else { return }
-        guard try await legacyLaunchdJobsAreAbsent(), try runningBrokerProcessIDs().isEmpty else {
+        try checkLegacyMigrationCanContinue()
+        guard try legacyMigrationJournal.load() == nil, legacyMigrationTicket == nil else {
+            throw ActionBrokerUpdateError.invalidRecoveryState
+        }
+        let jobsAbsent = try await legacyLaunchdJobsAreAbsent()
+        try checkLegacyMigrationCanContinue()
+        if !jobsAbsent {
+            guard legacyService.status() == .enabled, updateRecoveryStorageAvailable else {
+                throw ActionBrokerUpdateError.legacyRegistrationRequiresMigration
+            }
+            let session = try await legacyMigrationConnect(nil)
+            var retained = false
+            defer { if !retained { session.invalidate() } }
+            try checkLegacyMigrationCanContinue()
+            guard session.identity.isValid, legacyProcessLifetimeState(session.identity) == .same,
+                  Set(try runningBrokerProcessIDs()) == [session.identity.processID],
+                  legacyService.status() == .enabled else { throw ActionBrokerUpdateError.untrustedPeer }
+            guard let owner = legacyMigrationOwnerIdentity(), owner.isValid else { throw ActionBrokerUpdateError.invalidRecoveryState }
+            var ticket = ActionBrokerLegacyMigrationTicket(identity: session.identity, owner: owner)
+            // Save the authenticated *lifetime* before prepare. This also covers
+            // a timeout or a crash after pause but before the reply arrives.
+            try legacyMigrationJournal.save(ticket)
+            legacyMigrationTicket = ticket
+            legacyMigrationSession = session
+            retained = true
+            try await session.prepare(token: ticket.token)
+            try checkLegacyMigrationCanContinue()
+            guard legacyProcessLifetimeState(ticket.identity) == .same,
+                  Set(try runningBrokerProcessIDs()) == [ticket.identity.processID],
+                  legacyService.status() == .enabled else { throw ActionBrokerUpdateError.untrustedPeer }
+            // SM may report an error while its asynchronous kill is still in
+            // flight. Publish this irreversible boundary before invoking it;
+            // after it, recovery may never reopen the old peer's admission.
+            ticket.phase = .unregisterStarted
+            legacyMigrationTicket = ticket
+            try legacyMigrationJournal.save(ticket)
+            try await legacyService.unregisterAndWait()
+            try checkLegacyMigrationCanContinue()
+            try await waitForLegacyRemoval(ticket: ticket)
+            return
+        }
+        guard try runningBrokerProcessIDs().isEmpty else {
             throw ActionBrokerUpdateError.legacyRegistrationRequiresMigration
         }
-        try Task.checkCancellation()
-        guard !isQuitting else { throw CancellationError() }
+        try checkLegacyMigrationCanContinue()
         if hasLegacyServiceRegistration {
             try await legacyService.unregisterAndWait()
-            try Task.checkCancellation()
-            guard !isQuitting else { throw CancellationError() }
+            try checkLegacyMigrationCanContinue()
         }
         guard legacyService.status() == .notRegistered || legacyService.status() == .notFound,
               try await legacyLaunchdJobsAreAbsent(), try runningBrokerProcessIDs().isEmpty else {
@@ -545,14 +949,148 @@ final class ActionBrokerServiceManager: ObservableObject {
         try updateRecoveryJournal.clear()
     }
 
+    private func checkLegacyMigrationCanContinue() throws {
+        try Task.checkCancellation()
+        guard !isQuitting else { throw CancellationError() }
+    }
+
+    private func legacyRemovalIsConfirmed(identity: ActionBrokerLegacyProcessIdentity) async throws -> Bool {
+        guard legacyService.status() == .notRegistered || legacyService.status() == .notFound else { return false }
+        guard try await legacyLaunchdJobsAreAbsent() else { return false }
+        guard legacyProcessLifetimeState(identity) == .ended else { return false }
+        return try runningBrokerProcessIDs().isEmpty
+    }
+
+    private func waitForLegacyRemoval(ticket: ActionBrokerLegacyMigrationTicket) async throws {
+        let deadline = ContinuousClock.now.advanced(by: legacyMigrationVerificationTimeout)
+        while true {
+            if try await legacyRemovalIsConfirmed(identity: ticket.identity) {
+                try checkLegacyMigrationCanContinue()
+                try finishLegacyMigration()
+                return
+            }
+            guard ContinuousClock.now < deadline else { throw ActionBrokerUpdateError.serviceDidNotStop }
+            try await Task.sleep(for: .milliseconds(25))
+            try checkLegacyMigrationCanContinue()
+        }
+    }
+
+    private func finishLegacyMigration() throws {
+        guard let legacyMigrationTicket else { throw ActionBrokerUpdateError.invalidRecoveryState }
+        try legacyMigrationJournal.clear(expected: legacyMigrationTicket)
+        // The official ticket is now obsolete, but is never replayed by the
+        // app-owned path, including after a partially successful unregister.
+        try updateRecoveryJournal.clear()
+        self.legacyMigrationTicket = nil
+        legacyMigrationSession?.invalidate()
+        legacyMigrationSession = nil
+    }
+
+    private func recoverLegacyMigration() async throws {
+        try checkLegacyMigrationCanContinue()
+        // Only startup or this manager's own successful save may adopt a
+        // ticket. A failed competing attempt must not load and cancel its owner.
+        guard let ticket = legacyMigrationTicket else { return }
+        let lifetime = legacyProcessLifetimeState(ticket.identity)
+        if lifetime == .ended {
+            guard try await legacyRemovalIsConfirmed(identity: ticket.identity) else {
+                throw ActionBrokerUpdateError.legacyRegistrationRequiresMigration
+            }
+            try checkLegacyMigrationCanContinue()
+            try finishLegacyMigration()
+            return
+        }
+        guard lifetime == .same else { throw ActionBrokerUpdateError.legacyRegistrationRequiresMigration }
+        if ticket.phase == .unregisterStarted {
+            // Crash may have occurred after journaling but before the OS call.
+            // Re-establish the *same* peer's idempotent global pause before a
+            // bounded retry. Never resume while an earlier kill may be pending.
+            try await continueLegacyRemoval(ticket: ticket)
+            return
+        }
+        try checkLegacyMigrationCanContinue()
+        let session: any ActionBrokerLegacyMigrationSession
+        // A held connection can safely undo our own pause even when a later
+        // launchctl diagnostic failed. Only reconnecting needs loaded-job
+        // evidence; neither recovery path may register a replacement process.
+        if let existing = legacyMigrationSession, existing.identity == ticket.identity { session = existing }
+        else {
+            guard !(try await legacyLaunchdJobsAreAbsent()) else {
+                throw ActionBrokerUpdateError.legacyRegistrationRequiresMigration
+            }
+            try checkLegacyMigrationCanContinue()
+            session = try await legacyMigrationConnect(ticket.identity)
+            legacyMigrationSession = session
+        }
+        do {
+            try checkLegacyMigrationCanContinue()
+            guard session.identity == ticket.identity, legacyProcessLifetimeState(ticket.identity) == .same else {
+                throw ActionBrokerUpdateError.untrustedPeer
+            }
+            try await session.resume(token: ticket.token)
+            try checkLegacyMigrationCanContinue()
+            try legacyMigrationJournal.clear(expected: ticket)
+        } catch {
+            // An interrupted NSXPCConnection is not a reusable recovery path.
+            // Keep the token/journal, but require fresh authentication of the
+            // same saved lifetime on a later explicit recovery attempt.
+            session.invalidate()
+            legacyMigrationSession = nil
+            throw error
+        }
+        legacyMigrationTicket = nil
+        session.invalidate()
+        legacyMigrationSession = nil
+    }
+
+    private func continueLegacyRemoval(ticket: ActionBrokerLegacyMigrationTicket) async throws {
+        guard legacyService.status() == .enabled, !(try await legacyLaunchdJobsAreAbsent()) else {
+            throw ActionBrokerUpdateError.serviceDidNotStop
+        }
+        try checkLegacyMigrationCanContinue()
+        let session: any ActionBrokerLegacyMigrationSession
+        if let existing = legacyMigrationSession, existing.identity == ticket.identity { session = existing }
+        else {
+            session = try await legacyMigrationConnect(ticket.identity)
+            legacyMigrationSession = session
+        }
+        do {
+            try checkLegacyMigrationCanContinue()
+            guard session.identity == ticket.identity, legacyProcessLifetimeState(ticket.identity) == .same,
+                  Set(try runningBrokerProcessIDs()) == [ticket.identity.processID] else {
+                throw ActionBrokerUpdateError.untrustedPeer
+            }
+            try await session.prepare(token: ticket.token)
+            try checkLegacyMigrationCanContinue()
+            guard legacyService.status() == .enabled, legacyProcessLifetimeState(ticket.identity) == .same,
+                  Set(try runningBrokerProcessIDs()) == [ticket.identity.processID] else {
+                throw ActionBrokerUpdateError.serviceDidNotStop
+            }
+            // The preceding attempt may have failed while persisting the OS
+            // boundary. Every retry must durably confirm ownership and phase
+            // again; an in-memory unregisterStarted value is not authority.
+            try legacyMigrationJournal.save(ticket)
+            try checkLegacyMigrationCanContinue()
+            try await legacyService.unregisterAndWait()
+            try checkLegacyMigrationCanContinue()
+            try await waitForLegacyRemoval(ticket: ticket)
+        } catch {
+            session.invalidate()
+            legacyMigrationSession = nil
+            throw error
+        }
+    }
+
     static func legacyJobIsAbsent(exitCode: Int32, standardError: String, domain: String, uid: uid_t) -> Bool {
         let description = domain.hasPrefix("gui/") ? "user gui: \(uid)" : "uid: \(uid)"
         let missing = "Could not find service \"\(BlocksActionBrokerXPC.launchAgentLabel)\" in domain for \(description)"
-        return exitCode == 113 && standardError.split(separator: "\n").contains { $0 == missing }
+        let lines = standardError.split(separator: "\n").map(String.init)
+        return exitCode == 113 && (lines == [missing] || lines == ["Bad request.", missing])
     }
 
     private static func currentLegacyLaunchdJobsAreAbsent() async throws -> Bool {
         let uid = getuid()
+        var allAbsent = true
         for domain in ["gui/\(uid)", "user/\(uid)"] {
             let process = Process()
             let errors = Pipe()
@@ -574,12 +1112,17 @@ final class ActionBrokerServiceManager: ObservableObject {
                 throw error
             }
             let data = errors.fileHandleForReading.readDataToEndOfFile()
-            guard data.count <= 4096, let message = String(data: data, encoding: .utf8),
-                  legacyJobIsAbsent(exitCode: process.terminationStatus, standardError: message, domain: domain, uid: uid) else {
-                return false
+            guard data.count <= 4096, let message = String(data: data, encoding: .utf8) else {
+                throw ActionBrokerUpdateError.legacyRegistrationRequiresMigration
+            }
+            if process.terminationStatus == 0 { allAbsent = false }
+            else if !legacyJobIsAbsent(exitCode: process.terminationStatus, standardError: message, domain: domain, uid: uid) {
+                // A missing domain, permission failure or unexpected diagnostic
+                // is unknown, not a loaded job that authenticated RPC may retire.
+                throw ActionBrokerUpdateError.legacyRegistrationRequiresMigration
             }
         }
-        return true
+        return allAbsent
     }
 
     func setEnabled(_ enabled: Bool) {
