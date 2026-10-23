@@ -31,6 +31,42 @@ struct PermissionRecoveryState: Equatable {
     }
 }
 
+/// View-local intent only: the store stays restartable until its owning sheet
+/// has actually dismissed. Recreating or leaving that owner must not restart.
+struct PermissionRecoveryRestartPresentationGate {
+    private var pendingState: PermissionRecoveryState?
+
+    static func canPresentRecoverySheet(for state: PermissionRecoveryState?) -> Bool {
+        guard let state else { return false }
+        switch state.stage {
+        case .restarting, .restartScheduled:
+            // Reopening a sheet during the prepared restart can prevent the
+            // pending AppKit termination from reaching the delegate.
+            return false
+        case .checking, .restartSuggested, .resumingAfterRestart,
+             .recovered, .needsReauthorization, .restartFailed:
+            return true
+        }
+    }
+
+    mutating func requestRestart(for state: PermissionRecoveryState?) -> Bool {
+        guard pendingState == nil, let state, state.canRestart else { return false }
+        pendingState = state
+        return true
+    }
+
+    mutating func consumeDismissedRestart(currentState: PermissionRecoveryState?) -> Bool {
+        let requestedState = pendingState
+        pendingState = nil
+        guard let requestedState, requestedState == currentState else { return false }
+        return requestedState.canRestart
+    }
+
+    mutating func cancelPendingRestart() {
+        pendingState = nil
+    }
+}
+
 /// No credentials, TCC data, installation paths, or persisted process IDs.
 struct PermissionRecoveryTicket: Codable, Equatable {
     let kind: PermissionDiagnosticKind

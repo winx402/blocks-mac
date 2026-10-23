@@ -278,6 +278,188 @@ final class PermissionRecoveryFlowTests: XCTestCase {
         tickets.clear()
     }
 
+    func testRecoverySheetPresentationEligibilityCoversNilAndEveryStage() {
+        XCTAssertFalse(PermissionRecoveryRestartPresentationGate.canPresentRecoverySheet(for: nil))
+        let stages: [(PermissionRecoveryStage, Bool)] = [
+            (.checking, true),
+            (.restartSuggested, true),
+            (.restarting, false),
+            (.restartScheduled, false),
+            (.resumingAfterRestart, true),
+            (.recovered, true),
+            (.needsReauthorization, true),
+            (.restartFailed, true),
+        ]
+        for kind in [PermissionDiagnosticKind.screenRecording, .accessibility, .inputMonitoring] {
+            for (stage, expected) in stages {
+                let state = PermissionRecoveryState(kind: kind, stage: stage)
+                XCTAssertEqual(
+                    PermissionRecoveryRestartPresentationGate.canPresentRecoverySheet(for: state),
+                    expected,
+                    "Presentation eligibility must not depend on the selected permission"
+                )
+            }
+        }
+    }
+
+    func testReturningOrRecreatedOwnerCannotPresentSheetDuringRestart() async {
+        let fixture = makeFixture()
+        await suggestRestart(fixture)
+        var gate = PermissionRecoveryRestartPresentationGate()
+        XCTAssertTrue(gate.requestRestart(for: fixture.store.recoveryState))
+        if gate.consumeDismissedRestart(currentState: fixture.store.recoveryState) {
+            fixture.store.restartPermissionRecovery()
+        }
+
+        for expectedStage in [PermissionRecoveryStage.restarting, .restartScheduled] {
+            XCTAssertEqual(fixture.store.recoveryState?.stage, expectedStage)
+            gate.cancelPendingRestart()
+            XCTAssertFalse(PermissionRecoveryRestartPresentationGate.canPresentRecoverySheet(
+                for: fixture.store.recoveryState
+            ), "Returning to the existing pane must not reopen its sheet")
+            gate = PermissionRecoveryRestartPresentationGate()
+            XCTAssertFalse(PermissionRecoveryRestartPresentationGate.canPresentRecoverySheet(
+                for: fixture.store.recoveryState
+            ), "A newly created pane must use the same eligibility policy")
+            XCTAssertFalse(gate.requestRestart(for: fixture.store.recoveryState))
+            XCTAssertFalse(gate.consumeDismissedRestart(currentState: fixture.store.recoveryState))
+            if expectedStage == .restarting { fixture.actions.complete(.scheduled) }
+        }
+
+        XCTAssertEqual(fixture.actions.restartCount, 1)
+        await waitUntil { fixture.wait.watchdogStarted }
+        fixture.wait.releaseWatchdog()
+        await waitUntil { fixture.store.recoveryState?.stage == .restartFailed }
+        fixture.tickets.clear()
+    }
+
+    func testRejectedInFlightBeginCannotReopenRecoverySheet() async {
+        let fixture = makeFixture()
+        await suggestRestart(fixture)
+        fixture.store.restartPermissionRecovery()
+
+        for expectedStage in [PermissionRecoveryStage.restarting, .restartScheduled] {
+            XCTAssertEqual(fixture.store.recoveryState?.stage, expectedStage)
+            fixture.store.beginPermissionRecovery(for: .accessibility)
+            XCTAssertEqual(fixture.store.recoveryState?.kind, .screenRecording,
+                           "The store rejects changing the selected permission during restart")
+            XCTAssertEqual(fixture.store.recoveryState?.stage, expectedStage)
+            XCTAssertFalse(PermissionRecoveryRestartPresentationGate.canPresentRecoverySheet(
+                for: fixture.store.recoveryState
+            ), "The owner must inspect actual store state after a rejected begin")
+            XCTAssertEqual(fixture.actions.restartCount, 1)
+            if expectedStage == .restarting { fixture.actions.complete(.scheduled) }
+        }
+
+        await waitUntil { fixture.wait.watchdogStarted }
+        fixture.wait.releaseWatchdog()
+        await waitUntil { fixture.store.recoveryState?.stage == .restartFailed }
+        XCTAssertTrue(PermissionRecoveryRestartPresentationGate.canPresentRecoverySheet(
+            for: fixture.store.recoveryState
+        ), "Failure feedback is displayable again, without automatically replaying restart")
+        XCTAssertEqual(fixture.actions.restartCount, 1)
+        fixture.tickets.clear()
+    }
+
+    func testPresentationGateAcceptsOnlyExplicitRestartableState() {
+        let rejectedStages: [PermissionRecoveryStage] = [
+            .checking, .restarting, .restartScheduled, .resumingAfterRestart, .recovered,
+        ]
+        var gate = PermissionRecoveryRestartPresentationGate()
+        XCTAssertFalse(gate.requestRestart(for: nil))
+        for stage in rejectedStages {
+            let state = PermissionRecoveryState(kind: .screenRecording, stage: stage)
+            XCTAssertFalse(gate.requestRestart(for: state))
+            XCTAssertFalse(gate.consumeDismissedRestart(currentState: state))
+        }
+        for stage in [PermissionRecoveryStage.restartSuggested, .restartFailed, .needsReauthorization] {
+            let state = PermissionRecoveryState(kind: .accessibility, stage: stage)
+            XCTAssertTrue(gate.requestRestart(for: state))
+            XCTAssertTrue(gate.consumeDismissedRestart(currentState: state))
+        }
+    }
+
+    func testPresentationGateWaitsForDismissalAndConsumesOnlyOnce() async {
+        let fixture = makeFixture()
+        await suggestRestart(fixture)
+        var gate = PermissionRecoveryRestartPresentationGate()
+        XCTAssertTrue(gate.requestRestart(for: fixture.store.recoveryState))
+        XCTAssertFalse(gate.requestRestart(for: fixture.store.recoveryState))
+        XCTAssertEqual(fixture.actions.restartCount, 0)
+        XCTAssertEqual(fixture.store.recoveryState?.stage, .restartSuggested)
+        XCTAssertNil(fixture.tickets.pendingTicket(for: 202))
+
+        if gate.consumeDismissedRestart(currentState: fixture.store.recoveryState) {
+            fixture.store.restartPermissionRecovery()
+        }
+        XCTAssertEqual(fixture.actions.restartCount, 1)
+        XCTAssertEqual(fixture.store.recoveryState?.stage, .restarting)
+        XCTAssertFalse(gate.consumeDismissedRestart(currentState: fixture.store.recoveryState))
+        fixture.actions.complete(.failed)
+        fixture.tickets.clear()
+    }
+
+    func testPresentationGateRejectsChangedKindStageOrMissingStateAndDiscardsIntent() {
+        let requested = PermissionRecoveryState(kind: .accessibility, stage: .restartSuggested)
+        let changedStates: [PermissionRecoveryState?] = [
+            nil,
+            .init(kind: .inputMonitoring, stage: .restartSuggested),
+            .init(kind: .accessibility, stage: .checking),
+            .init(kind: .accessibility, stage: .recovered),
+            .init(kind: .accessibility, stage: .restartFailed),
+        ]
+        for changedState in changedStates {
+            var gate = PermissionRecoveryRestartPresentationGate()
+            XCTAssertTrue(gate.requestRestart(for: requested))
+            XCTAssertFalse(gate.consumeDismissedRestart(currentState: changedState))
+            XCTAssertFalse(gate.consumeDismissedRestart(currentState: requested),
+                           "An invalidated dismissal must not preserve a stale restart intent")
+        }
+    }
+
+    func testPresentationGateOrdinaryCloseCancellationAndOwnerRecreationNeverRestart() async {
+        let fixture = makeFixture()
+        await suggestRestart(fixture)
+        var gate = PermissionRecoveryRestartPresentationGate()
+        XCTAssertFalse(gate.consumeDismissedRestart(currentState: fixture.store.recoveryState),
+                       "Closing a sheet without a restart request must not restart")
+        XCTAssertTrue(gate.requestRestart(for: fixture.store.recoveryState))
+        gate.cancelPendingRestart()
+        XCTAssertFalse(gate.consumeDismissedRestart(currentState: fixture.store.recoveryState))
+        XCTAssertTrue(gate.requestRestart(for: fixture.store.recoveryState))
+        gate = PermissionRecoveryRestartPresentationGate()
+        XCTAssertFalse(gate.consumeDismissedRestart(currentState: fixture.store.recoveryState))
+        XCTAssertEqual(fixture.store.recoveryState?.stage, .restartSuggested)
+        XCTAssertFalse(fixture.store.recoveryState?.isInFlight == true)
+        XCTAssertEqual(fixture.actions.restartCount, 0)
+        XCTAssertNil(fixture.tickets.pendingTicket(for: 202))
+        fixture.tickets.clear()
+    }
+
+    func testFailedRestartRequiresNewPresentationRequestAndDismissalBeforeRetry() async {
+        let fixture = makeFixture()
+        await suggestRestart(fixture)
+        var gate = PermissionRecoveryRestartPresentationGate()
+        XCTAssertTrue(gate.requestRestart(for: fixture.store.recoveryState))
+        if gate.consumeDismissedRestart(currentState: fixture.store.recoveryState) {
+            fixture.store.restartPermissionRecovery()
+        }
+        fixture.actions.complete(.failed)
+        XCTAssertEqual(fixture.store.recoveryState?.stage, .restartFailed)
+        XCTAssertFalse(gate.consumeDismissedRestart(currentState: fixture.store.recoveryState))
+        XCTAssertEqual(fixture.actions.restartCount, 1, "Showing failure is not authorization to retry")
+
+        XCTAssertTrue(gate.requestRestart(for: fixture.store.recoveryState))
+        XCTAssertEqual(fixture.actions.restartCount, 1)
+        if gate.consumeDismissedRestart(currentState: fixture.store.recoveryState) {
+            fixture.store.restartPermissionRecovery()
+        }
+        XCTAssertEqual(fixture.actions.restartCount, 2)
+        XCTAssertFalse(gate.consumeDismissedRestart(currentState: fixture.store.recoveryState))
+        fixture.actions.complete(.failed)
+        fixture.tickets.clear()
+    }
+
     private func suggestRestart(_ fixture: Fixture) async {
         await waitUntil { fixture.provider.calls == 1 }
         fixture.store.beginPermissionRecovery(for: .screenRecording)

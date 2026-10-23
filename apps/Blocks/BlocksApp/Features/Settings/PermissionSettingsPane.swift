@@ -8,12 +8,21 @@ struct PermissionSettingsPane: View {
     @State private var diagnosticsExpanded = false
     @State private var permissionHelpExpanded = false
     @State private var recoveryPresented = false
+    @State private var recoveryRestartPresentationGate = PermissionRecoveryRestartPresentationGate()
 
     var body: some View {
         content
-            .onAppear { recoveryPresented = permissionStore.recoveryState != nil }
-            .sheet(isPresented: $recoveryPresented) {
-                PermissionRecoveryView()
+            .onAppear { presentRecoveryIfEligible() }
+            .onDisappear { recoveryRestartPresentationGate.cancelPendingRestart() }
+            .onChange(of: permissionStore.recoveryState) { _, state in
+                if !PermissionRecoveryRestartPresentationGate.canPresentRecoverySheet(for: state) {
+                    recoveryPresented = false
+                } else if state?.stage == .restartFailed {
+                    presentRecoveryIfEligible()
+                }
+            }
+            .sheet(isPresented: $recoveryPresented, onDismiss: recoverySheetDidDismiss) {
+                PermissionRecoveryView(onRestartRequested: requestRestartAfterRecoveryDismissal)
                     .environmentObject(permissionStore)
             }
     }
@@ -122,7 +131,33 @@ struct PermissionSettingsPane: View {
 
     private func beginRecovery(_ kind: PermissionDiagnosticKind) {
         permissionStore.beginPermissionRecovery(for: kind)
-        recoveryPresented = true
+        // An in-flight store can reject begin without changing its selected
+        // permission. Decide from the actual state, never the requested kind.
+        presentRecoveryIfEligible()
+    }
+
+    private func presentRecoveryIfEligible() {
+        recoveryPresented = PermissionRecoveryRestartPresentationGate.canPresentRecoverySheet(
+            for: permissionStore.recoveryState
+        )
+    }
+
+    private func requestRestartAfterRecoveryDismissal() {
+        guard recoveryPresented,
+              recoveryRestartPresentationGate.requestRestart(for: permissionStore.recoveryState) else { return }
+        recoveryPresented = false
+    }
+
+    private func recoverySheetDidDismiss() {
+        guard recoveryRestartPresentationGate.consumeDismissedRestart(
+            currentState: permissionStore.recoveryState
+        ) else { return }
+        // Setting the binding alone is not proof that AppKit ended this sheet.
+        // Only its real dismissal callback may enter the existing restart flow.
+        permissionStore.restartPermissionRecovery()
+        // Immediate rejection can round-trip restartFailed -> restarting ->
+        // restartFailed before SwiftUI's onChange observes a different value.
+        if permissionStore.recoveryState?.stage == .restartFailed { presentRecoveryIfEligible() }
     }
 }
 

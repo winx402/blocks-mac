@@ -6,6 +6,7 @@ import SwiftUI
 struct PermissionRecoveryView: View {
     @EnvironmentObject private var store: PermissionStore
     @Environment(\.dismiss) private var dismiss
+    let onRestartRequested: () -> Void
 
     var body: some View {
         SettingsSheetScaffold(
@@ -56,7 +57,7 @@ struct PermissionRecoveryView: View {
                 .disabled(store.recoveryState?.isInFlight != false)
             if store.recoveryState?.canRestart == true {
                 Button(L10n.string("settings.permissionRecovery.reopenCheck")) {
-                    store.restartPermissionRecovery()
+                    onRestartRequested()
                 }
                 .keyboardShortcut(.defaultAction)
             }
