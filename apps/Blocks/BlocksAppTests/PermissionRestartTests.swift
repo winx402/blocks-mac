@@ -1,9 +1,111 @@
 import AppKit
+import BlocksCore
 import XCTest
 @testable import Blocks
 
 @MainActor
 final class PermissionRestartTests: XCTestCase {
+    func testPreparationFailureFeedbackUsesTypedAllowlistAndNeverRawErrorText() {
+        let secret = "busy secret /Users/private/file credential"
+        let unknown = NSError(domain: secret, code: 1, userInfo: [NSLocalizedDescriptionKey: secret])
+        let cases: [(String, Error, PermissionRestartFailure)] = [
+            ("helper", SelectionHelperUpdatePreparationFailure.helperNotPaired, .helperNotPaired),
+            ("helper", SelectionHelperUpdatePreparationFailure.preparationUnavailable, .connectionUnavailable),
+            ("helper", SelectionHelperUpdatePreparationFailure.preparationRejected, .componentNotReady),
+            ("helper", SelectionAgentServiceFailure.keychainUnavailable, .authenticationUnavailable),
+            ("helper", SelectionAgentServiceFailure.connectionFailed, .connectionUnavailable),
+            ("helper", SelectionAgentServiceFailure.timedOut, .timedOut),
+            ("helper", ApplicationOperationAdmissionGate.AdmissionError.busy(secret), .busy),
+            ("helper", ApplicationOperationAdmissionGate.AdmissionError.paused(secret), .recoveryConflict),
+            ("actionBroker", ActionBrokerUpdateError.busy, .busy),
+            ("actionBroker", ActionBrokerUpdateError.timedOut, .timedOut),
+            ("actionBroker", ActionBrokerUpdateError.connectionUnavailable, .connectionUnavailable),
+            ("actionBroker", ActionBrokerUpdateError.untrustedPeer, .authenticationUnavailable),
+            ("actionBroker", ActionBrokerUpdateError.unsupportedPeer, .componentNotReady),
+            ("actionBroker", ActionBrokerUpdateError.preparationRejected, .componentNotReady),
+            ("actionBroker", ActionBrokerUpdateError.requiresApproval, .componentNotReady),
+            ("actionBroker", ActionBrokerUpdateError.serviceDidNotStop, .componentNotReady),
+            ("actionBroker", ActionBrokerUpdateError.legacyRegistrationRequiresMigration, .componentNotReady),
+            ("actionBroker", ActionBrokerUpdateError.preparationInProgress, .recoveryConflict),
+            ("actionBroker", ActionBrokerUpdateError.invalidRecoveryState, .recoveryConflict),
+            ("translation", ApplicationOperationAdmissionGate.AdmissionError.busy(secret), .busy),
+            ("translation", ApplicationOperationAdmissionGate.AdmissionError.paused(secret), .recoveryConflict),
+            ("app", ApplicationLifecycleCoordinator.SafetyError.preparationInProgress, .recoveryConflict),
+            ("app", ApplicationLifecycleCoordinator.SafetyError.configurationLocked, .recoveryConflict),
+            ("app", ApplicationLifecycleCoordinator.SafetyError.missingParticipants([secret]), .componentNotReady),
+            ("database", unknown, .database),
+            ("helper", unknown, .unknown),
+            ("actionBroker", unknown, .unknown),
+            (secret, unknown, .unknown),
+        ]
+        for (participant, error, expected) in cases {
+            let wrapped = ApplicationLifecycleCoordinator.ParticipantDrainError(
+                participantID: participant, underlying: error
+            )
+            let failure = PermissionRestartFailure(preparationError: wrapped)
+            XCTAssertEqual(failure, expected, "participant=\(participant)")
+            XCTAssertFalse(failure.message.contains(secret))
+            XCTAssertNotEqual(failure.message, failure.localizationKey)
+            if expected != .busy { XCTAssertNotEqual(failure.message, PermissionRestartFailure.busy.message) }
+        }
+        XCTAssertEqual(PermissionRestartFailure(preparationError: unknown), .unknown)
+        for failure in PermissionRestartFailure.allCases {
+            XCTAssertNotEqual(failure.message, failure.localizationKey)
+            XCTAssertFalse(failure.message.contains(secret))
+        }
+        XCTAssertTrue(PermissionRestartFailure.helperNotPaired.message.contains("blocksHelper"))
+        XCTAssertFalse(PermissionRestartFailure.helperNotPaired.message.contains("Blocks Selection Helper"))
+        XCTAssertNotEqual(L10n.string("settings.permissionRecovery.keptOpen"), PermissionRestartFailure.busy.message)
+    }
+
+    func testUnpairedHelperReasonSurvivesPreparationRecoveryAndChangesOnExplicitRetry() async {
+        let failures: [Error] = [
+            ApplicationLifecycleCoordinator.ParticipantDrainError(
+                participantID: "helper", underlying: SelectionHelperUpdatePreparationFailure.helperNotPaired
+            ),
+            ApplicationOperationAdmissionGate.AdmissionError.busy("fixture"),
+            NSError(domain: "private error", code: 1),
+        ]
+        var preparations = 0
+        var resumes = 0
+        var launches = 0
+        var terminations = 0
+        let termination = AppTerminationCoordinator(replyHandler: { _ in })
+        let actions = DefaultPermissionSystemActions(
+            relauncher: { _, pid, completion in launches += 1; completion(pid + 1, nil) },
+            applicationTerminator: {
+                terminations += 1
+                termination.finalizeTerminationResourcesIfNeeded()
+            },
+            safety: PermissionRestartSafety(prepare: {
+                let index = preparations
+                preparations += 1
+                if index < failures.count { throw failures[index] }
+            }, resume: { resumes += 1 }),
+            terminationCoordinator: termination,
+            cancelHandoff: { _ in true },
+            commitHandoff: { _ in true }
+        )
+
+        for (index, reason) in [PermissionRestartFailure.helperNotPaired, .busy, .unknown].enumerated() {
+            let failed = expectation(description: "typed failure after recovery \(index)")
+            actions.restartForPermissionRefresh {
+                XCTAssertEqual($0, .failed(reason))
+                XCTAssertEqual(resumes, index + 1, "Report failure only after reversible recovery")
+                failed.fulfill()
+            }
+            await fulfillment(of: [failed], timeout: 1)
+            XCTAssertEqual(launches, 0)
+            XCTAssertEqual(terminations, 0)
+        }
+        let scheduled = expectation(description: "retry can safely proceed without a stale failure")
+        actions.restartForPermissionRefresh { XCTAssertEqual($0, .scheduled); scheduled.fulfill() }
+        await fulfillment(of: [scheduled], timeout: 1)
+        XCTAssertEqual(preparations, 4)
+        XCTAssertEqual(launches, 1)
+        XCTAssertEqual(terminations, 1)
+    }
+
     func testDuplicateRequestsWaitForOneHandoffAndTerminateOnce() async {
         var launchCount = 0
         var terminateCount = 0
@@ -74,7 +176,7 @@ final class PermissionRestartTests: XCTestCase {
             }
         }
         await fulfillment(of: [failed], timeout: 1)
-        XCTAssertEqual(results, [.failed, .failed])
+        XCTAssertEqual(results, [.failed(.launchFailed), .failed(.launchFailed)])
         XCTAssertEqual(launchCount, 2)
         XCTAssertEqual(resumeCount, 2)
         XCTAssertEqual(terminateCount, 0)
@@ -95,7 +197,7 @@ final class PermissionRestartTests: XCTestCase {
 
         actions.restartForPermissionRefresh { result = $0 }
 
-        XCTAssertEqual(result, .failed)
+        XCTAssertEqual(result, .failed(.componentNotReady))
         XCTAssertEqual(launches, 0)
         XCTAssertEqual(terminations, 0)
     }
@@ -160,7 +262,7 @@ final class PermissionRestartTests: XCTestCase {
             commitHandoff: { _ in true }
         )
 
-        actions.restartForPermissionRefresh { XCTAssertEqual($0, .failed); failed.fulfill() }
+        actions.restartForPermissionRefresh { XCTAssertEqual($0, .failed(.unknown)); failed.fulfill() }
         await fulfillment(of: [failed], timeout: 1)
         XCTAssertEqual(resumes, 1)
         XCTAssertEqual(launches, 0)
@@ -202,14 +304,14 @@ final class PermissionRestartTests: XCTestCase {
             commitHandoff: { _ in true }
         )
 
-        actions.restartForPermissionRefresh { XCTAssertEqual($0, .failed); failed.fulfill() }
+        actions.restartForPermissionRefresh { XCTAssertEqual($0, .failed(.timedOut)); failed.fulfill() }
         await fulfillment(of: [preparing, failed], timeout: 1)
         XCTAssertEqual(resumes, 0, "Do not clear lifecycle ownership while prepare is still running")
         XCTAssertEqual(launches, 0)
         XCTAssertEqual(terminations, 0)
         var concurrentRetry: PermissionRestartResult?
         actions.restartForPermissionRefresh { concurrentRetry = $0 }
-        XCTAssertEqual(concurrentRetry, .failed)
+        XCTAssertEqual(concurrentRetry, .failed(.recoveryConflict))
         XCTAssertEqual(preparations, 1)
 
         finishPreparation?.resume()
@@ -287,7 +389,7 @@ final class PermissionRestartTests: XCTestCase {
             commitHandoff: { _ in true }
         )
 
-        actions.restartForPermissionRefresh { XCTAssertEqual($0, .failed); failed.fulfill() }
+        actions.restartForPermissionRefresh { XCTAssertEqual($0, .failed(.recoveryConflict)); failed.fulfill() }
         await fulfillment(of: [preparing], timeout: 1)
         XCTAssertEqual(termination.requestTermination(), .terminateLater)
         finishPreparation?.resume()
@@ -341,7 +443,7 @@ final class PermissionRestartTests: XCTestCase {
         XCTAssertFalse(termination.isQuitting)
         var blockedRetry: PermissionRestartResult?
         actions.restartForPermissionRefresh { blockedRetry = $0 }
-        XCTAssertEqual(blockedRetry, .failed)
+        XCTAssertEqual(blockedRetry, .failed(.recoveryConflict))
         XCTAssertEqual(preparations, 1)
         XCTAssertEqual(launches, 1)
 
@@ -396,7 +498,7 @@ final class PermissionRestartTests: XCTestCase {
             commitHandoff: { _ in commits += 1; return true }
         )
 
-        actions.restartForPermissionRefresh { XCTAssertEqual($0, .failed); failed.fulfill() }
+        actions.restartForPermissionRefresh { XCTAssertEqual($0, .failed(.recoveryConflict)); failed.fulfill() }
         await fulfillment(of: [launched], timeout: 1)
         XCTAssertEqual(termination.requestTermination(), .terminateLater,
                        "No permission restart fence may change ordinary quit before READY")
@@ -429,7 +531,7 @@ final class PermissionRestartTests: XCTestCase {
             commitHandoff: { _ in commits += 1; return commits > 1 }
         )
 
-        actions.restartForPermissionRefresh { XCTAssertEqual($0, .failed); failed.fulfill() }
+        actions.restartForPermissionRefresh { XCTAssertEqual($0, .failed(.launchFailed)); failed.fulfill() }
         await fulfillment(of: [failed], timeout: 1)
         XCTAssertEqual(terminations, 0)
         XCTAssertEqual(cancellations, 1)

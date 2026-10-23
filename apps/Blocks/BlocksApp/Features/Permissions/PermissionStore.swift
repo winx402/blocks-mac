@@ -198,9 +198,9 @@ final class PermissionStore: ObservableObject {
                   self.refreshGeneration == generation,
                   self.recoveryState?.stage == .restarting else { return }
             switch result {
-            case .failed:
+            case let .failed(failure):
                 self.recoveryTickets.clear()
-                self.setRecoveryState(kind: state.kind, stage: .restartFailed)
+                self.setRecoveryState(kind: state.kind, stage: .restartFailed, failure: failure)
             case .scheduled:
                 self.recoveryTickets.save(
                     PermissionRecoveryTicket(kind: state.kind, stage: .restartScheduled),
@@ -210,6 +210,13 @@ final class PermissionStore: ObservableObject {
                 self.watchForCancelledExit(kind: state.kind, generation: generation)
             }
         }
+    }
+
+    /// Cancelling the presentation discards process-local failure feedback,
+    /// never an in-flight restart or another process's persisted recovery.
+    func cancelPermissionRecovery() {
+        guard recoveryState?.isInFlight != true else { return }
+        recoveryState = nil
     }
 
     /// Consume before awaiting: activation, scene recreation and callbacks can
@@ -236,14 +243,18 @@ final class PermissionStore: ObservableObject {
                   self.recoveryState?.stage == .restartScheduled else { return }
             self.recoveryTickets.clear()
             self.restartWatchdogTask = nil
-            self.setRecoveryState(kind: kind, stage: .restartFailed)
+            self.setRecoveryState(kind: kind, stage: .restartFailed, failure: .timedOut)
         }
     }
 
-    private func setRecoveryState(kind: PermissionDiagnosticKind, stage: PermissionRecoveryStage) {
-        recoveryState = PermissionRecoveryState(kind: kind, stage: stage)
+    private func setRecoveryState(
+        kind: PermissionDiagnosticKind,
+        stage: PermissionRecoveryStage,
+        failure: PermissionRestartFailure? = nil
+    ) {
+        recoveryState = PermissionRecoveryState(kind: kind, stage: stage, failure: failure)
         let diagnostic = permissionSnapshot.diagnostic(for: kind)
-        Self.logger.info("Permission recovery stage=\(stage.rawValue, privacy: .public) target=\(kind.rawValue, privacy: .public) pid=\(self.processID) installation=\(diagnostic.bundleID, privacy: .public) signature=\(diagnostic.signatureKind, privacy: .public) team=\(diagnostic.teamID ?? "none", privacy: .public)")
+        Self.logger.info("Permission recovery stage=\(stage.rawValue, privacy: .public) reason=\(failure?.rawValue ?? "none", privacy: .public) target=\(kind.rawValue, privacy: .public) pid=\(self.processID) installation=\(diagnostic.bundleID, privacy: .public) signature=\(diagnostic.signatureKind, privacy: .public) team=\(diagnostic.teamID ?? "none", privacy: .public)")
     }
 
     private func logSnapshot(_ snapshot: PermissionStateSnapshot) {

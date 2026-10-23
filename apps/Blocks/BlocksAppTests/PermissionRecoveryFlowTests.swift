@@ -110,12 +110,62 @@ final class PermissionRecoveryFlowTests: XCTestCase {
         fixture.store.restartPermissionRecovery()
         XCTAssertEqual(fixture.actions.restartCount, 1)
 
-        fixture.actions.complete(.failed)
+        fixture.actions.complete(.failed(.helperNotPaired))
         fixture.actions.complete(.scheduled)
+        fixture.actions.complete(.failed(.busy))
         XCTAssertEqual(fixture.store.recoveryState?.stage, .restartFailed)
+        XCTAssertEqual(fixture.store.recoveryState?.failure, .helperNotPaired)
         XCTAssertNil(fixture.tickets.pendingTicket(for: 202))
         XCTAssertEqual(fixture.actions.restartCount, 1)
         XCTAssertEqual(fixture.requester.requestCount, 0)
+        fixture.tickets.clear()
+    }
+
+    func testFailureFeedbackClearsOnRecheckNewCheckAndCancellation() async {
+        let fixture = makeFixture()
+        await suggestRestart(fixture)
+        fixture.store.restartPermissionRecovery()
+        fixture.actions.complete(.failed(.helperNotPaired))
+        XCTAssertEqual(fixture.store.recoveryState?.failure, .helperNotPaired)
+
+        fixture.store.recheckPermissionRecovery()
+        XCTAssertEqual(fixture.store.recoveryState?.stage, .checking)
+        XCTAssertNil(fixture.store.recoveryState?.failure)
+        await waitUntil { fixture.store.recoveryState?.stage == .restartSuggested }
+        XCTAssertNil(fixture.store.recoveryState?.failure)
+        fixture.store.restartPermissionRecovery()
+        XCTAssertNil(fixture.store.recoveryState?.failure)
+        fixture.actions.complete(.failed(.unknown))
+        XCTAssertEqual(fixture.store.recoveryState?.failure, .unknown)
+
+        fixture.store.beginPermissionRecovery(for: .accessibility)
+        XCTAssertEqual(fixture.store.recoveryState?.stage, .checking)
+        XCTAssertNil(fixture.store.recoveryState?.failure)
+        await waitUntil { fixture.store.recoveryState?.stage == .restartSuggested }
+        fixture.store.restartPermissionRecovery()
+        fixture.actions.complete(.failed(.timedOut))
+        XCTAssertEqual(fixture.store.recoveryState?.failure, .timedOut)
+        fixture.store.cancelPermissionRecovery()
+        XCTAssertNil(fixture.store.recoveryState)
+        XCTAssertNil(fixture.tickets.pendingTicket(for: 202))
+        XCTAssertEqual(fixture.actions.restartCount, 3)
+        XCTAssertEqual(fixture.requester.requestCount, 0)
+        fixture.tickets.clear()
+    }
+
+    func testOrdinaryDismissalDiscardsFailureWithoutStartingAnotherRestart() async {
+        let fixture = makeFixture()
+        await suggestRestart(fixture)
+        fixture.store.restartPermissionRecovery()
+        fixture.actions.complete(.failed(.helperNotPaired))
+        // The same non-restart dismissal branch handles plain Close and Escape.
+        var gate = PermissionRecoveryRestartPresentationGate()
+        XCTAssertFalse(gate.consumeDismissedRestart(currentState: fixture.store.recoveryState))
+        fixture.store.cancelPermissionRecovery()
+        XCTAssertNil(fixture.store.recoveryState)
+        XCTAssertEqual(fixture.actions.restartCount, 1)
+        XCTAssertNil(fixture.tickets.pendingTicket(for: 202))
+        XCTAssertFalse(gate.consumeDismissedRestart(currentState: fixture.store.recoveryState))
         fixture.tickets.clear()
     }
 
@@ -123,10 +173,16 @@ final class PermissionRecoveryFlowTests: XCTestCase {
         let fixture = makeFixture()
         await suggestRestart(fixture)
         fixture.store.restartPermissionRecovery()
+        fixture.store.cancelPermissionRecovery()
+        XCTAssertEqual(fixture.store.recoveryState?.stage, .restarting)
+        XCTAssertEqual(fixture.tickets.pendingTicket(for: 202)?.stage, .restarting)
         fixture.actions.complete(.scheduled)
         await waitUntil { fixture.wait.watchdogStarted }
 
         XCTAssertEqual(fixture.store.recoveryState?.stage, .restartScheduled)
+        fixture.store.cancelPermissionRecovery()
+        XCTAssertEqual(fixture.store.recoveryState?.stage, .restartScheduled)
+        XCTAssertNil(fixture.store.recoveryState?.failure)
         XCTAssertTrue(fixture.store.recoveryState?.isInFlight == true)
         XCTAssertFalse(fixture.store.resumePendingPermissionRecovery())
         fixture.store.beginPermissionRecovery(for: .inputMonitoring)
@@ -156,6 +212,7 @@ final class PermissionRecoveryFlowTests: XCTestCase {
         fixture.wait.releaseWatchdog()
         await waitUntil { fixture.store.recoveryState?.stage == .restartFailed }
 
+        XCTAssertEqual(fixture.store.recoveryState?.failure, .timedOut)
         XCTAssertTrue(fixture.store.recoveryState?.canRestart == true)
         XCTAssertNil(fixture.tickets.pendingTicket(for: 202))
         XCTAssertEqual(fixture.actions.restartCount, 1)
@@ -178,6 +235,9 @@ final class PermissionRecoveryFlowTests: XCTestCase {
             XCTAssertEqual(store.pendingPermissionRecoveryKind, .inputMonitoring)
             XCTAssertTrue(store.resumePendingPermissionRecovery())
             XCTAssertEqual(store.recoveryState?.stage, .resumingAfterRestart)
+            store.cancelPermissionRecovery()
+            XCTAssertEqual(store.recoveryState?.stage, .resumingAfterRestart)
+            XCTAssertNil(store.recoveryState?.failure)
             XCTAssertNil(store.pendingPermissionRecoveryKind)
             XCTAssertFalse(store.resumePendingPermissionRecovery())
             await waitUntil { store.recoveryState?.stage == (granted ? .recovered : .needsReauthorization) }
@@ -395,7 +455,7 @@ final class PermissionRecoveryFlowTests: XCTestCase {
         XCTAssertEqual(fixture.actions.restartCount, 1)
         XCTAssertEqual(fixture.store.recoveryState?.stage, .restarting)
         XCTAssertFalse(gate.consumeDismissedRestart(currentState: fixture.store.recoveryState))
-        fixture.actions.complete(.failed)
+        fixture.actions.complete(.failed(.unknown))
         fixture.tickets.clear()
     }
 
@@ -444,8 +504,9 @@ final class PermissionRecoveryFlowTests: XCTestCase {
         if gate.consumeDismissedRestart(currentState: fixture.store.recoveryState) {
             fixture.store.restartPermissionRecovery()
         }
-        fixture.actions.complete(.failed)
+        fixture.actions.complete(.failed(.helperNotPaired))
         XCTAssertEqual(fixture.store.recoveryState?.stage, .restartFailed)
+        XCTAssertEqual(fixture.store.recoveryState?.failure, .helperNotPaired)
         XCTAssertFalse(gate.consumeDismissedRestart(currentState: fixture.store.recoveryState))
         XCTAssertEqual(fixture.actions.restartCount, 1, "Showing failure is not authorization to retry")
 
@@ -455,8 +516,10 @@ final class PermissionRecoveryFlowTests: XCTestCase {
             fixture.store.restartPermissionRecovery()
         }
         XCTAssertEqual(fixture.actions.restartCount, 2)
+        XCTAssertNil(fixture.store.recoveryState?.failure)
         XCTAssertFalse(gate.consumeDismissedRestart(currentState: fixture.store.recoveryState))
-        fixture.actions.complete(.failed)
+        fixture.actions.complete(.failed(.timedOut))
+        XCTAssertEqual(fixture.store.recoveryState?.failure, .timedOut)
         fixture.tickets.clear()
     }
 

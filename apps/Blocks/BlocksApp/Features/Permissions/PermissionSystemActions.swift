@@ -5,7 +5,7 @@ import OSLog
 enum PermissionRestartResult: Equatable {
     /// A separate launcher has accepted the handoff. The app has not quit yet.
     case scheduled
-    case failed
+    case failed(PermissionRestartFailure)
 }
 
 @MainActor
@@ -133,6 +133,7 @@ final class PermissionRestartSafety {
     private var prepare: Prepare?
     private var resume: Resume?
     private var activeAttempt: Attempt?
+    fileprivate var hasActiveAttempt: Bool { activeAttempt != nil }
 
     init(prepare: Prepare? = nil, resume: Resume? = nil) {
         self.prepare = prepare
@@ -229,9 +230,15 @@ struct DefaultPermissionSystemActions: PermissionSystemActioning {
         completion: @escaping (PermissionRestartResult) -> Void
     ) {
         guard let requestID = restartGate.enqueue(completion) else { return }
-        guard !terminationCoordinator.isQuitting,
-              let attempt = safety.reserveAttempt() else {
-            restartGate.resolve(.failed, requestID: requestID)
+        guard !terminationCoordinator.isQuitting else {
+            restartGate.resolve(.failed(.recoveryConflict), requestID: requestID)
+            return
+        }
+        guard let attempt = safety.reserveAttempt() else {
+            restartGate.resolve(
+                .failed(safety.hasActiveAttempt ? .recoveryConflict : .componentNotReady),
+                requestID: requestID
+            )
             return
         }
         let restartHandler = PermissionRestartHandler(
@@ -262,7 +269,7 @@ private final class PermissionRestartGate {
     /// same eventual result rather than a premature success indication.
     func enqueue(_ completion: @escaping (PermissionRestartResult) -> Void) -> UUID? {
         if isRecovering {
-            completion(.failed)
+            completion(.failed(.recoveryConflict))
             return nil
         }
         if let result {
@@ -279,7 +286,7 @@ private final class PermissionRestartGate {
     func resolve(_ result: PermissionRestartResult, requestID: UUID) {
         guard self.requestID == requestID else { return }
         self.result = result == .scheduled ? result : nil
-        if result == .failed {
+        if case .failed = result {
             self.requestID = nil
             isRecovering = false
         }
@@ -318,6 +325,7 @@ private final class PermissionRestartHandler {
     private var failureWasReported = false
     private var ownsPreparedRestart = false
     private var handoffWasStarted = false
+    private var failureReason: PermissionRestartFailure = .unknown
 
     init(
         terminator: @escaping @MainActor () -> Void,
@@ -351,19 +359,19 @@ private final class PermissionRestartHandler {
             do { try await Task.sleep(nanoseconds: preparationTimeoutNanoseconds) }
             catch { return }
             guard phase == .preparing else { return }
-            fail(stage: "preparation_timeout")
+            fail(stage: "preparation_timeout", reason: .timedOut)
         }
         // Do not use a task group for this deadline: a non-cooperative prepare
         // would make the group's implicit child join unbounded.
         preparationTask = Task { @MainActor [self] in
-            let succeeded: Bool
+            let preparationFailure: PermissionRestartFailure?
             do {
                 try Task.checkCancellation()
                 try await attempt.prepare()
                 try Task.checkCancellation()
-                succeeded = true
+                preparationFailure = nil
             } catch {
-                succeeded = false
+                preparationFailure = PermissionRestartFailure(preparationError: error)
             }
             preparationHasFinished = true
             preparationTask = nil
@@ -374,12 +382,12 @@ private final class PermissionRestartHandler {
             guard phase == .preparing else { return }
             preparationDeadline?.cancel()
             preparationDeadline = nil
-            guard succeeded else {
-                fail(stage: "preparation_failed")
+            if let preparationFailure {
+                fail(stage: "preparation_failed", reason: preparationFailure)
                 return
             }
             guard !terminationCoordinator.isQuitting else {
-                fail(stage: "quit_conflict")
+                fail(stage: "quit_conflict", reason: .recoveryConflict)
                 return
             }
             phase = .launching
@@ -406,16 +414,16 @@ private final class PermissionRestartHandler {
               let childProcessID,
               childProcessID > 0,
               childProcessID != parentProcessID else {
-            fail(stage: "handoff_failed")
+            fail(stage: "handoff_failed", reason: .launchFailed)
             return
         }
         guard terminationCoordinator.armPreparedRestart() else {
-            fail(stage: "quit_conflict")
+            fail(stage: "quit_conflict", reason: .recoveryConflict)
             return
         }
         ownsPreparedRestart = true
         guard commitHandoff(parentProcessID) else {
-            fail(stage: "handoff_commit_failed")
+            fail(stage: "handoff_commit_failed", reason: .launchFailed)
             return
         }
         phase = .handedOff
@@ -426,14 +434,15 @@ private final class PermissionRestartHandler {
             guard phase == .handedOff else { return }
             // This is recovery, not a second quit request. The launcher also
             // times out without opening the app while this PID still exists.
-            fail(stage: "handoff_timeout")
+            fail(stage: "handoff_timeout", reason: .timedOut)
         }
         restartGate.resolve(.scheduled, requestID: requestID)
         terminator()
     }
 
-    private func fail(stage: String) {
+    private func fail(stage: String, reason: PermissionRestartFailure) {
         guard phase != .recovering, phase != .finished else { return }
+        failureReason = reason
         phase = .recovering
         restartGate.markRecovering(requestID: requestID)
         preparationDeadline?.cancel()
@@ -486,10 +495,10 @@ private final class PermissionRestartHandler {
     private func reportFailureIfNeeded() {
         guard !failureWasReported else { return }
         failureWasReported = true
-        restartGate.resolve(.failed, requestID: requestID)
+        restartGate.resolve(.failed(failureReason), requestID: requestID)
     }
 
     private func log(_ stage: String, childProcessID: pid_t = 0) {
-        Self.logger.info("Permission restart stage=\(stage, privacy: .public) parent_pid=\(self.parentProcessID, privacy: .public) launcher_pid=\(childProcessID, privacy: .public)")
+        Self.logger.info("Permission restart stage=\(stage, privacy: .public) reason=\(self.failureReason.rawValue, privacy: .public) parent_pid=\(self.parentProcessID, privacy: .public) launcher_pid=\(childProcessID, privacy: .public)")
     }
 }

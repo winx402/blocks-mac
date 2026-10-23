@@ -3418,9 +3418,9 @@ final class AppAppearanceTests: XCTestCase {
         let launchError = NSError(domain: "AppAppearanceTests", code: 1)
         let parentPID = getpid()
         let launchResults: [(pid_t?, Error?, PermissionRestartResult)] = [
-            (nil, launchError, .failed),
-            (nil, nil, .failed),
-            (parentPID, nil, .failed),
+            (nil, launchError, .failed(.launchFailed)),
+            (nil, nil, .failed(.launchFailed)),
+            (parentPID, nil, .failed(.launchFailed)),
             (parentPID + 1, nil, .scheduled),
         ]
 

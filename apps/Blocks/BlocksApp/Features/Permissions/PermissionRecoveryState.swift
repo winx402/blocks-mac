@@ -1,4 +1,83 @@
 import Foundation
+import BlocksCore
+
+/// Process-local, allowlisted feedback only. Never retain an arbitrary error,
+/// participant payload, path or credential in recovery state or its ticket.
+enum PermissionRestartFailure: String, Equatable, CaseIterable {
+    case helperNotPaired = "helper_not_paired"
+    case busy
+    case timedOut = "timed_out"
+    case connectionUnavailable = "connection_unavailable"
+    case authenticationUnavailable = "authentication_unavailable"
+    case recoveryConflict = "recovery_conflict"
+    case componentNotReady = "component_not_ready"
+    case database
+    case launchFailed = "launch_failed"
+    case unknown
+
+    var localizationKey: String { "settings.permissionRecovery.failure.\(rawValue)" }
+    var message: String { L10n.string(localizationKey) }
+
+    init(preparationError error: Error) {
+        let drain = error as? ApplicationLifecycleCoordinator.ParticipantDrainError
+        let underlying = drain?.underlying ?? error
+        if let admission = underlying as? ApplicationOperationAdmissionGate.AdmissionError {
+            switch admission {
+            case .busy:
+                self = .busy
+            case .paused:
+                self = .recoveryConflict
+            }
+            return
+        }
+        if let safety = underlying as? ApplicationLifecycleCoordinator.SafetyError {
+            switch safety {
+            case .preparationInProgress, .configurationLocked: self = .recoveryConflict
+            case .missingParticipants: self = .componentNotReady
+            }
+            return
+        }
+        if let helper = underlying as? SelectionHelperUpdatePreparationFailure {
+            switch helper {
+            case .helperNotPaired: self = .helperNotPaired
+            case .preparationUnavailable: self = .connectionUnavailable
+            case .preparationRejected: self = .componentNotReady
+            }
+            return
+        }
+        if let helper = underlying as? SelectionAgentServiceFailure {
+            switch helper {
+            case .timedOut: self = .timedOut
+            case .keychainUnavailable, .bootstrapUnavailable, .notPaired, .invalidPairingCode:
+                self = .authenticationUnavailable
+            case .connectionFailed, .helperNotRunning: self = .connectionUnavailable
+            case .disconnectNotConfirmed: self = .recoveryConflict
+            case .helperNotInstalled, .helperInstallationConflict, .incompatibleVersion, .invalidResponse:
+                self = .componentNotReady
+            }
+            return
+        }
+        guard underlying is ActionBrokerUpdateError || drain?.participantID == "database" else {
+            self = .unknown
+            return
+        }
+        // Reuse semantic classifications, never the update-specific message
+        // (which describes a downloaded update rather than permission recovery).
+        switch AppUpdatePreparationFailure(error: error).reason {
+        case .helperNotPaired: self = .helperNotPaired
+        case .helperKeyUnavailable, .brokerUntrusted: self = .authenticationUnavailable
+        case .helperUnavailable, .brokerUnavailable: self = .connectionUnavailable
+        case .brokerBusy, .busy: self = .busy
+        case .brokerTimeout: self = .timedOut
+        case .brokerRecovery: self = .recoveryConflict
+        case .database: self = .database
+        case .helperBusy, .brokerMigration, .brokerUnsupported,
+             .brokerRejected, .brokerApproval, .brokerShutdown:
+            self = .componentNotReady
+        case .other: self = .unknown
+        }
+    }
+}
 
 enum PermissionRecoveryStage: String, Codable, Equatable {
     case checking
@@ -22,6 +101,17 @@ enum PermissionRecoveryStage: String, Codable, Equatable {
 struct PermissionRecoveryState: Equatable {
     let kind: PermissionDiagnosticKind
     let stage: PermissionRecoveryStage
+    let failure: PermissionRestartFailure?
+
+    init(
+        kind: PermissionDiagnosticKind,
+        stage: PermissionRecoveryStage,
+        failure: PermissionRestartFailure? = nil
+    ) {
+        self.kind = kind
+        self.stage = stage
+        self.failure = stage == .restartFailed ? failure : nil
+    }
 
     var isInFlight: Bool { stage.isInFlight }
     // Re-adding a permission can itself require a new process. This remains

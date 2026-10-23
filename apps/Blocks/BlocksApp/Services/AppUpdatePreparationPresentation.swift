@@ -36,12 +36,20 @@ struct AppUpdatePreparationFailure: Equatable {
             "clipboard", "translation", "provider", "screenshot", "plugins", "database",
         ]
         participant = drain.map { knownParticipants.contains($0.participantID) ? $0.participantID : "other" } ?? "app"
-        if underlying as? SelectionHelperUpdatePreparationFailure == .helperNotPaired {
-            reason = .helperNotPaired
+        if let helper = underlying as? SelectionHelperUpdatePreparationFailure {
+            switch helper {
+            case .helperNotPaired: reason = .helperNotPaired
+            case .preparationUnavailable, .preparationRejected: reason = .helperUnavailable
+            }
         } else if underlying as? SelectionAgentServiceFailure == .keychainUnavailable {
             reason = .helperKeyUnavailable
         } else if participant == "helper" {
-            reason = underlying is ApplicationOperationAdmissionGate.AdmissionError ? .helperBusy : .helperUnavailable
+            if let admission = underlying as? ApplicationOperationAdmissionGate.AdmissionError,
+               case .busy = admission {
+                reason = .helperBusy
+            } else {
+                reason = .helperUnavailable
+            }
         } else if let broker = underlying as? ActionBrokerUpdateError {
             switch broker {
             case .legacyRegistrationRequiresMigration: reason = .brokerMigration
@@ -66,7 +74,8 @@ struct AppUpdatePreparationFailure: Equatable {
             }
         } else if participant == "database" {
             reason = .database
-        } else if underlying is ApplicationOperationAdmissionGate.AdmissionError {
+        } else if let admission = underlying as? ApplicationOperationAdmissionGate.AdmissionError,
+                  case .busy = admission {
             reason = .busy
         } else {
             reason = .other

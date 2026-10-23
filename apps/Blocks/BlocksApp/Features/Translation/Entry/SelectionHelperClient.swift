@@ -25,6 +25,8 @@ enum SelectionAgentServiceFailure: Error, Equatable {
 
 enum SelectionHelperUpdatePreparationFailure: Error, Equatable {
     case helperNotPaired
+    case preparationUnavailable
+    case preparationRejected
 }
 
 struct SelectionHelperBundleIdentity: Equatable, Sendable {
@@ -901,11 +903,14 @@ final class SelectionHelperClient: @unchecked Sendable {
             )
             guard case let .success(preparation) = preparationResult else {
                 recordUpdateLifecycle(.failed(.prepare, .prepareTransportFailure))
-                throw ApplicationOperationAdmissionGate.AdmissionError.busy("Selection Helper")
+                if case .failure(.timedOut) = preparationResult {
+                    throw SelectionAgentServiceFailure.timedOut
+                }
+                throw SelectionHelperUpdatePreparationFailure.preparationUnavailable
             }
             guard preparation.booleanValue == true else {
                 recordUpdateLifecycle(.failed(.prepare, .prepareRejected))
-                throw ApplicationOperationAdmissionGate.AdmissionError.busy("Selection Helper")
+                throw SelectionHelperUpdatePreparationFailure.preparationRejected
             }
             recordUpdateLifecycle(.succeeded(.prepare))
             let terminationResult = sendAuthenticated(

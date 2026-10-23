@@ -4400,6 +4400,81 @@ final class TranslationEntryBridgeTests: XCTestCase {
         }
     }
 
+    func testSelectionHelperUpdatePreparationTransportAndRejectionNeverClaimBusinessBusy()
+        async throws
+    {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("selection-helper-update-reasons-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let helper = root.appendingPathComponent("Blocks Selection Helper.app")
+        try makeSelectionHelperBundle(at: helper)
+        let key = Data(repeating: 0x65, count: 32)
+        let cases: [(
+            Result<SelectionHelperCommandResponse, SelectionAgentServiceFailure>,
+            SelectionHelperUpdatePreparationFailure?, SelectionAgentServiceFailure?,
+            SelectionHelperClient.UpdateLifecycleDiagnosticEvent.FailureCode,
+            PermissionRestartFailure
+        )] = [
+            (.failure(.connectionFailed), .preparationUnavailable, nil, .prepareTransportFailure, .connectionUnavailable),
+            (.failure(.invalidResponse), .preparationUnavailable, nil, .prepareTransportFailure, .connectionUnavailable),
+            (.failure(.timedOut), nil, .timedOut, .prepareTransportFailure, .timedOut),
+            (.success(.init(booleanValue: false)), .preparationRejected, nil, .prepareRejected, .componentNotReady),
+            (.success(.init(booleanValue: nil)), .preparationRejected, nil, .prepareRejected, .componentNotReady),
+        ]
+        for (response, expectedPreparation, expectedService, diagnosticCode, expectedPermission) in cases {
+            let keyStore = SelectionHelperKeyStoreStub(key: key)
+            let recorder = SelectionHelperUpdateLifecycleDiagnosticRecorder()
+            let connection = SelectionHelperAuthenticatedConnectionStub(
+                key: key,
+                disconnectResult: .failure(.timedOut),
+                health: .init(
+                    helperVersion: "fixture", accessibilityTrusted: true,
+                    capabilities: [BlocksSelectionHelperProtocol.updateLifecycleCapability]
+                ),
+                authenticatedResponder: { command in
+                    switch command.kind {
+                    case .prepareForApplicationUpdate: return response
+                    case .resumeAfterCancelledApplicationUpdate: return .success(.init(booleanValue: true))
+                    default:
+                        XCTFail("Failed preparation must not send a termination or pairing command")
+                        return .failure(.invalidResponse)
+                    }
+                }
+            )
+            let client = SelectionHelperClient(
+                keyStore: keyStore,
+                connection: connection,
+                applicationLocator: selectionHelperFixtureLocator(candidates: [helper], running: [helper]),
+                updateLifecycleDiagnosticRecorder: { recorder.append($0) }
+            )
+            do {
+                try await client.prepareForApplicationUpdate()
+                XCTFail("An unavailable or rejecting Helper must still block safe preparation")
+            } catch {
+                XCTAssertEqual(error as? SelectionHelperUpdatePreparationFailure, expectedPreparation)
+                XCTAssertEqual(error as? SelectionAgentServiceFailure, expectedService)
+                XCTAssertNil(error as? ApplicationOperationAdmissionGate.AdmissionError)
+                let wrapped = ApplicationLifecycleCoordinator.ParticipantDrainError(
+                    participantID: "helper", underlying: error
+                )
+                XCTAssertEqual(PermissionRestartFailure(preparationError: wrapped), expectedPermission)
+                XCTAssertEqual(AppUpdatePreparationFailure(error: wrapped).reason, .helperUnavailable)
+            }
+            XCTAssertEqual(recorder.events, [.started, .succeeded(.health), .failed(.prepare, diagnosticCode)])
+            XCTAssertNil(client.beginApplicationOperation(), "Failure cannot reopen admission before recovery")
+            XCTAssertTrue(client.hasPendingApplicationUpdateRecovery)
+            await client.resumeAfterCancelledApplicationUpdate()
+            XCTAssertFalse(client.hasPendingApplicationUpdateRecovery)
+            let lease = client.beginApplicationOperation()
+            XCTAssertNotNil(lease)
+            lease?.release()
+            XCTAssertEqual(connection.pairRequestCount, 0)
+            XCTAssertEqual(connection.disconnectRequestCount, 0)
+            XCTAssertEqual(keyStore.deleteCount, 0)
+            XCTAssertEqual(keyStore.load(), key)
+        }
+    }
+
     func testSelectionHelperUpdateLifecycleDiagnosticsDistinguishProtocolStages()
         async throws
     {
@@ -4482,7 +4557,10 @@ final class TranslationEntryBridgeTests: XCTestCase {
         do {
             try await prepareClient.prepareForApplicationUpdate()
             XCTFail("Rejected prepare must reject the update")
-        } catch {}
+        } catch {
+            XCTAssertEqual(error as? SelectionHelperUpdatePreparationFailure, .preparationRejected)
+            XCTAssertNil(error as? ApplicationOperationAdmissionGate.AdmissionError)
+        }
         XCTAssertEqual(prepareRecorder.events, [
             .started,
             .succeeded(.health),

@@ -151,7 +151,10 @@ struct PermissionSettingsPane: View {
     private func recoverySheetDidDismiss() {
         guard recoveryRestartPresentationGate.consumeDismissedRestart(
             currentState: permissionStore.recoveryState
-        ) else { return }
+        ) else {
+            permissionStore.cancelPermissionRecovery()
+            return
+        }
         // Setting the binding alone is not proof that AppKit ended this sheet.
         // Only its real dismissal callback may enter the existing restart flow.
         permissionStore.restartPermissionRecovery()

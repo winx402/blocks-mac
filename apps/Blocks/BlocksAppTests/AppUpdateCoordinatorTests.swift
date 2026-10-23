@@ -398,8 +398,11 @@ final class AppUpdateCoordinatorTests: XCTestCase {
         XCTAssertFalse(unknown.message.contains(secret))
         let cases: [(String, Error, AppUpdatePreparationFailure.Reason)] = [
             ("helper", SelectionHelperUpdatePreparationFailure.helperNotPaired, .helperNotPaired),
+            ("helper", SelectionHelperUpdatePreparationFailure.preparationUnavailable, .helperUnavailable),
+            ("helper", SelectionHelperUpdatePreparationFailure.preparationRejected, .helperUnavailable),
             ("helper", SelectionAgentServiceFailure.keychainUnavailable, .helperKeyUnavailable),
             ("helper", ApplicationOperationAdmissionGate.AdmissionError.busy(secret), .helperBusy),
+            ("helper", ApplicationOperationAdmissionGate.AdmissionError.paused(secret), .helperUnavailable),
             ("helper", SelectionAgentServiceFailure.connectionFailed, .helperUnavailable),
             ("actionBroker", ActionBrokerUpdateError.legacyRegistrationRequiresMigration, .brokerMigration),
             ("actionBroker", ActionBrokerUpdateError.busy, .brokerBusy),
@@ -417,6 +420,7 @@ final class AppUpdateCoordinatorTests: XCTestCase {
             ("actionBroker", raw, .brokerUnavailable),
             ("database", raw, .database),
             ("translation", ApplicationOperationAdmissionGate.AdmissionError.busy(secret), .busy),
+            ("translation", ApplicationOperationAdmissionGate.AdmissionError.paused(secret), .other),
         ]
         for (participant, error, reason) in cases {
             let failure = AppUpdatePreparationFailure(error: ApplicationLifecycleCoordinator.ParticipantDrainError(

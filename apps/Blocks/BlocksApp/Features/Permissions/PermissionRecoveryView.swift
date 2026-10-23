@@ -43,6 +43,10 @@ struct PermissionRecoveryView: View {
                         Text(L10n.string("settings.permissionRecovery.keptOpen"))
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
+                        Text((state.failure ?? .unknown).message)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("permissionRecovery.failure")
                     }
                     Text(L10n.string("settings.permissionRecovery.helperSeparate"))
                         .font(.caption)
@@ -51,7 +55,10 @@ struct PermissionRecoveryView: View {
                 }
             }
         } actions: {
-            Button(L10n.string("common.close")) { dismiss() }
+            Button(L10n.string("common.close")) {
+                store.cancelPermissionRecovery()
+                dismiss()
+            }
                 .disabled(store.recoveryState?.isInFlight == true)
             Button(L10n.string("settings.permissionRefresh")) { store.recheckPermissionRecovery() }
                 .disabled(store.recoveryState?.isInFlight != false)
