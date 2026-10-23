@@ -427,6 +427,15 @@ final class AppUpdateCoordinatorTests: XCTestCase {
         }
     }
 
+    func testUnpairedHelperRecoveryNamesTheActualHelperApplicationMenu() {
+        let failure = AppUpdatePreparationFailure(error: ApplicationLifecycleCoordinator.ParticipantDrainError(
+            participantID: "helper", underlying: SelectionHelperUpdatePreparationFailure.helperNotPaired))
+        XCTAssertEqual(failure.reason, .helperNotPaired)
+        XCTAssertTrue(failure.message.contains("blocksHelper"),
+                      "Recovery must name the menu shown by the actual Helper, not its retired product name")
+        XCTAssertFalse(failure.message.contains("Blocks Selection Helper"))
+    }
+
     func testBrokerLifecycleRejectionsOnlyAcceptExactVersionedAllowlistCodes() {
         for error in ActionBrokerUpdateError.allCases {
             XCTAssertEqual(ActionBrokerUpdateError.rejection(wireCode: error.wireCode), error)
