@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		B06600000000000000000001 /* BrokerProcessInventory.swift in Sources */ = {isa = PBXBuildFile; fileRef = F06600000000000000000001 /* BrokerProcessInventory.swift */; };
+		B06600000000000000000002 /* BrokerProcessInventoryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F06600000000000000000002 /* BrokerProcessInventoryTests.swift */; };
 		B06700000000000000000001 /* PermissionRecoveryState.swift in Sources */ = {isa = PBXBuildFile; fileRef = F06700000000000000000001; };
 		B06700000000000000000002 /* PermissionRecoveryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F06700000000000000000002; };
 		B06700000000000000000003 /* SelectionHelperSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F06700000000000000000003; };
@@ -573,6 +575,8 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		F06600000000000000000001 /* BrokerProcessInventory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Screenshot/Integration/BrokerProcessInventory.swift; sourceTree = "<group>"; };
+		F06600000000000000000002 /* BrokerProcessInventoryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrokerProcessInventoryTests.swift; sourceTree = "<group>"; };
 		F06700000000000000000001 /* PermissionRecoveryState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Permissions/PermissionRecoveryState.swift; sourceTree = "<group>"; };
 		F06700000000000000000002 /* PermissionRecoveryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Permissions/PermissionRecoveryView.swift; sourceTree = "<group>"; };
 		F06700000000000000000003 /* SelectionHelperSetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Translation/Entry/SelectionHelperSetupView.swift; sourceTree = "<group>"; };
@@ -1151,6 +1155,7 @@
 		A14G00000000000000000001 /* BlocksAppTests */ = {
 			isa = PBXGroup;
 			children = (
+				F06600000000000000000002 /* BrokerProcessInventoryTests.swift */,
 				F06500000000000000000001 /* ActionBrokerZombieProcessTests.swift */,
 				F06500000000000000000002 /* ShortcutStartupLifecycleTests.swift */,
 				F06500000000000000000003 /* ClipboardPasteWindowRoutingTests.swift */,
@@ -1536,6 +1541,7 @@
 				F14F00000000000000000004 /* app.blocks.action-broker.plist */,
 				F14F00000000000000000005 /* ScreenshotActionHost.swift */,
 				F14F00000000000000000006 /* ActionBrokerServiceManager.swift */,
+				F06600000000000000000001 /* BrokerProcessInventory.swift */,
 				F3010000000000000000001D /* ProviderKeychainService.swift */,
 				F30100000000000000000020 /* OpenAICompatibleConnectionService.swift */,
 				F30100000000000000000022 /* OpenAITranslationRuntimeService.swift */,
@@ -2207,6 +2213,7 @@
 				B15E00000000000000000002 /* ScreenshotHistoryActionService.swift in Sources */,
 				B14F00000000000000000004 /* ScreenshotActionHost.swift in Sources */,
 				B14F00000000000000000005 /* ActionBrokerServiceManager.swift in Sources */,
+				B06600000000000000000001 /* BrokerProcessInventory.swift in Sources */,
 				B00300000000000000000010 /* L10n.swift in Sources */,
 				B17T00000000000000000001 /* AppAppearance.swift in Sources */,
 				B00300000000000000000011 /* GlassPanel.swift in Sources */,
@@ -2331,6 +2338,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B06600000000000000000002 /* BrokerProcessInventoryTests.swift in Sources */,
 				B908U0000000000000000002 /* AppUpdateCoordinatorTests.swift in Sources */,
 				B69I00000000000000000002 /* BrokerIdentityTests.swift in Sources */,
 				B71M00000000000000000002 /* TranslationPanelInteractionTests.swift in Sources */,

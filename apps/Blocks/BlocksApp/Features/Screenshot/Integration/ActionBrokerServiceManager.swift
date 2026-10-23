@@ -1,6 +1,7 @@
 import BlocksCore
 import Combine
 import Foundation
+import OSLog
 import ServiceManagement
 import Darwin
 
@@ -753,12 +754,17 @@ final class ActionBrokerServiceManager: ObservableObject {
     }
 
     private static func currentBrokerProcessIDs(policy: BrokerProcessScanPolicy) throws -> [Int32] {
-        let count = proc_listallpids(nil, 0)
-        guard count > 0 else { throw ActionBrokerUpdateError.serviceDidNotStop }
-        var processes = [Int32](repeating: 0, count: Int(count) + 64)
-        let received = processes.withUnsafeMutableBytes { proc_listallpids($0.baseAddress, Int32($0.count)) }
-        guard received > 0, Int(received) < processes.count else { throw ActionBrokerUpdateError.serviceDidNotStop }
-        return try brokerProcessIDs(in: Array(processes.prefix(Int(received))), policy: policy,
+        let processes: [Int32]
+        do { processes = try BrokerProcessInventory.processIDs() }
+        catch {
+            if let failure = error as? BrokerProcessInventory.InventoryError {
+                let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "app.blocks",
+                    category: "action-broker-process-inventory")
+                logger.error("Process inventory failed stage=\(failure.stage.rawValue, privacy: .public) reason=\(failure.failure.rawValue, privacy: .public) errno=\(failure.errorNumber ?? 0, privacy: .public)")
+            }
+            throw ActionBrokerUpdateError.serviceDidNotStop
+        }
+        return try brokerProcessIDs(in: processes, policy: policy,
             executablePath: processExecutablePath, kernelName: kernelProcessName,
             hasExited: { kill($0, 0) != 0 && errno == ESRCH },
             kernelSnapshot: kernelProcessSnapshot)
