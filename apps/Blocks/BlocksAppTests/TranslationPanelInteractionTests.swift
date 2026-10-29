@@ -6,6 +6,93 @@ import XCTest
 
 @MainActor
 final class TranslationPanelInteractionTests: XCTestCase {
+    func testHelperSetupUsesItsDedicatedPanelAction() {
+        var translationSettingsCount = 0
+        var helperSetupCount = 0
+        let actions = TranslationPanelActions(
+            copyText: { _ in .failed }, openFavorites: {},
+            openTranslationSettings: { translationSettingsCount += 1 },
+            retakeScreenshot: {},
+            openSelectionHelperSettings: { helperSetupCount += 1 }
+        )
+        actions.openSelectionHelperSettings()
+        XCTAssertEqual(helperSetupCount, 1)
+        XCTAssertEqual(translationSettingsCount, 0)
+    }
+
+    func testSelectionHelperFeedbackIsScopedAndRoutesTheExplicitSetupAction() throws {
+        let helperFailures: [AXSelectionReadFailureReason] = [
+            .agentUnavailable, .agentRequiresApproval, .accessibilityPermissionDenied,
+            .agentInstallationConflict, .agentVersionOutdated, .agentConnectionFailed,
+        ]
+        var openedSetup = 0
+        for (index, reason) in helperFailures.enumerated() {
+            let descriptor = try XCTUnwrap(TranslationPanelSelectionFeedback.descriptor(
+                for: reason, detail: "Synthetic helper detail", deduplicationKey: "selection-test",
+                openSetup: { openedSetup += 1 }
+            ))
+            XCTAssertEqual(descriptor.level, .info)
+            XCTAssertEqual(descriptor.dismissPolicy, .manual)
+            XCTAssertNotEqual(descriptor.title, L10n.string("translation.panel.operationFailed"))
+            XCTAssertTrue(try XCTUnwrap(descriptor.detail).contains("Synthetic helper detail"))
+            let action = try XCTUnwrap(descriptor.action)
+            XCTAssertEqual(action.title, L10n.string("translation.selection.status.completeSetup"))
+            XCTAssertEqual(openedSetup, index)
+            action.handler()
+        }
+        XCTAssertEqual(openedSetup, helperFailures.count)
+
+        for reason in [AXSelectionReadFailureReason.timedOut, .targetExited, .selectionTooLarge, .passwordField] {
+            let descriptor = try XCTUnwrap(TranslationPanelSelectionFeedback.descriptor(
+                for: reason, detail: "Real operation failure", deduplicationKey: "selection-test",
+                openSetup: { XCTFail("a real operation failure must not open helper setup") }
+            ))
+            XCTAssertEqual(descriptor.level, .warning)
+            XCTAssertNil(descriptor.action)
+        }
+        XCTAssertNil(TranslationPanelSelectionFeedback.descriptor(
+            for: .emptySelection, detail: "", deduplicationKey: "selection-test", openSetup: {}
+        ))
+    }
+
+    func testFeedbackBudgetIncludesOnlyTheMeasuredIndependentRow() {
+        XCTAssertEqual(TranslationPanelSourceLayout.feedbackReservedHeight(0), 0)
+        XCTAssertEqual(TranslationPanelSourceLayout.feedbackReservedHeight(28),
+                       28 + TranslationPanelSourceLayout.sourceEditorSpacing)
+        let withoutFeedback = TranslationPanelSourceLayout.boundedEditorHeight(
+            preferredHeight: 160, availableHeight: 260, source: .manual
+        )
+        let withFeedback = TranslationPanelSourceLayout.boundedEditorHeight(
+            preferredHeight: 160, availableHeight: 260, source: .manual, feedbackHeight: 60
+        )
+        XCTAssertEqual(withoutFeedback - withFeedback,
+                       TranslationPanelSourceLayout.feedbackReservedHeight(60), accuracy: 0.5)
+        for source in [TranslationInputSource.manual, .screenshotOCR] {
+            XCTAssertEqual(TranslationPanelSourceLayout.boundedEditorHeight(
+                preferredHeight: TranslationPanelSourceLayout.expandedEditorHeight(for: source),
+                availableHeight: 400, source: source, feedbackHeight: 28
+            ), source == .screenshotOCR ? 112 : 96)
+        }
+    }
+
+    func testFeedbackPresentationAndDismissalDoNotMutateSourceLanguageOrFocus() {
+        let (model, _, suite) = makeModel(sourceLanguage: TranslationLanguageTag("en"))
+        defer { model.cancel(); UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let source = model.sourceText
+        let sourceLanguage = model.sourceLanguage
+        let targetLanguage = model.targetLanguage
+        let focusRequest = model.sourceFocusRequest
+        let state = BlocksNotificationPresentationState()
+        state.present(BlocksNotificationDescriptor(
+            level: .info, title: "Selection helper not connected", dismissPolicy: .manual
+        ))
+        state.dismiss()
+        XCTAssertEqual(model.sourceText, source)
+        XCTAssertEqual(model.sourceLanguage, sourceLanguage)
+        XCTAssertEqual(model.targetLanguage, targetLanguage)
+        XCTAssertEqual(model.sourceFocusRequest, focusRequest)
+    }
+
     func testSourceSizingMeasuresWrappingAndBoundsLongPastedText() {
         let short = TranslationPanelSourceLayout.preferredEditorHeight(
             text: "", width: 496, source: .manual
@@ -76,6 +163,51 @@ final class TranslationPanelInteractionTests: XCTestCase {
             layout()
             XCTAssertEqual(capture.height, expandedHeight)
             XCTAssertEqual(window.frame.height, 345)
+        }
+    }
+
+    func testHostedFeedbackWrapsInItsOwnBudgetAndPreservesEditorAtDefaultWidthAndNarrowWidth() {
+        for width: CGFloat in [420, 520] {
+            let state = TranslationLayoutFixtureState()
+            let capture = TranslationEditorHeightCapture()
+            state.sourceText = "Synthetic input retained while helper feedback changes."
+            let originalText = state.sourceText
+            let host = NSHostingView(rootView: TranslationLayoutFixture(state: state, capture: capture))
+            let window = NSWindow(
+                contentRect: NSRect(x: -4000, y: -4000, width: width, height: 420),
+                styleMask: [.borderless], backing: .buffered, defer: false
+            )
+            window.contentView = host
+            defer { window.contentView = nil }
+            func layout() {
+                host.layoutSubtreeIfNeeded()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.03))
+                host.layoutSubtreeIfNeeded()
+            }
+            layout()
+            XCTAssertEqual(capture.height, 96)
+            XCTAssertEqual(state.feedbackHeight, 0)
+            state.feedback.present(BlocksNotificationDescriptor(
+                level: .info,
+                title: "Selection helper not connected. Manual input remains available.",
+                detail: String(repeating: "Synthetic setup help. ", count: 30),
+                dismissPolicy: .manual
+            ))
+            state.showsFeedback = true
+            layout()
+            XCTAssertGreaterThanOrEqual(state.feedbackHeight, TranslationPanelMetrics.compactIconHitTarget)
+            XCTAssertEqual(capture.height, 96)
+            XCTAssertEqual(state.sourceText, originalText)
+            let feedbackHeight = state.feedbackHeight
+            state.resultLines = 100
+            layout()
+            XCTAssertEqual(state.feedbackHeight, feedbackHeight, accuracy: 0.5)
+            XCTAssertEqual(capture.height, 96)
+            state.feedback.dismiss()
+            state.showsFeedback = false
+            layout()
+            XCTAssertEqual(capture.height, 96)
+            XCTAssertEqual(state.sourceText, originalText)
         }
     }
 
@@ -216,6 +348,83 @@ final class TranslationPanelInteractionTests: XCTestCase {
         XCTAssertTrue(dismissalState(directInteraction: tracking.isActive).allowsImplicitDismissal)
     }
 
+    func testFeedbackHelpEscapeProtectsParentThroughClosingEventThenRestoresNextEscape() {
+        let panel = NSPanel(
+            contentRect: NSRect(x: -4000, y: -4000, width: 240, height: 160),
+            styleMask: [.nonactivatingPanel], backing: .buffered, defer: false
+        )
+        panel.animationBehavior = .none
+        panel.orderFrontRegardless()
+        var dismissCount = 0
+        let controller = TranslationPanelDismissalController(
+            onDismiss: { dismissCount += 1 },
+            escapeHotKeyLifecycle: TranslationMenuEscapeHotKeyStub()
+        )
+        controller.attach(panel: panel)
+        controller.update(dismissalState(directInteraction: false))
+        let detailTracking = TranslationLanguageMenuTracking { active in
+            controller.update(self.dismissalState(directInteraction: active))
+        }
+        defer {
+            detailTracking.reset()
+            controller.shutdown()
+            panel.orderOut(nil)
+            panel.close()
+        }
+        // The help button begins this same production tracking synchronously,
+        // before SwiftUI changes native popover/key-window state.
+        detailTracking.begin()
+        controller.requestEscapeDismissIfAllowed(origin: "test-help-open-carbon-escape")
+        XCTAssertEqual(dismissCount, 0)
+        detailTracking.endAfterCurrentEvent()
+        controller.requestEscapeDismissIfAllowed(origin: "test-help-closing-escape")
+        RunLoop.main.run(mode: .eventTracking, before: Date().addingTimeInterval(0.01))
+        controller.requestEscapeDismissIfAllowed(origin: "test-help-closing-escape-tail")
+        XCTAssertTrue(detailTracking.isActive)
+        XCTAssertEqual(dismissCount, 0)
+        RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        XCTAssertFalse(detailTracking.isActive)
+        controller.requestEscapeDismissIfAllowed(origin: "test-help-next-escape")
+        XCTAssertEqual(dismissCount, 1)
+    }
+
+    func testPresenterFeedbackLifecycleDefersCloseRejectsStaleReleaseAndClearsOnTeardown() {
+        let (model, _, suite) = makeModel(sourceLanguage: nil)
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let presenter = TranslationPanelPresenter(
+            model: model,
+            actions: TranslationPanelActions(
+                copyText: { _ in .copiedAndRecorded }, openFavorites: {},
+                openTranslationSettings: {}, retakeScreenshot: {}
+            ), onClose: { _ in }
+        )
+        defer { presenter.forceClose() }
+        // Exercise the exact callback wired from the help binding, notification
+        // descriptor replacement and feedback view disappearance, without
+        // creating a GUI popover or registering a real Carbon shortcut.
+        presenter.feedbackDetailInteractionChanged(true)
+        XCTAssertTrue(presenter.directInteractionActiveForTesting)
+        presenter.feedbackDetailInteractionChanged(false)
+        XCTAssertTrue(presenter.directInteractionActiveForTesting)
+        presenter.feedbackDetailInteractionChanged(true)
+        RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        XCTAssertTrue(presenter.directInteractionActiveForTesting,
+                      "a release from the previous help session must not end a quick reopen")
+        presenter.feedbackDetailInteractionChanged(false)
+        RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        XCTAssertFalse(presenter.directInteractionActiveForTesting,
+                       "replacement/disappearance must not leave dismissal permanently disabled")
+        presenter.feedbackDetailInteractionChanged(true)
+        presenter.feedbackDetailInteractionChanged(false)
+        presenter.forceClose()
+        XCTAssertFalse(presenter.directInteractionActiveForTesting)
+        // A queued release and late disappearing-view callbacks must not
+        // restore monitoring or recreate protection after parent teardown.
+        presenter.feedbackDetailInteractionChanged(true)
+        RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        XCTAssertFalse(presenter.directInteractionActiveForTesting)
+    }
+
     func testMenuCloseAppliesPendingModelSelectionAndDetachRemovesActions() async {
         let button = TranslationLanguageMenuPicker.FirstMousePopUpButton(frame: .zero, pullsDown: false)
         let coordinator = TranslationLanguageMenuPicker.Coordinator(
@@ -337,6 +546,16 @@ private final class TranslationMenuEscapeHotKeyStub: TranslationPanelEscapeHotKe
 private final class TranslationLayoutFixtureState: ObservableObject {
     @Published var sourceText = ""
     @Published var resultLines = 1
+    @Published var showsFeedback = false
+    @Published var feedbackHeight: CGFloat = 0
+    let feedback = BlocksNotificationPresentationState()
+}
+
+private struct TranslationFixtureFeedbackHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
 }
 
 private final class TranslationEditorHeightCapture {
@@ -349,10 +568,25 @@ private struct TranslationLayoutFixture: View {
     var body: some View {
         TranslationPanelContentLayout(
             inputSource: .manual, sourceText: state.sourceText,
+            feedbackHeight: state.showsFeedback ? state.feedbackHeight : 0,
             sourceContent: { height in
                 let _ = capture.height = height
                 VStack(spacing: TranslationPanelSourceLayout.sourceEditorSpacing) {
                     Color.clear.frame(height: TranslationPanelSourceLayout.sourceHeaderHeight(for: .manual))
+                    if state.showsFeedback {
+                        TranslationPanelInlineFeedbackView(state: state.feedback)
+                            .background {
+                                GeometryReader { geometry in
+                                    Color.clear.preference(
+                                        key: TranslationFixtureFeedbackHeightKey.self,
+                                        value: geometry.size.height
+                                    )
+                                }
+                            }
+                            .onPreferenceChange(TranslationFixtureFeedbackHeightKey.self) {
+                                state.feedbackHeight = $0
+                            }
+                    }
                     TranslationSourceTextEditor(text: state.sourceText, focusRequest: 0, onTextChange: { state.sourceText = $0 })
                         .frame(height: height)
                 }

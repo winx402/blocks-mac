@@ -25,6 +25,9 @@ struct ClipboardFilterIslandButton: View {
                 .truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .transition(.opacity)
+            Image(systemName: "chevron.down")
+                .font(.system(size: 8, weight: .semibold))
+                .frame(width: ClipboardFilterBarLayout.menuIndicatorWidth)
             if reservesClearSlot {
                 Color.clear
                     .frame(width: ClipboardFilterBarLayout.clearSlotWidth, height: ClipboardFilterBarLayout.clearSlotWidth)
@@ -55,10 +58,12 @@ struct ClipboardFilterClearButton: View {
             Image(systemName: "xmark.circle.fill")
                 .font(.system(size: 12, weight: .bold))
                 .foregroundStyle(Color.secondary.opacity(0.84))
-                .frame(width: ClipboardFilterBarLayout.clearSlotWidth, height: ClipboardFilterBarLayout.clearSlotWidth)
-                .contentShape(Circle())
+                .frame(width: ClipboardFilterBarLayout.clearSlotWidth, height: ClipboardFilterBarLayout.filterHitHeight)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .modifier(ClipboardFilterWindowActivationModifier())
+        .accessibilityIdentifier("clipboard.filter.clear.\(group.rawValue)")
         .accessibilityLabel(L10n.string("\(accessibilityKeyPrefix).label"))
         .accessibilityHint(L10n.string("\(accessibilityKeyPrefix).hint"))
         .help(L10n.string("\(accessibilityKeyPrefix).help"))
@@ -77,6 +82,9 @@ struct ClipboardFilterMenuGroup: View {
     let onSelectTime: (ClipboardTimeFilter) -> Void
     let onSelectSource: (ClipboardSourceFilterKey?) -> Void
     let onClearGroup: () -> Void
+    let onMenuTrackingChange: (Bool) -> Void
+
+    @State private var isExpanded = false
 
     init(
         group: ClipboardFilterGroup,
@@ -89,7 +97,8 @@ struct ClipboardFilterMenuGroup: View {
         onSelectFormat: @escaping (ClipboardFormatFilter) -> Void,
         onSelectTime: @escaping (ClipboardTimeFilter) -> Void,
         onSelectSource: @escaping (ClipboardSourceFilterKey?) -> Void,
-        onClearGroup: @escaping () -> Void
+        onClearGroup: @escaping () -> Void,
+        onMenuTrackingChange: @escaping (Bool) -> Void = { _ in }
     ) {
         self.group = group
         self.activeTitle = activeTitle
@@ -102,6 +111,7 @@ struct ClipboardFilterMenuGroup: View {
         self.onSelectTime = onSelectTime
         self.onSelectSource = onSelectSource
         self.onClearGroup = onClearGroup
+        self.onMenuTrackingChange = onMenuTrackingChange
     }
 
     private var fixedWidth: CGFloat {
@@ -113,78 +123,73 @@ struct ClipboardFilterMenuGroup: View {
     private var accessibilityPresentation: ClipboardFilterAccessibilityPresentation {
         ClipboardFilterAccessibilityPresentation.resolve(
             group: group,
-            activeTitle: activeTitle,
-            isExpanded: false
+            activeTitle: selectedTitle,
+            isExpanded: isExpanded
         )
+    }
+
+    private var selectedID: String {
+        switch group {
+        case .format: filterState.format.id
+        case .time: filterState.time.id
+        case .source: filterState.sourceFilterKey?.id ?? "all"
+        }
+    }
+
+    private var selectedTitle: String? {
+        guard hasActiveFilter else { return nil }
+        return menuEntries.first { $0.id == selectedID }?.title ?? activeTitle
+    }
+
+    private var menuEntries: [ClipboardNativeFilterMenuEntry] {
+        switch group {
+        case .format:
+            ClipboardFormatFilter.allCases.map {
+                ClipboardNativeFilterMenuEntry(id: $0.id, title: $0.localizedTitle, systemImage: $0.systemImage)
+            }
+        case .time:
+            ClipboardTimeFilter.allCases.map {
+                ClipboardNativeFilterMenuEntry(id: $0.id, title: $0.localizedTitle, systemImage: $0.systemImage)
+            }
+        case .source:
+            [ClipboardNativeFilterMenuEntry(id: "all", title: L10n.string("clipboard.filter.all"), systemImage: "app.badge")]
+                + sourceOptions.map {
+                    ClipboardNativeFilterMenuEntry(id: $0.key.id, title: $0.displayName,
+                        sourceBundleIdentifier: $0.bundleIdentifier, usesSourceIcon: true)
+                }
+        }
     }
 
     var body: some View {
         HStack(spacing: 0) {
-            Menu {
-                switch group {
-                case .format:
-                    ForEach(ClipboardFormatFilter.allCases) { option in
-                        menuOption(
-                            title: option.localizedTitle,
-                            systemImage: option.systemImage,
-                            selected: filterState.format == option
-                        ) {
-                            onSelectFormat(option)
-                        }
-                    }
-                case .time:
-                    ForEach(ClipboardTimeFilter.allCases) { option in
-                        menuOption(
-                            title: option.localizedTitle,
-                            systemImage: option.systemImage,
-                            selected: filterState.time == option
-                        ) {
-                            onSelectTime(option)
-                        }
-                    }
-                case .source:
-                    menuOption(
-                        title: L10n.string("clipboard.filter.all"),
-                        systemImage: "app.badge",
-                        selected: filterState.sourceFilterKey == nil
-                    ) {
-                        onSelectSource(nil)
-                    }
-                    ForEach(sourceOptions) { source in
-                        sourceMenuOption(
-                            title: source.displayName,
-                            bundleIdentifier: source.bundleIdentifier,
-                            selected: filterState.sourceFilterKey == source.key
-                        ) {
-                            onSelectSource(source.key)
-                        }
-                    }
+            ClipboardNativeFilterMenu(
+                group: group,
+                entries: menuEntries,
+                selectedID: selectedID,
+                accessibilityPresentation: accessibilityPresentation,
+                onSelection: selectEntry,
+                onTrackingChange: { active in
+                    isExpanded = active
+                    onMenuTrackingChange(active)
                 }
-            } label: {
+            )
+            .overlay {
                 ClipboardFilterIslandButton(
                     group: group,
                     activeTitle: activeTitle,
-                    isExpanded: false,
+                    isExpanded: isExpanded,
                     hasActiveFilter: hasActiveFilter,
                     reservesClearSlot: false,
                     showsIcon: showsIcon
                 )
-                .frame(width: fixedWidth - ClipboardFilterBarLayout.clearSlotWidth, alignment: .leading)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
             }
-            .menuStyle(.borderlessButton)
-            .modifier(ClipboardFilterWindowActivationModifier())
-            .frame(width: fixedWidth - ClipboardFilterBarLayout.clearSlotWidth)
-            .background(ClipboardFilterPointerProbe(group: group))
-            .accessibilityLabel(accessibilityPresentation.label)
-            .accessibilityValue(accessibilityPresentation.value)
-            .help(accessibilityPresentation.help)
+            .frame(width: ClipboardFilterBarLayout.menuWidth(groupWidth: fixedWidth, hasActiveFilter: hasActiveFilter),
+                   height: ClipboardFilterBarLayout.filterHitHeight)
 
             if hasActiveFilter {
                 ClipboardFilterClearButton(group: group, action: onClearGroup)
-            } else {
-                Color.clear
-                    .frame(width: ClipboardFilterBarLayout.clearSlotWidth, height: ClipboardFilterBarLayout.clearSlotWidth)
-                    .accessibilityHidden(true)
             }
         }
         .padding(.horizontal, ClipboardFilterBarLayout.filterHitHorizontalPadding)
@@ -195,64 +200,18 @@ struct ClipboardFilterMenuGroup: View {
         .contentShape(Rectangle())
     }
 
-    private func menuOption(
-        title: String,
-        systemImage: String,
-        selected: Bool,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button {
-            ClipboardFilterInteractionDiagnostics.selection(group: group)
-            action()
-        } label: {
-            ClipboardFilterOptionMenuLabel(
-                title: title,
-                systemImage: systemImage,
-                selected: selected
-            )
-        }
-    }
-
-    private func sourceMenuOption(
-        title: String,
-        bundleIdentifier: String?,
-        selected: Bool,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button {
-            ClipboardFilterInteractionDiagnostics.selection(group: group)
-            action()
-        } label: {
-            ClipboardFilterOptionMenuLabel(
-                title: title,
-                systemImage: nil,
-                sourceBundleIdentifier: bundleIdentifier,
-                usesSourceIcon: true,
-                selected: selected
-            )
-        }
-    }
-}
-
-private struct ClipboardFilterOptionMenuLabel: View {
-    let title: String
-    let systemImage: String?
-    var sourceBundleIdentifier: String?
-    var usesSourceIcon = false
-    let selected: Bool
-
-    var body: some View {
-        HStack(spacing: 6) {
-            if selected {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 10, weight: .bold))
+    private func selectEntry(_ id: String) {
+        switch group {
+        case .format:
+            if let option = ClipboardFormatFilter(rawValue: id) { onSelectFormat(option) }
+        case .time:
+            if let option = ClipboardTimeFilter(rawValue: id) { onSelectTime(option) }
+        case .source:
+            if id == "all" {
+                onSelectSource(nil)
+            } else if let source = sourceOptions.first(where: { $0.key.id == id }) {
+                onSelectSource(source.key)
             }
-            if usesSourceIcon {
-                ClipboardSourceIcon(bundleIdentifier: sourceBundleIdentifier)
-            } else if let systemImage {
-                Image(systemName: systemImage)
-            }
-            Text(title)
         }
     }
 }
@@ -268,7 +227,7 @@ struct ClipboardSourceIcon: View {
     }
 }
 
-private enum ClipboardSourceAppIconResolver {
+enum ClipboardSourceAppIconResolver {
     private static var iconCache: [String: NSImage] = [:]
 
     static var defaultAppIcon: NSImage {

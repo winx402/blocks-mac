@@ -8,11 +8,18 @@ struct PermissionSettingsPane: View {
     @State private var diagnosticsExpanded = false
     @State private var permissionHelpExpanded = false
     @State private var recoveryPresented = false
+    @State private var selectionHelperSetupPresented = false
     @State private var recoveryRestartPresentationGate = PermissionRecoveryRestartPresentationGate()
 
     var body: some View {
         content
-            .onAppear { presentRecoveryIfEligible() }
+            .onAppear {
+                presentRecoveryIfEligible()
+                presentRequestedHelperSetup()
+            }
+            .onChange(of: appModel.selectionHelperSetupRequestID) { _, _ in
+                presentRequestedHelperSetup()
+            }
             .onDisappear { recoveryRestartPresentationGate.cancelPendingRestart() }
             .onChange(of: permissionStore.recoveryState) { _, state in
                 if !PermissionRecoveryRestartPresentationGate.canPresentRecoverySheet(for: state) {
@@ -24,6 +31,11 @@ struct PermissionSettingsPane: View {
             .sheet(isPresented: $recoveryPresented, onDismiss: recoverySheetDidDismiss) {
                 PermissionRecoveryView(onRestartRequested: requestRestartAfterRecoveryDismissal)
                     .environmentObject(permissionStore)
+            }
+            .sheet(isPresented: $selectionHelperSetupPresented) {
+                if let controller = appModel.selectionHelperSettingsController {
+                    SelectionHelperSetupView(controller: controller)
+                }
             }
     }
 
@@ -45,7 +57,9 @@ struct PermissionSettingsPane: View {
             )
             if let controller = appModel.selectionHelperSettingsController {
                 SettingsRowDivider()
-                SelectionHelperPermissionStatusRow(controller: controller)
+                SelectionHelperPermissionStatusRow(controller: controller) {
+                    selectionHelperSetupPresented = true
+                }
             }
             SettingsRowDivider()
             PermissionDiagnosticRow(
@@ -136,6 +150,14 @@ struct PermissionSettingsPane: View {
         presentRecoveryIfEligible()
     }
 
+    private func presentRequestedHelperSetup() {
+        guard !recoveryPresented,
+              permissionStore.recoveryState?.isInFlight != true,
+              let requestID = appModel.selectionHelperSetupRequestID,
+              appModel.consumeSelectionHelperSetupRequest(requestID) else { return }
+        selectionHelperSetupPresented = true
+    }
+
     private func presentRecoveryIfEligible() {
         recoveryPresented = PermissionRecoveryRestartPresentationGate.canPresentRecoverySheet(
             for: permissionStore.recoveryState
@@ -153,6 +175,7 @@ struct PermissionSettingsPane: View {
             currentState: permissionStore.recoveryState
         ) else {
             permissionStore.cancelPermissionRecovery()
+            presentRequestedHelperSetup()
             return
         }
         // Setting the binding alone is not proof that AppKit ended this sheet.
@@ -166,7 +189,7 @@ struct PermissionSettingsPane: View {
 
 private struct SelectionHelperPermissionStatusRow: View {
     @ObservedObject var controller: SelectionHelperSettingsController
-    @State private var setupPresented = false
+    let onShowSetup: () -> Void
 
     var body: some View {
         SettingsStatusRow(
@@ -192,9 +215,6 @@ private struct SelectionHelperPermissionStatusRow: View {
         .accessibilityElement(children: .contain)
         .accessibilityLabel(L10n.string("translation.selectionHelper.title"))
         .accessibilityValue(stateDetail)
-        .sheet(isPresented: $setupPresented) {
-            SelectionHelperSetupView(controller: controller)
-        }
     }
 
     private var status: SettingsRowStatus {
@@ -255,7 +275,7 @@ private struct SelectionHelperPermissionStatusRow: View {
             }
         case .notRunning, .notPaired, .missingAccessibilityPermission, .connectionFailed:
             Button(L10n.string("translation.selectionHelper.setup.action")) {
-                setupPresented = true
+                onShowSetup()
             }
         case .versionOutdated:
             Button(L10n.string("translation.selectionHelper.update")) {

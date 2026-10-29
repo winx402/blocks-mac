@@ -3,9 +3,8 @@ import BlocksCore
 import SwiftUI
 
 enum TranslationPanelSourceLayout {
-    /// The source label owns the header's vertical geometry. Feedback and OCR
-    /// controls are overlaid in its trailing lane, so their compact hit targets
-    /// do not add empty space above the editor or move fixed controls below it.
+    /// The source label owns the title row. Optional feedback occupies a
+    /// separate, measured row rather than overflowing this text-line height.
     static var sourceTextHeaderHeight: CGFloat {
         NSLayoutManager().defaultLineHeight(
             for: NSFont.preferredFont(forTextStyle: .subheadline)
@@ -58,15 +57,21 @@ enum TranslationPanelSourceLayout {
     static func boundedEditorHeight(
         preferredHeight: CGFloat,
         availableHeight: CGFloat,
-        source: TranslationInputSource
+        source: TranslationInputSource,
+        feedbackHeight: CGFloat = 0
     ) -> CGFloat {
         let reservedHeight = sourceHeaderHeight(for: source)
             + sourceEditorSpacing + sourceVerticalInset * 2
             + languageBarHeight + minimumResultsHeight + 2
+            + feedbackReservedHeight(feedbackHeight)
         return min(
             preferredHeight,
             max(sourceEditorMinimumHeight, availableHeight - reservedHeight)
         )
+    }
+
+    static func feedbackReservedHeight(_ measuredHeight: CGFloat) -> CGFloat {
+        measuredHeight > 0 ? measuredHeight + sourceEditorSpacing : 0
     }
 
     static func expandedEditorHeight(
@@ -388,6 +393,7 @@ struct TranslationPanelContentLayout<
 >: View {
     let inputSource: TranslationInputSource
     let sourceText: String
+    let feedbackHeight: CGFloat
     private let sourceContent: (CGFloat) -> SourceContent
     private let languageContent: () -> LanguageContent
     private let resultsContent: () -> ResultsContent
@@ -397,6 +403,7 @@ struct TranslationPanelContentLayout<
     init(
         inputSource: TranslationInputSource,
         sourceText: String = "",
+        feedbackHeight: CGFloat = 0,
         @ViewBuilder sourceContent:
             @escaping (CGFloat) -> SourceContent,
         @ViewBuilder languageContent:
@@ -406,6 +413,7 @@ struct TranslationPanelContentLayout<
     ) {
         self.inputSource = inputSource
         self.sourceText = sourceText
+        self.feedbackHeight = feedbackHeight
         self.sourceContent = sourceContent
         self.languageContent = languageContent
         self.resultsContent = resultsContent
@@ -418,7 +426,8 @@ struct TranslationPanelContentLayout<
                     preferredHeight: requestedEditorHeight
                         ?? TranslationPanelSourceLayout.expandedEditorHeight(for: inputSource),
                     availableHeight: geometry.size.height,
-                    source: inputSource
+                    source: inputSource,
+                    feedbackHeight: feedbackHeight
                 ))
                 Divider()
                 resultsViewport

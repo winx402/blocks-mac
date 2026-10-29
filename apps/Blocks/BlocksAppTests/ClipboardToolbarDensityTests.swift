@@ -12,11 +12,12 @@ final class ClipboardToolbarDensityTests: XCTestCase {
         XCTAssertEqual(ClipboardFilterBarLayout.islandContentSpacing, BlocksVisualTokens.Spacing.xs)
     }
 
-    func testFilterWidthsFitLocalizedLabelAndReserveClearActionWithoutPerGroupSlack() {
+    func testFilterWidthsUseBoundedGroupLabelsAndStableTotalWidth() {
         for group in ClipboardFilterGroup.nonTagCases {
             let labelWidth = ClipboardFilterBarLayout.filterLabelWidth(for: group)
             let expected = ceil(labelWidth) + ClipboardFilterBarLayout.islandIconSize
                 + ClipboardFilterBarLayout.clearSlotWidth
+                + ClipboardFilterBarLayout.menuIndicatorWidth
                 + ClipboardFilterBarLayout.islandContentSpacing * 2
                 + ClipboardFilterBarLayout.islandHorizontalPadding * 2
             XCTAssertEqual(ClipboardFilterBarLayout.filterGroupFixedWidth(for: group), expected)
@@ -26,7 +27,7 @@ final class ClipboardToolbarDensityTests: XCTestCase {
             )
             let hosting = NSHostingView(rootView: ClipboardFilterIslandButton(
                 group: group, activeTitle: nil, isExpanded: false, hasActiveFilter: false,
-                reservesClearSlot: true, showsIcon: true
+                reservesClearSlot: false, showsIcon: true
             ).frame(width: expected))
             hosting.frame = NSRect(x: 0, y: 0, width: expected, height: ClipboardPanelToolbarLayout.filterRowHeight)
             hosting.layoutSubtreeIfNeeded()
@@ -34,17 +35,19 @@ final class ClipboardToolbarDensityTests: XCTestCase {
         }
     }
 
-    func testFixedFiltersBudgetTheirLongestKnownValueBeforeSelection() {
-        for (group, titles) in [
-            (ClipboardFilterGroup.format, ClipboardFormatFilter.allCases.map(\.localizedTitle)),
-            (.time, ClipboardTimeFilter.allCases.map(\.localizedTitle)),
-        ] {
-            for title in titles {
-                let width = (title as NSString).size(withAttributes: [
-                    .font: BlocksTypography.nsFont(size: BlocksVisualTokens.Typography.body, weight: .semibold),
-                ]).width
-                XCTAssertGreaterThanOrEqual(ClipboardFilterBarLayout.filterLabelWidth(for: group), width)
-            }
+    func testLongCandidateTitlesDoNotIncreaseTheCollapsedControlBudget() {
+        for group in ClipboardFilterGroup.nonTagCases {
+            let labelWidth = ClipboardFilterBarLayout.filterLabelWidth(for: group)
+            XCTAssertGreaterThanOrEqual(labelWidth, ClipboardFilterBarLayout.islandTextSize * 2)
+            XCTAssertLessThanOrEqual(labelWidth, ClipboardFilterBarLayout.islandTextSize * 5)
+            let total = ClipboardFilterBarLayout.filterGroupFixedWidth(for: group)
+            XCTAssertEqual(ClipboardFilterBarLayout.menuWidth(groupWidth: total, hasActiveFilter: false), total)
+            XCTAssertEqual(
+                ClipboardFilterBarLayout.menuWidth(groupWidth: total, hasActiveFilter: true)
+                    + ClipboardFilterBarLayout.clearSlotWidth,
+                total,
+                "clear is carved out only when active; neighbours remain fixed"
+            )
         }
     }
 }

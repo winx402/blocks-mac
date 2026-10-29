@@ -10,6 +10,7 @@ final class ClipboardInteractionTrace: @unchecked Sendable {
         case externalDismiss, closeRequested, closeIgnoredPinned, closeIgnoredPending
         case closeStarted, orderedOut, closeCompleted, staleCloseCompletion
         case filterPointer, filterSelection, probeAttached, probeDetached
+        case filterNativeMenuOpen, filterNativeMenuClose
         case rowHover, favoriteHover, favoriteAction, rowDisappeared
     }
     struct Event: Codable, Sendable {

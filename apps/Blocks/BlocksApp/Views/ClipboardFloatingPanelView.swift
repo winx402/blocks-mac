@@ -15,6 +15,8 @@ struct ClipboardFloatingPanelView: View {
     let onOpenSettings: () -> Void
     let onTogglePin: () -> Void
     let onRootEscape: () -> Void
+    var onFilterMenuTrackingChange: (ClipboardFilterGroup, Bool) -> Void = { _, _ in }
+    var isFilterMenuInteractionProtected: () -> Bool = { false }
     @StateObject private var session = ClipboardPanelSessionModel()
     @StateObject private var interactionCoordinator = ClipboardPanelInteractionCoordinator()
     @AppStorage(ClipboardPanelSettings.Keys.rememberSearch) private var rememberSearch = false
@@ -27,6 +29,7 @@ struct ClipboardFloatingPanelView: View {
     @State private var sideRowHeightResizeDragStartHeight: CGFloat?
     @State private var activeSideRowHeightResizeHandleID: String?
     @State private var hoveredSideRowHeightResizeHandleID: String?
+    @State private var awaitingSearchRefresh = false
     @FocusState private var searchFocused: Bool
 
     private var searchResult: ClipboardSearchResultSet { clipboardStore.currentSearchResult }
@@ -96,6 +99,7 @@ struct ClipboardFloatingPanelView: View {
                 }
             }
             .onChange(of: clipboardStore.searchRevision) { _, _ in
+                awaitingSearchRefresh = false
                 session.finishHistoryRead()
                 normalizeSelection()
                 backfillSparseResultIfNeeded()
@@ -200,7 +204,8 @@ struct ClipboardFloatingPanelView: View {
                     tagID: tagID,
                     afterTagID: afterTagID
                 )
-            }
+            },
+            onFilterMenuTrackingChange: onFilterMenuTrackingChange
         )
     }
 
@@ -249,7 +254,19 @@ struct ClipboardFloatingPanelView: View {
             onBottomCardWidthChanged: setBottomCardWidth,
             onSideRowHeightResizeChanged: updateSideRowHeightResize,
             onSideRowHeightResizeEnded: finishSideRowHeightResize,
-            onSideRowHeightResizeHoverChanged: setSideRowHeightResizeHandleHovered
+            onSideRowHeightResizeHoverChanged: setSideRowHeightResizeHandleHovered,
+            onClearFilters: canClearFiltersFromEmptyState ? clearFiltersFromEmptyState : nil
+        )
+    }
+
+    private var canClearFiltersFromEmptyState: Bool {
+        ClipboardEmptyFilterRecoveryPolicy.canOfferRecovery(
+            result: searchResult, query: session.query,
+            hasActiveFilters: displayFilterState.hasActiveFilters,
+            recordsAreEmpty: clipboardStore.records.isEmpty,
+            isLoading: awaitingSearchRefresh || session.paginationRequestInFlight,
+            repositoryUnavailable: clipboardStore.repositoryUnavailable,
+            captureServiceUnavailable: clipboardStore.captureServiceUnavailable
         )
     }
 
@@ -305,6 +322,7 @@ struct ClipboardFloatingPanelView: View {
         selectRecord(filteredRecords[0].id)
     }
     private func refreshSearchResult() {
+        awaitingSearchRefresh = true
         clipboardStore.refreshSearchResult(
             query: session.query,
             limit: session.visibleRecordLimit
@@ -528,9 +546,21 @@ struct ClipboardFloatingPanelView: View {
         }
     }
     private func clearAllFiltersFromToolbar() {
+        awaitingSearchRefresh = true
         clipboardStore.clearFilters()
     }
+
+    private func clearFiltersFromEmptyState() {
+        guard canClearFiltersFromEmptyState else { return }
+        session.query = ""
+        clipboardStore.clearFilters() // Also clears the selected tag.
+        resetPagination()
+        refreshSearchResult()
+        normalizeSelection()
+    }
+
     private func clearFilterGroup(_ group: ClipboardFilterGroup) {
+        awaitingSearchRefresh = true
         switch group {
         case .format:
             clipboardStore.setFormatFilter(.all)
@@ -542,21 +572,25 @@ struct ClipboardFloatingPanelView: View {
     }
 
     private func toggleFormatFilter(_ option: ClipboardFormatFilter) {
+        awaitingSearchRefresh = true
         let nextFilter: ClipboardFormatFilter = clipboardStore.filterState.format == option ? .all : option
         clipboardStore.setFormatFilter(nextFilter)
     }
 
     private func toggleTimeFilter(_ option: ClipboardTimeFilter) {
+        awaitingSearchRefresh = true
         let nextFilter: ClipboardTimeFilter = clipboardStore.filterState.time == option ? .all : option
         clipboardStore.setTimeFilter(nextFilter)
     }
 
     private func toggleTagFilter(_ tagID: String?) {
+        awaitingSearchRefresh = true
         let nextTagID = clipboardStore.tagStore.selectedTagID == tagID ? nil : tagID
         actions.setTagFilter(nextTagID)
     }
 
     private func toggleSourceFilter(_ sourceKey: ClipboardSourceFilterKey?) {
+        awaitingSearchRefresh = true
         let nextSourceKey = clipboardStore.filterState.sourceFilterKey == sourceKey ? nil : sourceKey
         clipboardStore.setSourceFilter(nextSourceKey)
     }
@@ -589,6 +623,7 @@ struct ClipboardFloatingPanelView: View {
     }
 
     private func handleKeyboardCommand(_ command: ClipboardPanelKeyboardCommand) {
+        guard !isFilterMenuInteractionProtected() else { return }
         switch command {
         case let .navigate(delta):
             selectAdjacentRecord(delta: delta)
@@ -606,10 +641,12 @@ struct ClipboardFloatingPanelView: View {
     }
 
     private func handleEscapeCommand() {
+        guard !isFilterMenuInteractionProtected() else { return }
         if !session.query.isEmpty {
             session.query = ""
             focusCoordinator.focusSearch()
         } else if displayFilterState.hasActiveFilters {
+            awaitingSearchRefresh = true
             clipboardStore.clearFilters()
             focusCoordinator.focusSearch()
         } else {
@@ -617,4 +654,26 @@ struct ClipboardFloatingPanelView: View {
         }
     }
 
+}
+
+enum ClipboardEmptyFilterRecoveryPolicy {
+    static func canOfferRecovery(
+        result: ClipboardSearchResultSet,
+        query: String,
+        hasActiveFilters: Bool,
+        recordsAreEmpty: Bool,
+        isLoading: Bool,
+        repositoryUnavailable: Bool,
+        captureServiceUnavailable: Bool
+    ) -> Bool {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard result.records.isEmpty, !recordsAreEmpty, !isLoading,
+              !repositoryUnavailable, !captureServiceUnavailable,
+              result.query == trimmedQuery,
+              hasActiveFilters || !trimmedQuery.isEmpty else { return false }
+        switch result.state {
+        case .idle, .empty: return !result.indexActivity.hasPendingWork
+        case .results, .emptyIndexing, .partialIndexing, .failed: return false
+        }
+    }
 }

@@ -1,6 +1,16 @@
 {
   "sourceLanguage": "zh-Hans",
   "strings": {
+    "clipboard.emptyState.showAll": {"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"返回全部记录"}},"en":{"stringUnit":{"state":"translated","value":"Show all records"}},"ja":{"stringUnit":{"state":"translated","value":"すべての履歴を表示"}}}},
+    "translation.panel.feedback.details": {"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"查看说明"}},"en":{"stringUnit":{"state":"translated","value":"Show details"}},"ja":{"stringUnit":{"state":"translated","value":"詳細を表示"}}}},
+    "translation.selection.status.completeSetup": {"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"完成设置"}},"en":{"stringUnit":{"state":"translated","value":"Complete setup"}},"ja":{"stringUnit":{"state":"translated","value":"設定を完了"}}}},
+    "translation.selection.status.alternatives": {"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"仍可手动输入或使用截图翻译。"}},"en":{"stringUnit":{"state":"translated","value":"You can still type text or translate a screenshot."}},"ja":{"stringUnit":{"state":"translated","value":"引き続き手入力やスクリーンショット翻訳を利用できます。"}}}},
+    "translation.selection.status.disconnected": {"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"划词助手未连接"}},"en":{"stringUnit":{"state":"translated","value":"Selection helper not connected"}},"ja":{"stringUnit":{"state":"translated","value":"テキスト選択ヘルパーが未接続"}}}},
+    "translation.selection.status.pairingRequired": {"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"划词助手需要配对"}},"en":{"stringUnit":{"state":"translated","value":"Selection helper needs pairing"}},"ja":{"stringUnit":{"state":"translated","value":"テキスト選択ヘルパーのペアリングが必要"}}}},
+    "translation.selection.status.permissionRequired": {"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"划词助手需要权限"}},"en":{"stringUnit":{"state":"translated","value":"Selection helper needs permission"}},"ja":{"stringUnit":{"state":"translated","value":"テキスト選択ヘルパーの権限が必要"}}}},
+    "translation.selection.status.installationConflict": {"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"划词助手安装冲突"}},"en":{"stringUnit":{"state":"translated","value":"Selection helper installation conflict"}},"ja":{"stringUnit":{"state":"translated","value":"テキスト選択ヘルパーのインストール競合"}}}},
+    "translation.selection.status.updateRequired": {"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"划词助手需要更新"}},"en":{"stringUnit":{"state":"translated","value":"Selection helper needs an update"}},"ja":{"stringUnit":{"state":"translated","value":"テキスト選択ヘルパーの更新が必要"}}}},
+    "translation.selection.status.connectionFailed": {"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"划词助手连接失败"}},"en":{"stringUnit":{"state":"translated","value":"Selection helper connection failed"}},"ja":{"stringUnit":{"state":"translated","value":"テキスト選択ヘルパーの接続に失敗"}}}},
     "translation.panel.swapLanguages.automaticSourceHint": {"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"自动检测状态不支持直接交换，请先选择源语言"}},"en":{"stringUnit":{"state":"translated","value":"Automatic detection cannot be swapped directly. Select a source language first."}},"ja":{"stringUnit":{"state":"translated","value":"自動検出のままでは入れ替えできません。先に原文の言語を選択してください。"}}}},
     "settings.agentCLI.actionBroker.recheck": {"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"重新检查"}},"en":{"stringUnit":{"state":"translated","value":"Check Again"}},"ja":{"stringUnit":{"state":"translated","value":"再確認"}}}},
     "settings.agentCLI.actionBroker.recoveryRequired": {"localizations":{"zh-Hans":{"stringUnit":{"state":"translated","value":"无法建立可信连接，需要安全恢复。Blocks 没有停止旧服务或更改授权。请保留诊断；保存工作后可按系统流程重新登录，再重新检查。重新检查不会强制重启旧服务。"}},"en":{"stringUnit":{"state":"translated","value":"A trusted connection could not be established. Safe recovery is required; Blocks has not stopped the old service or changed permissions. Keep diagnostics. After saving work, you may end your macOS session normally and check again. Checking never force-restarts the service."}},"ja":{"stringUnit":{"state":"translated","value":"信頼できる接続を確立できず、安全な復旧が必要です。旧サービスの停止や権限変更は行っていません。診断を保持してください。作業を保存し、macOSの通常の手順で再ログインしてから再確認できます。再確認でサービスを強制再起動することはありません。"}}}},
@@ -2408,19 +2418,19 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "No protected metadata matches the current filters."
+            "value": "Adjust or clear filters."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "現在のフィルタに一致する保護メタデータはありません。"
+            "value": "フィルターを変更または解除してください。"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "没有受保护元数据匹配当前筛选。"
+            "value": "试试调整或清除筛选。"
           }
         }
       }
@@ -2430,19 +2440,19 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "No matching metadata"
+            "value": "No matching records"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "一致するメタデータはありません"
+            "value": "一致する履歴がありません"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "没有匹配的元数据"
+            "value": "没有匹配的记录"
           }
         }
       }
@@ -5466,19 +5476,19 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "No indexed clipboard content matches this search."
+            "value": "Try different keywords, or clear the search and filters."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "この検索に一致するインデックス済みクリップボード内容はありません。"
+            "value": "別のキーワードを試すか、検索とフィルターを解除してください。"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "没有已索引的剪贴板内容匹配本次搜索。"
+            "value": "试试其他关键词，或清除搜索和筛选。"
           }
         }
       }

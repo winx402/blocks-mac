@@ -42,18 +42,19 @@ private struct TranslationPanelResultStateReader<Content: View>:
     }
 }
 
-/// Translation feedback stays inside the already-reserved source header. The
-/// message lane scrolls horizontally rather than wrapping: localized failures
-/// remain fully inspectable without changing the source editor's y-position or
-/// compressing the fixed language controls below it.
+/// A quiet, independent status row. The source title and editor never share
+/// its geometry; recovery details are available in an explicit native popover.
 struct TranslationPanelInlineFeedbackView: View {
     @ObservedObject var state: BlocksNotificationPresentationState
+    var onDetailInteractionChange: (Bool) -> Void = { _ in }
 
     @FocusState private var focusedControl: FocusedControl?
     @State private var isHovered = false
+    @State private var showsDetail = false
 
     private enum FocusedControl: Hashable {
         case action
+        case detail
         case dismiss
     }
 
@@ -61,18 +62,8 @@ struct TranslationPanelInlineFeedbackView: View {
         Group {
             if let presentation = state.current {
                 feedback(presentation)
-            } else {
-                Color.clear
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
             }
         }
-        .frame(
-            minWidth: 0,
-            maxWidth: .infinity,
-            minHeight: TranslationPanelMetrics.compactIconHitTarget,
-            maxHeight: TranslationPanelMetrics.compactIconHitTarget
-        )
         .onHover { hovered in
             isHovered = hovered
             updateAutoDismissPause()
@@ -80,7 +71,14 @@ struct TranslationPanelInlineFeedbackView: View {
         .onChange(of: focusedControl) { _, _ in
             updateAutoDismissPause()
         }
+        .onChange(of: showsDetail) { _, _ in
+            updateAutoDismissPause()
+        }
+        .onChange(of: state.current?.descriptor.id) { _, _ in
+            setDetailPresented(false)
+        }
         .onDisappear {
+            setDetailPresented(false)
             state.setAutoDismissPaused(false)
         }
     }
@@ -88,52 +86,31 @@ struct TranslationPanelInlineFeedbackView: View {
     private func feedback(
         _ presentation: BlocksPresentedNotification
     ) -> some View {
-        HStack(spacing: 5) {
-            ScrollView(.horizontal) {
-                HStack(spacing: 5) {
-                    Group {
-                        if presentation.descriptor.showsIndeterminateProgress {
-                            ProgressView()
-                                .controlSize(.mini)
-                        } else {
-                            Image(
-                                systemName:
-                                    presentation.descriptor.systemImage
-                                    ?? presentation.descriptor.level.systemImage
-                            )
-                            .foregroundStyle(
-                                presentation.descriptor.level.color
-                            )
-                        }
-                    }
-                    .frame(width: 13, height: 13)
-                    .accessibilityHidden(true)
-
-                    Text(presentation.descriptor.title)
-                        .font(.caption.weight(.semibold))
-                        .lineLimit(1)
-
-                    if let detail = presentation.descriptor.detail,
-                       !detail.isEmpty {
-                        Text(detail)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-
-                    if presentation.occurrenceCount > 1 {
-                        Text("×\(presentation.occurrenceCount)")
-                            .font(.caption2.weight(.medium))
-                            .foregroundStyle(.secondary)
-                    }
+        HStack(alignment: .center, spacing: BlocksVisualTokens.Spacing.xs) {
+            Group {
+                if presentation.descriptor.showsIndeterminateProgress {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Image(systemName: presentation.descriptor.systemImage
+                        ?? presentation.descriptor.level.systemImage)
+                        .foregroundStyle(iconColor(for: presentation))
                 }
-                .fixedSize(horizontal: true, vertical: false)
-                .padding(.vertical, 2)
             }
-            .scrollIndicators(.hidden)
-            .help(accessibilitySummary(for: presentation))
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(accessibilitySummary(for: presentation))
+            .frame(width: 13, height: 13)
+            .accessibilityHidden(true)
+
+            Text(presentation.descriptor.title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .layoutPriority(1)
+
+            if presentation.occurrenceCount > 1 {
+                Text("×\(presentation.occurrenceCount)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
 
             if let action = presentation.descriptor.action {
                 Button(action.title) {
@@ -144,6 +121,45 @@ struct TranslationPanelInlineFeedbackView: View {
                 .lineLimit(1)
                 .focused($focusedControl, equals: .action)
                 .accessibilityHint(action.accessibilityHint ?? "")
+                .frame(minHeight: TranslationPanelMetrics.compactIconHitTarget)
+                .accessibilityIdentifier("translation.panel.feedback.action")
+            }
+
+            if let detail = presentation.descriptor.detail, !detail.isEmpty {
+                Button {
+                    setDetailPresented(!showsDetail)
+                } label: {
+                    Image(systemName: "questionmark.circle")
+                        .frame(
+                            width: TranslationPanelMetrics.compactIconHitTarget,
+                            height: TranslationPanelMetrics.compactIconHitTarget
+                        )
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .focused($focusedControl, equals: .detail)
+                .help(L10n.string("translation.panel.feedback.details"))
+                .accessibilityLabel(L10n.string("translation.panel.feedback.details"))
+                .accessibilityIdentifier("translation.panel.feedback.details")
+                .popover(isPresented: Binding(
+                    get: { showsDetail },
+                    set: { setDetailPresented($0) }
+                ), arrowEdge: .bottom) {
+                    ScrollView {
+                        Text(detail)
+                            .font(.callout)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(BlocksVisualTokens.Spacing.md)
+                    }
+                    .frame(width: 300)
+                    .frame(maxHeight: 240)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .onExitCommand {
+                        setDetailPresented(false)
+                    }
+                }
             }
 
             Button {
@@ -162,14 +178,17 @@ struct TranslationPanelInlineFeedbackView: View {
             .focused($focusedControl, equals: .dismiss)
             .help(L10n.string("common.close"))
             .accessibilityLabel(L10n.string("common.close"))
+            .accessibilityIdentifier("translation.panel.feedback.dismiss")
         }
-        .padding(.leading, 5)
-        .blocksSurface(
-            .interactive,
-            cornerRadius: BlocksVisualTokens.CornerRadius.control
-        )
+        .frame(minHeight: TranslationPanelMetrics.compactIconHitTarget)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(accessibilitySummary(for: presentation))
+        .accessibilityIdentifier("translation.panel.feedback")
+    }
+
+    private func iconColor(for presentation: BlocksPresentedNotification) -> Color {
+        presentation.descriptor.level == .info
+            ? .secondary : presentation.descriptor.level.color
     }
 
     private func accessibilitySummary(
@@ -181,7 +200,75 @@ struct TranslationPanelInlineFeedbackView: View {
     }
 
     private func updateAutoDismissPause() {
-        state.setAutoDismissPaused(isHovered || focusedControl != nil)
+        state.setAutoDismissPaused(isHovered || focusedControl != nil || showsDetail)
+    }
+
+    private func setDetailPresented(_ presented: Bool) {
+        // Begin protection synchronously, before native popover presentation
+        // can change the key window or dispatch Escape. The presenter defers
+        // release until the closing event has left its tracking loop.
+        onDetailInteractionChange(presented)
+        showsDetail = presented
+        updateAutoDismissPause()
+    }
+}
+
+private struct TranslationPanelFeedbackHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+enum TranslationPanelSelectionFeedback {
+    static func descriptor(
+        for reason: AXSelectionReadFailureReason,
+        detail: String,
+        deduplicationKey: String,
+        openSetup: @escaping @MainActor () -> Void
+    ) -> BlocksNotificationDescriptor? {
+        guard !TranslationSelectionFailurePresentation.isSilentManualInput(reason) else {
+            return nil
+        }
+        let setupTitleKey: String?
+        switch reason {
+        case .agentUnavailable:
+            setupTitleKey = "translation.selection.status.disconnected"
+        case .agentRequiresApproval:
+            setupTitleKey = "translation.selection.status.pairingRequired"
+        case .accessibilityPermissionDenied:
+            setupTitleKey = "translation.selection.status.permissionRequired"
+        case .agentInstallationConflict:
+            setupTitleKey = "translation.selection.status.installationConflict"
+        case .agentVersionOutdated:
+            setupTitleKey = "translation.selection.status.updateRequired"
+        case .agentConnectionFailed:
+            setupTitleKey = "translation.selection.status.connectionFailed"
+        default:
+            setupTitleKey = nil
+        }
+        if let setupTitleKey {
+            return BlocksNotificationDescriptor(
+                level: .info,
+                title: L10n.string(setupTitleKey),
+                detail: [detail, L10n.string("translation.selection.status.alternatives")]
+                    .joined(separator: "\n\n"),
+                dismissPolicy: .manual,
+                deduplicationKey: deduplicationKey,
+                action: BlocksNotificationAction(
+                    title: L10n.string("translation.selection.status.completeSetup"),
+                    handler: openSetup
+                ),
+                systemImage: "text.cursor"
+            )
+        }
+        return BlocksNotificationDescriptor(
+            level: .warning,
+            title: L10n.string("translation.panel.operationFailed"),
+            detail: detail,
+            deduplicationKey: deduplicationKey
+        )
     }
 }
 
@@ -202,6 +289,7 @@ struct TranslationFloatingPanelView: View {
     @ObservedObject var resultOrderDragCoordinator:
         TranslationServiceOrderDragCoordinator
     var onLanguageMenuTrackingChange: (String, Bool) -> Void = { _, _ in }
+    var onFeedbackDetailInteractionChange: (Bool) -> Void = { _ in }
     let onExit: () -> Void
     let onClose: () -> Void
 
@@ -209,6 +297,7 @@ struct TranslationFloatingPanelView: View {
     @StateObject private var speechController = TranslationSpeechController()
     @State private var sourceEditorFocused = false
     @State private var sourceEditorHasDisplayedText = false
+    @State private var feedbackHeight: CGFloat = 0
 
     private var targetLanguageSections: TranslationLanguageMenuSections {
         TranslationLanguagePreferences.menuSections(
@@ -301,6 +390,7 @@ struct TranslationFloatingPanelView: View {
         TranslationPanelContentLayout(
             inputSource: model.inputSource,
             sourceText: model.sourceText,
+            feedbackHeight: notificationState.current == nil ? 0 : feedbackHeight,
             sourceContent: { editorHeight in
                 sourceSection(editorHeight: editorHeight)
             },
@@ -451,10 +541,6 @@ struct TranslationFloatingPanelView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize()
 
-                TranslationPanelInlineFeedbackView(
-                    state: notificationState
-                )
-
                 if model.inputSource == .screenshotOCR {
                     ocrInlineStatus
                         .frame(
@@ -499,7 +585,7 @@ struct TranslationFloatingPanelView: View {
                         .layoutPriority(-1)
                 }
             }
-            // Compact feedback and OCR actions stay in the trailing lane. The
+            // OCR actions stay in the trailing lane. The
             // text-line frame anchors their larger hit targets upward, so they
             // remain an overlay rather than increasing the source section or
             // touching the editor below.
@@ -509,6 +595,24 @@ struct TranslationFloatingPanelView: View {
                         .sourceHeaderHeight(for: model.inputSource),
                 alignment: .bottom
             )
+
+            if notificationState.current != nil {
+                TranslationPanelInlineFeedbackView(
+                    state: notificationState,
+                    onDetailInteractionChange: onFeedbackDetailInteractionChange
+                )
+                    .background {
+                        GeometryReader { geometry in
+                            Color.clear.preference(
+                                key: TranslationPanelFeedbackHeightKey.self,
+                                value: geometry.size.height
+                            )
+                        }
+                    }
+                    .onPreferenceChange(TranslationPanelFeedbackHeightKey.self) {
+                        feedbackHeight = $0
+                    }
+            }
 
             ZStack(alignment: .topLeading) {
                 TranslationSourceTextEditor(
@@ -1081,23 +1185,16 @@ struct TranslationFloatingPanelView: View {
                 deduplicationKey:
                     Self.selectionReadingNotificationKey
             )
-            if TranslationSelectionFailurePresentation
-                .isSilentManualInput(reason) {
-                notificationState.dismiss(
-                    deduplicationKey:
-                        Self.selectionFailureNotificationKey
-                )
+            if let descriptor = TranslationPanelSelectionFeedback.descriptor(
+                for: reason,
+                detail: selectionFailureMessage(reason),
+                deduplicationKey: Self.selectionFailureNotificationKey,
+                openSetup: actions.openSelectionHelperSettings
+            ) {
+                notificationState.present(descriptor)
             } else {
-                notificationState.present(
-                    BlocksNotificationDescriptor(
-                        level: .warning,
-                        title: L10n.string(
-                            "translation.panel.operationFailed"
-                        ),
-                        detail: selectionFailureMessage(reason),
-                        deduplicationKey:
-                            Self.selectionFailureNotificationKey
-                    )
+                notificationState.dismiss(
+                    deduplicationKey: Self.selectionFailureNotificationKey
                 )
             }
         }

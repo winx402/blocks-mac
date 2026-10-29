@@ -39,6 +39,8 @@
 		B909F0000000000000000006 /* FeedbackCLI.swift in Sources */ = {isa = PBXBuildFile; fileRef = F909F0000000000000000006; };
 		B909F0000000000000000007 /* SettingsSidebarRegressionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F909F0000000000000000007; };
 		B909F0000000000000000008 /* TranslationInlineFeedbackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F909F0000000000000000008; };
+		B10290000000000000000001 /* ClipboardEmptyStateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10290000000000000000001; };
+		B10290000000000000000002 /* ClipboardNativeFilterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10290000000000000000002; };
 		B909F0000000000000000009 /* FeedbackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F909F0000000000000000009; };
 		B909F0000000000000000010 /* FeedbackController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F909F0000000000000000010; };
 		B909F0000000000000000011 /* FeedbackSettingsSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = F909F0000000000000000011; };
@@ -605,6 +607,8 @@
 		F909F0000000000000000006 /* FeedbackCLI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedbackCLI.swift; sourceTree = "<group>"; };
 		F909F0000000000000000007 /* SettingsSidebarRegressionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsSidebarRegressionTests.swift; sourceTree = "<group>"; };
 		F909F0000000000000000008 /* TranslationInlineFeedbackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranslationInlineFeedbackTests.swift; sourceTree = "<group>"; };
+		F10290000000000000000001 /* ClipboardEmptyStateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardEmptyStateTests.swift; sourceTree = "<group>"; };
+		F10290000000000000000002 /* ClipboardNativeFilterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardNativeFilterTests.swift; sourceTree = "<group>"; };
 		F909F0000000000000000009 /* FeedbackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedbackTests.swift; sourceTree = "<group>"; };
 		F909F0000000000000000010 /* FeedbackController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Feedback/FeedbackController.swift; sourceTree = "<group>"; };
 		F909F0000000000000000011 /* FeedbackSettingsSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Feedback/FeedbackSettingsSection.swift; sourceTree = "<group>"; };
@@ -1205,6 +1209,8 @@
 				F909H0000000000000000004 /* SelectionHelperLocalAssociationTests.swift */,
 				F909F0000000000000000007 /* SettingsSidebarRegressionTests.swift */,
 				F909F0000000000000000008 /* TranslationInlineFeedbackTests.swift */,
+				F10290000000000000000001 /* ClipboardEmptyStateTests.swift */,
+				F10290000000000000000002 /* ClipboardNativeFilterTests.swift */,
 				F909F0000000000000000009 /* FeedbackTests.swift */,
 				F15L00000000000000000032 /* BlocksNativePluginTests.swift */,
 				F15N00000000000000000001 /* BlocksNativePluginPinnedNetworkTests.swift */,
@@ -2387,6 +2393,8 @@
 				B909H0000000000000000004 /* SelectionHelperLocalAssociationTests.swift in Sources */,
 				B909F0000000000000000007 /* SettingsSidebarRegressionTests.swift in Sources */,
 				B909F0000000000000000008 /* TranslationInlineFeedbackTests.swift in Sources */,
+				B10290000000000000000001 /* ClipboardEmptyStateTests.swift in Sources */,
+				B10290000000000000000002 /* ClipboardNativeFilterTests.swift in Sources */,
 				B909F0000000000000000009 /* FeedbackTests.swift in Sources */,
 				B15L00000000000000000032 /* BlocksNativePluginTests.swift in Sources */,
 				B15N00000000000000000001 /* BlocksNativePluginPinnedNetworkTests.swift in Sources */,

@@ -26,6 +26,7 @@ final class AppModel: ObservableObject {
         UInt64 = 0
     @Published var status: AppStatus = .ready
     @Published private(set) var settingsAttentionRequest: SettingsAttentionRequest?
+    @Published private(set) var selectionHelperSetupRequestID: UUID?
     let clipboardStore: ClipboardStore
     let providerStore: ProviderStore
     let translationStore: TranslationStore
@@ -1390,6 +1391,9 @@ final class AppModel: ObservableObject {
             },
             pluginManager: translationPluginManager,
             pluginRuntime: pluginRuntimeCoordinator,
+            openSelectionHelperSetup: { [weak self] in
+                self?.selectionHelperSetupRequestID = UUID()
+            },
             dispatchPluginEvent: { [weak pluginRuntimeCoordinator] envelope in
                 guard let pluginRuntimeCoordinator else {
                     return .allowed(envelope)
@@ -1582,6 +1586,15 @@ final class AppModel: ObservableObject {
         mainWindowNavigationGeneration &+= 1
         mainWindowOpener?()
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Presentation only: opening setup never launches/pairs the Helper or
+    /// requests permission. Only the visible setup buttons perform those acts.
+    func consumeSelectionHelperSetupRequest(_ requestID: UUID) -> Bool {
+        guard selectionHelperSettingsController != nil,
+              selectionHelperSetupRequestID == requestID else { return false }
+        selectionHelperSetupRequestID = nil
+        return true
     }
 
     private func openMainWindowOrDefault(

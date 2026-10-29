@@ -42,6 +42,7 @@ struct ClipboardPanelHeaderActions {
     let onRenameTag: (String, String) async -> Bool
     let onDeleteTag: (String) async -> Bool
     let onMoveTag: (String, String?) async -> Bool
+    var onFilterMenuTrackingChange: (ClipboardFilterGroup, Bool) -> Void = { _, _ in }
 }
 
 enum ClipboardPanelToolbarLayout {
@@ -280,7 +281,7 @@ struct ClipboardPanelHeader: View {
                     ClipboardFilterMenuGroup(
                         group: group,
                         activeTitle: values.activeTitle(group),
-                        hasActiveFilter: values.activeTitle(group) != nil,
+                        hasActiveFilter: hasActiveFilter(in: group),
                         showsIcon: true,
                         usesSideWidth: false,
                         sourceOptions: values.sourceOptions,
@@ -288,7 +289,8 @@ struct ClipboardPanelHeader: View {
                         onSelectFormat: actions.onSelectFormat,
                         onSelectTime: actions.onSelectTime,
                         onSelectSource: actions.onSelectSource,
-                        onClearGroup: { actions.onClearFilterGroup(group) }
+                        onClearGroup: { actions.onClearFilterGroup(group) },
+                        onMenuTrackingChange: { actions.onFilterMenuTrackingChange(group, $0) }
                     )
                 }
                 tagFilterChips(onNewTagEditorAppeared: scrollToNewTagEditor)
@@ -306,7 +308,7 @@ struct ClipboardPanelHeader: View {
         ClipboardFilterMenuGroup(
             group: group,
             activeTitle: values.activeTitle(group),
-            hasActiveFilter: values.activeTitle(group) != nil,
+            hasActiveFilter: hasActiveFilter(in: group),
             showsIcon: showsIcon,
             usesSideWidth: true,
             sourceOptions: values.sourceOptions,
@@ -314,7 +316,8 @@ struct ClipboardPanelHeader: View {
             onSelectFormat: actions.onSelectFormat,
             onSelectTime: actions.onSelectTime,
             onSelectSource: actions.onSelectSource,
-            onClearGroup: { actions.onClearFilterGroup(group) }
+            onClearGroup: { actions.onClearFilterGroup(group) },
+            onMenuTrackingChange: { actions.onFilterMenuTrackingChange(group, $0) }
         )
         .frame(
             width: ClipboardFilterBarLayout.sideFilterGroupFixedWidth(for: group, showsIcon: showsIcon)
@@ -335,6 +338,14 @@ struct ClipboardPanelHeader: View {
                     )
                 }
             }
+        }
+    }
+
+    private func hasActiveFilter(in group: ClipboardFilterGroup) -> Bool {
+        switch group {
+        case .format: values.filterState.format != .all
+        case .time: values.filterState.time != .all
+        case .source: values.filterState.sourceFilterKey != nil
         }
     }
 

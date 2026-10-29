@@ -6,7 +6,7 @@ import XCTest
 
 @MainActor
 final class TranslationInlineFeedbackTests: XCTestCase {
-    func testInlineFeedbackKeepsItsReservedHeaderHeightForLongDetail() {
+    func testInlineFeedbackUsesItsOwnRowAndLongDetailsDoNotRequireHorizontalScrolling() {
         let state = BlocksNotificationPresentationState()
         let host = NSHostingView(
             rootView: TranslationPanelInlineFeedbackView(state: state)
@@ -14,7 +14,7 @@ final class TranslationInlineFeedbackTests: XCTestCase {
         )
         host.frame = NSRect(x: 0, y: 0, width: 280, height: 28)
         host.layoutSubtreeIfNeeded()
-        let emptyHeight = host.fittingSize.height
+        XCTAssertLessThan(host.fittingSize.height, TranslationPanelMetrics.compactIconHitTarget)
 
         state.present(
             BlocksNotificationDescriptor(
@@ -28,15 +28,23 @@ final class TranslationInlineFeedbackTests: XCTestCase {
 
         XCTAssertEqual(
             host.fittingSize.height,
-            emptyHeight,
-            accuracy: 0.5,
-            "inline feedback must use the pre-reserved source-header row"
-        )
-        XCTAssertEqual(
-            host.fittingSize.height,
             TranslationPanelMetrics.compactIconHitTarget,
-            accuracy: 0.5
+            accuracy: 0.5,
+            "short feedback owns an independent compact row; full details live in explicit help"
         )
+
+        let shortTitleHeight = host.fittingSize.height
+        state.present(BlocksNotificationDescriptor(
+            level: .error,
+            title: String(repeating: "A longer localized status wraps naturally. ", count: 4),
+            detail: "Recovery details", dismissPolicy: .manual
+        ))
+        host.layoutSubtreeIfNeeded()
+        XCTAssertGreaterThan(host.fittingSize.height, shortTitleHeight,
+                             "localized status titles must wrap rather than scroll horizontally")
+        state.dismiss()
+        host.layoutSubtreeIfNeeded()
+        XCTAssertLessThan(host.fittingSize.height, TranslationPanelMetrics.compactIconHitTarget)
     }
 
     func testPresenterRendersFeedbackWithoutAnIndependentHUDPanel() throws {

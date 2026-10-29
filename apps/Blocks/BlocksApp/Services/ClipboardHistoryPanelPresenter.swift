@@ -251,6 +251,8 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
     private var panel: NSPanel?
     private weak var detailStore: ClipboardDetailStore?
     private let dismissMonitor = FloatingPanelDismissMonitor()
+    private var trackingFilterMenus: Set<ClipboardFilterGroup> = []
+    private var filterMenuSessionID = UUID()
     private let presentationCoordinator: BlocksFloatingPanelPresentationCoordinator
     private let regularWindowVisibilitySession =
         BlocksRegularWindowVisibilitySession()
@@ -321,6 +323,8 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
     var usesNonactivatingPanel: Bool {
         panel?.styleMask.contains(.nonactivatingPanel) == true
     }
+
+    var isFilterMenuInteractionProtected: Bool { !trackingFilterMenus.isEmpty }
 
     var invocationID: UUID? {
         invocationContext?.id
@@ -415,6 +419,9 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
             for: invocationContext.targetContext
         )
         let initialFrame = frame(for: position, screen: targetScreen)
+        trackingFilterMenus.removeAll()
+        filterMenuSessionID = UUID()
+        let menuSessionID = filterMenuSessionID
         let contentView = ClipboardFloatingPanelView(
             position: position,
             actions: actions,
@@ -431,7 +438,14 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
             onTogglePin: { [weak self] in
                 self?.togglePanelPinned()
             },
-            onRootEscape: { [weak self] in self?.handleRootEscape() }
+            onRootEscape: { [weak self] in self?.handleRootEscape() },
+            onFilterMenuTrackingChange: { [weak self] group, active in
+                guard let self, filterMenuSessionID == menuSessionID else { return }
+                setFilterMenuTracking(group, isTracking: active)
+            },
+            isFilterMenuInteractionProtected: { [weak self] in
+                self?.isFilterMenuInteractionProtected == true
+            }
         )
         .environmentObject(clipboardStore)
 
@@ -440,6 +454,9 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
             clipboardPanel.keyboardRouter = keyboardRouter
             clipboardPanel.onCommandModifierChanged = { [weak self] isPressed in
                 self?.quickPasteHintState.setCommandKeyPressed(isPressed)
+            }
+            clipboardPanel.isFilterMenuInteractionProtected = { [weak self] in
+                self?.isFilterMenuInteractionProtected == true
             }
         }
         let topResizeView = ClipboardTopBorderResizeView()
@@ -693,6 +710,7 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
     }
 
     private func handleRootEscape() {
+        guard !isFilterMenuInteractionProtected else { return }
         guard pinState.isPinned else {
             requestClosePanel()
             return
@@ -739,7 +757,8 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
 
     private func startDismissMonitor(for panel: NSPanel) {
         guard panel.isVisible,
-              !pinState.isPinned else {
+              !pinState.isPinned, !isClosePending,
+              !isFilterMenuInteractionProtected else {
             return
         }
         dismissMonitor.start(panel: panel) { [weak self] in
@@ -749,9 +768,20 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
     }
 
     func dismissForExternalInteraction() {
+        guard !isFilterMenuInteractionProtected else { return }
         traceInteraction(.externalDismiss, animated: false)
         Self.pasteLogger.debug("stage=panel-dismiss reason=external-event animated=false")
         requestClosePanel(animated: false)
+    }
+
+    func setFilterMenuTracking(_ group: ClipboardFilterGroup, isTracking: Bool) {
+        if isTracking {
+            trackingFilterMenus.insert(group)
+            dismissMonitor.stop()
+        } else {
+            trackingFilterMenus.remove(group)
+            if let panel { startDismissMonitor(for: panel) }
+        }
     }
 
     private func traceInteraction(_ stage: ClipboardInteractionTrace.Stage, animated: Bool? = nil) {
@@ -1084,7 +1114,10 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
         if let clipboardPanel = panel as? ClipboardHistoryPanel {
             clipboardPanel.keyboardRouter = nil
             clipboardPanel.onCommandModifierChanged = nil
+            clipboardPanel.isFilterMenuInteractionProtected = nil
         }
+        filterMenuSessionID = UUID()
+        trackingFilterMenus.removeAll()
         keyboardRouter.reset()
         focusCoordinator.endSession()
         quickPasteHintState.reset()
@@ -1138,6 +1171,7 @@ enum ClipboardPanelChildWindowLifecycle {
 private final class ClipboardHistoryPanel: NSPanel {
     weak var keyboardRouter: ClipboardPanelKeyboardCommandRouter?
     var onCommandModifierChanged: ((Bool) -> Void)?
+    var isFilterMenuInteractionProtected: (() -> Bool)?
 
     override var canBecomeKey: Bool {
         true
@@ -1151,7 +1185,9 @@ private final class ClipboardHistoryPanel: NSPanel {
         if event.type == .flagsChanged {
             onCommandModifierChanged?(Self.commandModifierPressed(in: event))
         }
-        if keyboardRouter?.route(event) == true {
+        // Native menus must receive their navigation and closing Escape; they
+        // must not become record navigation, paste, or panel-level Escape.
+        if isFilterMenuInteractionProtected?() != true, keyboardRouter?.route(event) == true {
             if event.modifierFlags.contains(.command) {
                 onCommandModifierChanged?(true)
             }

@@ -9,6 +9,7 @@ struct TranslationPanelActions {
         @MainActor (String) async -> ClipboardExplicitTextCopyOutcome
     let openFavorites: @MainActor () -> Void
     let openTranslationSettings: @MainActor () -> Void
+    let openSelectionHelperSettings: @MainActor () -> Void
     let retakeScreenshot: @MainActor () -> Void
 
     init(
@@ -17,11 +18,13 @@ struct TranslationPanelActions {
                 -> ClipboardExplicitTextCopyOutcome,
         openFavorites: @escaping @MainActor () -> Void,
         openTranslationSettings: @escaping @MainActor () -> Void,
-        retakeScreenshot: @escaping @MainActor () -> Void
+        retakeScreenshot: @escaping @MainActor () -> Void,
+        openSelectionHelperSettings: (@MainActor () -> Void)? = nil
     ) {
         self.copyText = copyText
         self.openFavorites = openFavorites
         self.openTranslationSettings = openTranslationSettings
+        self.openSelectionHelperSettings = openSelectionHelperSettings ?? openTranslationSettings
         self.retakeScreenshot = retakeScreenshot
     }
 }
@@ -59,6 +62,13 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
         TranslationServiceOrderDragCoordinator()
     private var isSuspended = false
     private var trackingLanguageMenus: Set<String> = []
+    // Reuse the native-menu event-tail protection: a popover's closing Escape
+    // must finish before this unpinned parent panel resumes implicit dismissal.
+    private lazy var feedbackDetailTracking = TranslationLanguageMenuTracking {
+        [weak self] _ in
+        guard let self, !didFinishClose else { return }
+        updateDismissalHandling()
+    }
     private var isForcingClose = false
     private var isClosePending = false
     private var didFinishClose = false
@@ -111,6 +121,9 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
                     self?.trackingLanguageMenus.remove(menu)
                 }
                 self?.updateDismissalHandling()
+            },
+            onFeedbackDetailInteractionChange: { [weak self] active in
+                self?.feedbackDetailInteractionChanged(active)
             },
             onExit: { [weak self] in
                 self?.dismissalController.requestEscapeDismissIfAllowed(origin: "swiftui-exit")
@@ -353,9 +366,19 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
                     systemInteraction ?? AppleTranslationSystemInteractionGuard.shared.isActive,
                 isDirectInteractionActive:
                     !trackingLanguageMenus.isEmpty
+                        || feedbackDetailTracking.isActive
                         || (directInteraction ?? (resultOrderDragCoordinator.activeServiceID != nil))
             )
         )
+    }
+
+    func feedbackDetailInteractionChanged(_ active: Bool) {
+        guard !didFinishClose else { return }
+        if active {
+            feedbackDetailTracking.begin()
+        } else {
+            feedbackDetailTracking.endAfterCurrentEvent()
+        }
     }
 
     private func startPinObservation() {
@@ -393,6 +416,7 @@ final class TranslationPanelPresenter: NSObject, NSWindowDelegate {
     private func finishClose(panel closingPanel: NSPanel?) {
         guard !didFinishClose else { return }
         didFinishClose = true
+        feedbackDetailTracking.reset()
         trackingLanguageMenus.removeAll()
         isClosePending = false
         presentationCoordinator.reset()

@@ -41,6 +41,7 @@ final class TranslationFeatureCoordinator:
         Int
     ) async -> ClipboardTextReadResult)?
     private var openMainWindow: (AppSection) -> Void = { _ in }
+    private var openSelectionHelperSetup: (() -> Void)?
     private var copyText:
         @MainActor (String) async -> ClipboardExplicitTextCopyOutcome = {
             _ in .failed
@@ -111,6 +112,7 @@ final class TranslationFeatureCoordinator:
         openMainWindow: @escaping (AppSection) -> Void,
         pluginManager: BlocksNativePluginManager? = nil,
         pluginRuntime: BlocksPluginRuntimeCoordinator? = nil,
+        openSelectionHelperSetup: (() -> Void)? = nil,
         dispatchPluginEvent: (@MainActor (
             BlocksPluginEventEnvelope
         ) async -> BlocksPluginEventDispatchResult)? = nil
@@ -121,6 +123,7 @@ final class TranslationFeatureCoordinator:
         self.readClipboardText = readClipboardText
         self.copyText = copyText
         self.openMainWindow = openMainWindow
+        self.openSelectionHelperSetup = openSelectionHelperSetup
         self.pluginManager = pluginManager
         self.pluginRuntime = pluginRuntime
         self.dispatchPluginEvent = dispatchPluginEvent
@@ -345,6 +348,10 @@ final class TranslationFeatureCoordinator:
                         await self.screenshotWorkflow
                             .retakeScreenshot(for: model)
                     }
+                },
+                openSelectionHelperSettings: { [weak self] in
+                    self?.openSelectionHelperSetup?()
+                    self?.openMainWindow(.permissions, from: model.id)
                 }
             ),
             pluginManager: pluginManager,

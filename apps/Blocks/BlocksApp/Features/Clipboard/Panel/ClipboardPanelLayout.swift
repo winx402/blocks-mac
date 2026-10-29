@@ -138,6 +138,7 @@ struct ClipboardPanelLayoutActions {
     let onSideRowHeightResizeChanged: (String, CGFloat, CGFloat) -> Void
     let onSideRowHeightResizeEnded: (String, CGFloat, CGFloat) -> Void
     let onSideRowHeightResizeHoverChanged: (String, Bool) -> Void
+    let onClearFilters: (() -> Void)?
 }
 
 private struct ClipboardSideRowHeightResizeHandle: View {
@@ -265,21 +266,48 @@ struct ClipboardPanelLayout<Header: View, BottomRecord: View, SideRecord: View>:
     }
 
     private var emptyState: some View {
-        HStack(spacing: 12) {
-            Label(values.emptyStatePresentation.title, systemImage: values.emptyStatePresentation.systemImage)
-                .blocksFont(size: 13, weight: .semibold)
-            Text(values.emptyStatePresentation.detail)
-                .blocksFont(size: 12)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-            Spacer()
+        GeometryReader { proxy in
+            // The scroll content is at least the remaining record viewport's
+            // height, but may grow when a narrow panel wraps the description.
+            // Center the visible stack itself, not a row with a trailing spacer.
+            ScrollView(.vertical) {
+                VStack(spacing: BlocksVisualTokens.Spacing.xs) {
+                    Image(systemName: values.emptyStatePresentation.systemImage)
+                        .blocksFont(size: BlocksVisualTokens.Typography.title)
+                        .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
+                        .blocksInteractionGeometryProbe("clipboard.empty.icon")
+
+                    Text(values.emptyStatePresentation.title)
+                        .blocksFont(size: BlocksVisualTokens.Typography.body, weight: .semibold)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .blocksInteractionGeometryProbe("clipboard.empty.title")
+
+                    Text(values.emptyStatePresentation.detail)
+                        .blocksFont(size: BlocksVisualTokens.Typography.body)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .blocksInteractionGeometryProbe("clipboard.empty.detail")
+
+                    if let onClearFilters = actions.onClearFilters {
+                        BlocksActionButton(
+                            title: L10n.string("clipboard.emptyState.showAll"),
+                            role: .secondary,
+                            action: onClearFilters
+                        )
+                        .blocksInteractionGeometryProbe("clipboard.empty.action")
+                    }
+                }
+                .multilineTextAlignment(.center)
+                .blocksInteractionGeometryProbe("clipboard.empty.content")
+                .padding(.horizontal, BlocksVisualTokens.Spacing.md)
+                .padding(.vertical, BlocksVisualTokens.Spacing.xs)
+                .frame(maxWidth: .infinity, minHeight: max(proxy.size.height, 0), alignment: .center)
+            }
+            .scrollBounceBehavior(.basedOnSize)
         }
-        .frame(maxWidth: .infinity, minHeight: values.position == .bottom ? 112 : 180, alignment: .center)
-        .padding(.horizontal, 14)
-        .blocksSurface(
-            .section,
-            cornerRadius: BlocksVisualTokens.CornerRadius.section
-        )
+        .blocksInteractionGeometryProbe("clipboard.empty.viewport")
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var recordsContent: some View {

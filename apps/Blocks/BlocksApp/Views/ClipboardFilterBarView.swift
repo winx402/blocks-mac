@@ -13,34 +13,30 @@ enum ClipboardFilterBarLayout {
     static let islandContentSpacing = BlocksVisualTokens.Spacing.xs
     static let islandHorizontalPadding = BlocksVisualTokens.Spacing.sm
     static let clearSlotWidth: CGFloat = 20
+    static let menuIndicatorWidth: CGFloat = 8
     static let filterHitHeight: CGFloat = 34
-    static let filterHitHorizontalPadding: CGFloat = 2
+    static let filterHitHorizontalPadding: CGFloat = 0
     static let tagDropIndicatorHitWidth: CGFloat = 14
     static let tagDragActivationDistance: CGFloat = 3
 
     static func filterGroupFixedWidth(for group: ClipboardFilterGroup) -> CGFloat {
-        // Resolve once from the localized group label, not the selected value:
-        // changing a filter never pushes adjacent controls around. Every group
-        // retains its clear-action slot without arbitrary per-group whitespace.
+        // Budget only the short group label. Long selected values truncate,
+        // with their complete value retained in native help/accessibility.
+        // The default menu occupies the entire width; an active filter splits
+        // off its clear action without moving any neighbouring controls.
         return filterLabelWidth(for: group) + islandIconSize + clearSlotWidth
-            + islandContentSpacing * 2 + islandHorizontalPadding * 2
+            + menuIndicatorWidth + islandContentSpacing * 2 + islandHorizontalPadding * 2
     }
 
     static func filterLabelWidth(for group: ClipboardFilterGroup) -> CGFloat {
-        let values: [String]
-        switch group {
-        case .format: values = ClipboardFormatFilter.allCases.map(\.localizedTitle)
-        case .time: values = ClipboardTimeFilter.allCases.map(\.localizedTitle)
-        case .source: values = []
-        }
-        let width = ([group.localizedTitle] + values).map { title in
-            (title as NSString).size(withAttributes: [
-                .font: BlocksTypography.nsFont(size: islandTextSize, weight: .semibold),
-            ]).width
-        }.max() ?? 0
-        // App names are unbounded; reserve a compact four-em label and retain
-        // the full source name through the existing tooltip/AX value.
-        return ceil(max(width, group == .source ? islandTextSize * 4 : 0))
+        let width = (group.localizedTitle as NSString).size(withAttributes: [
+            .font: BlocksTypography.nsFont(size: islandTextSize, weight: .semibold),
+        ]).width
+        return ceil(min(max(width, islandTextSize * 2), islandTextSize * 5))
+    }
+
+    static func menuWidth(groupWidth: CGFloat, hasActiveFilter: Bool) -> CGFloat {
+        groupWidth - (hasActiveFilter ? clearSlotWidth : 0)
     }
 
     static func sideFilterGroupFixedWidth(for group: ClipboardFilterGroup, showsIcon: Bool) -> CGFloat {
