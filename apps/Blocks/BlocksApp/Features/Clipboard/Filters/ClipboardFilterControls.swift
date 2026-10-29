@@ -13,21 +13,34 @@ struct ClipboardFilterIslandButton: View {
         activeTitle ?? group.localizedTitle
     }
 
+    private var geometryProbePrefix: String { "clipboard.filter.\(group.rawValue).label" }
+
     var body: some View {
         HStack(spacing: ClipboardFilterBarLayout.islandContentSpacing) {
             if showsIcon {
                 Image(systemName: group.systemImage)
+                    .resizable()
+                    .scaledToFit()
                     .font(.system(size: ClipboardFilterBarLayout.islandIconSize, weight: .semibold))
+                    // A symbol's font point size is not its layout width.
+                    // Keep it inside the 13pt budget rather than stealing
+                    // room from a two-character active filter value.
+                    .frame(width: ClipboardFilterBarLayout.islandIconSize,
+                           height: ClipboardFilterBarLayout.islandIconSize)
+                    .blocksInteractionGeometryProbe("\(geometryProbePrefix).icon")
             }
-            Text(activeTitle ?? group.localizedTitle)
+            Text(displayTitle)
                 .blocksFont(size: ClipboardFilterBarLayout.islandTextSize, weight: .semibold)
                 .lineLimit(1)
                 .truncationMode(.tail)
+                .blocksInteractionGeometryProbe("\(geometryProbePrefix).title")
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .blocksInteractionGeometryProbe("\(geometryProbePrefix).titleSlot")
                 .transition(.opacity)
             Image(systemName: "chevron.down")
                 .font(.system(size: 8, weight: .semibold))
                 .frame(width: ClipboardFilterBarLayout.menuIndicatorWidth)
+                .blocksInteractionGeometryProbe("\(geometryProbePrefix).indicator")
             if reservesClearSlot {
                 Color.clear
                     .frame(width: ClipboardFilterBarLayout.clearSlotWidth, height: ClipboardFilterBarLayout.clearSlotWidth)
@@ -42,6 +55,7 @@ struct ClipboardFilterIslandButton: View {
             isActive: isExpanded || hasActiveFilter
         )
         .blocksAnimation(.selection, value: isExpanded || hasActiveFilter)
+        .blocksInteractionGeometryProbe("\(geometryProbePrefix).surface")
     }
 }
 

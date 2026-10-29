@@ -206,6 +206,76 @@ final class ClipboardNativeFilterTests: XCTestCase {
         XCTAssertNotNil(button.item(at: 0)?.image)
     }
 
+    func testHostedTwoCharacterActiveLabelsRetainTheirActualSwiftUITextBudget() throws {
+        // Recreate the Chinese 91pt group / 71pt active menu even if the test
+        // runner's language is English. Native-frame tests cannot detect an
+        // oversized SF symbol shrinking Text inside this otherwise-correct box.
+        for (group, title) in [(ClipboardFilterGroup.format, "图片"), (.time, "今天"), (.source, "预览")] {
+            for showsIcon in [true, false] {
+                let capture = ClipboardFilterLabelGeometryCapture()
+                let labelWidth = ClipboardFilterBarLayout.islandTextSize * 2
+                let menuWidth = labelWidth + ClipboardFilterBarLayout.menuIndicatorWidth
+                    + ClipboardFilterBarLayout.islandHorizontalPadding * 2
+                    + ClipboardFilterBarLayout.islandContentSpacing
+                    + (showsIcon ? ClipboardFilterBarLayout.islandIconSize + ClipboardFilterBarLayout.islandContentSpacing : 0)
+                let window = makeLabelWindow(group: group, title: title, showsIcon: showsIcon,
+                    menuWidth: menuWidth, capture: capture)
+                defer { window.contentView = nil; window.close() }
+                layout(try XCTUnwrap(window.contentView))
+
+                let prefix = "clipboard.filter.\(group.rawValue).label"
+                let text = try XCTUnwrap(capture.frames["\(prefix).title"])
+                let textSlot = try XCTUnwrap(capture.frames["\(prefix).titleSlot"])
+                let idealText = try XCTUnwrap(capture.frames["test.filter.label.ideal"])
+                let indicator = try XCTUnwrap(capture.frames["\(prefix).indicator"])
+                let surface = try XCTUnwrap(capture.frames["\(prefix).surface"])
+                XCTAssertEqual(surface.width, menuWidth, accuracy: 0.25)
+                XCTAssertGreaterThanOrEqual(textSlot.width, idealText.width - 0.25,
+                    "The actual active label slot must fit both Chinese characters, not just its ellipsis")
+                XCTAssertGreaterThanOrEqual(text.width, idealText.width - 0.25)
+                XCTAssertLessThanOrEqual(textSlot.maxX + ClipboardFilterBarLayout.islandContentSpacing, indicator.minX + 0.25)
+                XCTAssertEqual(indicator.width, ClipboardFilterBarLayout.menuIndicatorWidth, accuracy: 0.25)
+                if showsIcon {
+                    let icon = try XCTUnwrap(capture.frames["\(prefix).icon"])
+                    let unboundedIcon = try XCTUnwrap(capture.frames["test.filter.label.unboundedIcon"])
+                    XCTContext.runActivity(named: "Active \(group.rawValue) label budget") { activity in
+                        let attachment = XCTAttachment(string: "unboundedSystemSymbol=\(unboundedIcon.size) "
+                            + "boundedSymbol=\(icon.size) textSlot=\(textSlot.size) "
+                            + "text=\(text.size) idealText=\(idealText.size) surface=\(surface.size)")
+                        attachment.lifetime = .keepAlways
+                        activity.add(attachment)
+                    }
+                    XCTAssertEqual(icon.width, ClipboardFilterBarLayout.islandIconSize, accuracy: 0.25)
+                    XCTAssertEqual(icon.height, ClipboardFilterBarLayout.islandIconSize, accuracy: 0.25)
+                    XCTAssertLessThanOrEqual(icon.maxX + ClipboardFilterBarLayout.islandContentSpacing, textSlot.minX + 0.25)
+                }
+            }
+        }
+    }
+
+    func testHostedLongSourceLabelStillTruncatesWithinItsFixedVisualBudget() throws {
+        let capture = ClipboardFilterLabelGeometryCapture()
+        let title = String(repeating: "Synthetic long source ", count: 12)
+        let menuWidth = ClipboardFilterBarLayout.islandTextSize * 2
+            + ClipboardFilterBarLayout.islandIconSize + ClipboardFilterBarLayout.menuIndicatorWidth
+            + ClipboardFilterBarLayout.islandContentSpacing * 2
+            + ClipboardFilterBarLayout.islandHorizontalPadding * 2
+        let window = makeLabelWindow(group: .source, title: title, showsIcon: true,
+            menuWidth: menuWidth, capture: capture)
+        defer { window.contentView = nil; window.close() }
+        layout(try XCTUnwrap(window.contentView))
+        let text = try XCTUnwrap(capture.frames["clipboard.filter.source.label.title"])
+        let slot = try XCTUnwrap(capture.frames["clipboard.filter.source.label.titleSlot"])
+        let indicator = try XCTUnwrap(capture.frames["clipboard.filter.source.label.indicator"])
+        let surface = try XCTUnwrap(capture.frames["clipboard.filter.source.label.surface"])
+        let idealText = try XCTUnwrap(capture.frames["test.filter.label.ideal"])
+        XCTAssertEqual(surface.width, menuWidth, accuracy: 0.25)
+        XCTAssertLessThan(slot.width, idealText.width)
+        XCTAssertLessThanOrEqual(text.width, slot.width + 0.25)
+        XCTAssertGreaterThanOrEqual(text.minX, slot.minX - 0.25)
+        XCTAssertLessThanOrEqual(text.maxX, indicator.minX - ClipboardFilterBarLayout.islandContentSpacing + 0.25)
+    }
+
     func testEmptyRecoveryIsOffDuringLoadingFailureOrIndexingAndNeverAutomaticallyMutatesFilters() {
         let result = ClipboardSearchResultSet(query: "synthetic", records: [], state: .empty)
         func allowed(_ result: ClipboardSearchResultSet, query: String = "synthetic", loading: Bool = false,
@@ -282,6 +352,36 @@ final class ClipboardNativeFilterTests: XCTestCase {
         return panel
     }
 
+    private func makeLabelWindow(group: ClipboardFilterGroup, title: String, showsIcon: Bool,
+                                 menuWidth: CGFloat, capture: ClipboardFilterLabelGeometryCapture) -> NSWindow {
+        let root = VStack(alignment: .leading, spacing: 8) {
+            ClipboardFilterIslandButton(group: group, activeTitle: title, isExpanded: false,
+                hasActiveFilter: true, reservesClearSlot: false, showsIcon: showsIcon)
+                .frame(width: menuWidth, height: ClipboardFilterBarLayout.filterHitHeight)
+            Text(title)
+                .blocksFont(size: ClipboardFilterBarLayout.islandTextSize, weight: .semibold)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: true)
+                .blocksInteractionGeometryProbe("test.filter.label.ideal")
+            if showsIcon {
+                // The pre-fix symbol configuration is measured, not assigned
+                // an assumed width equal to its font's point size.
+                Image(systemName: group.systemImage)
+                    .font(.system(size: ClipboardFilterBarLayout.islandIconSize, weight: .semibold))
+                    .fixedSize(horizontal: true, vertical: true)
+                    .blocksInteractionGeometryProbe("test.filter.label.unboundedIcon")
+            }
+        }
+        .frame(width: 320, height: 100, alignment: .topLeading)
+        .environment(\.locale, Locale(identifier: "zh-Hans"))
+        .blocksInteractionGeometryProbeReporter { identifier, frame in capture.frames[identifier] = frame }
+        let window = NSWindow(contentRect: NSRect(x: -4_000, y: -4_000, width: 320, height: 100),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: root)
+        return window
+    }
+
     private func layout(_ host: NSView) {
         host.layoutSubtreeIfNeeded()
         RunLoop.main.run(until: Date().addingTimeInterval(0.03))
@@ -291,4 +391,9 @@ final class ClipboardNativeFilterTests: XCTestCase {
     private func nativeButtons(in view: NSView) -> [ClipboardNativeFilterMenu.FirstMousePopUpButton] {
         (view as? ClipboardNativeFilterMenu.FirstMousePopUpButton).map { [$0] } ?? view.subviews.flatMap { nativeButtons(in: $0) }
     }
+}
+
+@MainActor
+private final class ClipboardFilterLabelGeometryCapture {
+    var frames: [String: CGRect] = [:]
 }
