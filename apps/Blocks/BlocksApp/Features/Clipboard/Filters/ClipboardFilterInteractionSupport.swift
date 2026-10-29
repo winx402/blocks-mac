@@ -17,6 +17,119 @@ struct ClipboardFilterWindowActivationModifier: ViewModifier {
 }
 
 enum ClipboardFilterInteractionDiagnostics {
+    enum Stage: String, CaseIterable, Codable, Sendable {
+        case panelMouseDown = "panel-mouse-down"
+        case firstMouse = "first-mouse"
+        case mouseDown = "mouse-down"
+        case trackingBegan = "tracking-began"
+        case makeKeyBefore = "make-key-before"
+        case makeKeyAfter = "make-key-after"
+        case mouseDownReturned = "mouse-down-returned"
+        case nativeMenuOpen = "native-menu-open"
+        case nativeMenuClose = "native-menu-close"
+        case selectionDispatched = "selection-dispatched"
+        case panelBecameKey = "panel-became-key"
+        case panelResignedKey = "panel-resigned-key"
+    }
+
+    enum Group: String, Codable, Sendable {
+        case format, time, source
+
+        init(_ group: ClipboardFilterGroup) {
+            switch group {
+            case .format: self = .format
+            case .time: self = .time
+            case .source: self = .source
+            }
+        }
+    }
+
+    /// Retain only mouse correlation/coordinates, never the NSEvent or its payload.
+    struct MouseAttempt {
+        let eventNumber: Int
+        let windowNumber: Int?
+        let windowPoint: NSPoint
+
+        @MainActor
+        init?(_ event: NSEvent?) {
+            guard let event, event.type == .leftMouseDown else { return nil }
+            eventNumber = event.eventNumber
+            windowNumber = event.windowNumber == 0 ? nil : event.windowNumber
+            windowPoint = event.locationInWindow
+        }
+    }
+
+    /// Deliberately numeric/Boolean: no window/control/menu titles, AX values,
+    /// item identities, device identifiers, responder names or typed text.
+    struct Snapshot: Codable, Sendable {
+        let eventNumber: Int?
+        let eventWindow: Int?
+        let window: Int?
+        let key: Bool?
+        let visible: Bool?
+        let appActive: Bool?
+        let onActiveSpace: Bool?
+        let trackingProtected: Bool?
+        let focusGeneration: UInt64?
+        let screenCount: Int
+        let screenOrdinal: Int?
+        let screenFrame: NSRect?
+        let screenVisibleFrame: NSRect?
+        let windowScale: CGFloat?
+        let screenScale: CGFloat?
+        let windowFrame: NSRect?
+        let controlBounds: NSRect?
+        let controlVisibleRect: NSRect?
+        let eventWindowPoint: NSPoint?
+        let eventControlPoint: NSPoint?
+        let eventScreenPoint: NSPoint?
+    }
+
+    struct Event: Codable, Sendable {
+        let sequence: UInt64
+        let time: Date
+        let uptime: TimeInterval
+        let stage: Stage
+        let group: Group?
+        let snapshot: Snapshot
+    }
+
+    struct JournalSnapshot: Codable, Sendable {
+        let capacity: Int
+        let dropped: UInt64
+        let events: [Event]
+    }
+
+    /// A separate content-free journal; does not alter ClipboardInteractionTrace.
+    /// Process-memory only: export before restarting. No strings or NSEvents enter.
+    final class Journal: @unchecked Sendable {
+        private let lock = NSLock()
+        private let capacity = 128
+        private var events: [Event] = []
+        private var sequence: UInt64 = 0
+        private var dropped: UInt64 = 0
+
+        func record(_ stage: Stage, group: ClipboardFilterGroup? = nil, snapshot: Snapshot) {
+            lock.lock()
+            defer { lock.unlock() }
+            sequence &+= 1
+            if events.count == capacity {
+                events.removeFirst()
+                dropped &+= 1
+            }
+            events.append(Event(sequence: sequence, time: Date(), uptime: ProcessInfo.processInfo.systemUptime,
+                                stage: stage, group: group.map(Group.init), snapshot: snapshot))
+        }
+
+        func snapshot() -> JournalSnapshot {
+            lock.lock()
+            defer { lock.unlock() }
+            return JournalSnapshot(capacity: capacity, dropped: dropped, events: events)
+        }
+    }
+
+    static let journal = Journal()
+
     private static let logger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "app.blocks",
         category: "clipboard-filter"
@@ -27,15 +140,99 @@ enum ClipboardFilterInteractionDiagnostics {
         logger.debug("stage=pointer-observed group=\(group.rawValue, privacy: .public) window=\(windowNumber) key=\(isKeyWindow)")
     }
 
-    static func selection(group: ClipboardFilterGroup) {
+    static func selection(group: ClipboardFilterGroup, snapshot: Snapshot? = nil) {
         ClipboardInteractionTrace.shared.record(.filterSelection, group: group)
-        logger.info("stage=selection-dispatched group=\(group.rawValue, privacy: .public)")
+        if let snapshot {
+            record(.selectionDispatched, group: group, snapshot: snapshot)
+        } else {
+            logger.info("stage=selection-dispatched group=\(group.rawValue, privacy: .public)")
+        }
     }
 
-    static func nativeMenu(group: ClipboardFilterGroup, isOpen: Bool) {
+    static func nativeMenu(group: ClipboardFilterGroup, isOpen: Bool, snapshot: Snapshot? = nil) {
         ClipboardInteractionTrace.shared.record(isOpen ? .filterNativeMenuOpen : .filterNativeMenuClose, group: group)
-        let stage = isOpen ? "native-menu-open" : "native-menu-close"
-        logger.info("stage=\(stage, privacy: .public) group=\(group.rawValue, privacy: .public)")
+        let stage: Stage = isOpen ? .nativeMenuOpen : .nativeMenuClose
+        if let snapshot {
+            record(stage, group: group, snapshot: snapshot)
+        } else {
+            logger.info("stage=\(stage.rawValue, privacy: .public) group=\(group.rawValue, privacy: .public)")
+        }
+    }
+
+    @MainActor
+    static func snapshot(window: NSWindow?, control: NSView? = nil, mouse: MouseAttempt? = nil,
+                         trackingProtected: Bool? = nil, focusGeneration: UInt64? = nil) -> Snapshot {
+        let screens = NSScreen.screens
+        let screen = window?.screen
+        let hasMatchingEventWindow = window != nil && mouse?.windowNumber == window?.windowNumber
+        let eventWindowPoint = finitePoint(mouse?.windowPoint)
+        let eventControlPoint: NSPoint?
+        if hasMatchingEventWindow, let control, control.window === window, let eventWindowPoint {
+            eventControlPoint = finitePoint(control.convert(eventWindowPoint, from: nil))
+        } else {
+            eventControlPoint = nil
+        }
+        let eventScreenPoint: NSPoint?
+        if hasMatchingEventWindow, let window, let eventWindowPoint {
+            eventScreenPoint = finitePoint(window.convertPoint(toScreen: eventWindowPoint))
+        } else {
+            eventScreenPoint = nil
+        }
+        return Snapshot(eventNumber: mouse?.eventNumber, eventWindow: mouse?.windowNumber,
+            window: window?.windowNumber, key: window?.isKeyWindow, visible: window?.isVisible,
+            appActive: NSApp?.isActive, onActiveSpace: window?.isOnActiveSpace,
+            trackingProtected: trackingProtected, focusGeneration: focusGeneration,
+            screenCount: screens.count, screenOrdinal: screen.flatMap { screen in screens.firstIndex { $0 === screen } },
+            screenFrame: finiteRect(screen?.frame), screenVisibleFrame: finiteRect(screen?.visibleFrame),
+            windowScale: finiteScale(window?.backingScaleFactor), screenScale: finiteScale(screen?.backingScaleFactor),
+            windowFrame: finiteRect(window?.frame), controlBounds: finiteRect(control?.bounds), controlVisibleRect: finiteRect(control?.visibleRect),
+            eventWindowPoint: eventWindowPoint, eventControlPoint: eventControlPoint, eventScreenPoint: eventScreenPoint)
+    }
+
+    // Validate at capture, before AppKit conversion and before Codable sees a
+    // value. Invalid geometry stays nil; NaN/Inf never poison a whole export.
+    static func finitePoint(_ point: NSPoint?) -> NSPoint? {
+        guard let point, point.x.isFinite, point.y.isFinite else { return nil }
+        return point
+    }
+
+    static func finiteRect(_ rect: NSRect?) -> NSRect? {
+        guard let rect, rect.origin.x.isFinite, rect.origin.y.isFinite,
+              rect.size.width.isFinite, rect.size.height.isFinite,
+              rect.size.width >= 0, rect.size.height >= 0 else { return nil }
+        return rect
+    }
+
+    static func finiteScale(_ scale: CGFloat?) -> CGFloat? {
+        guard let scale, scale.isFinite, scale > 0 else { return nil }
+        return scale
+    }
+
+    static func record(_ stage: Stage, group: ClipboardFilterGroup? = nil, snapshot: Snapshot) {
+        journal.record(stage, group: group, snapshot: snapshot)
+        let line = formatted(stage, group: group, snapshot: snapshot)
+        logger.info("\(line, privacy: .public)")
+    }
+
+    static func formatted(_ stage: Stage, group: ClipboardFilterGroup? = nil, snapshot: Snapshot) -> String {
+        func value<T>(_ value: T?) -> String { value.map { String(describing: $0) } ?? "nil" }
+        func number(_ value: CGFloat) -> String { value.isFinite ? String(Double(value)) : "unknown" }
+        func scale(_ value: CGFloat?) -> String { value.map(number) ?? "nil" }
+        func point(_ value: NSPoint?) -> String {
+            value.map { "[\(number($0.x)),\(number($0.y))]" } ?? "nil"
+        }
+        func rect(_ value: NSRect?) -> String {
+            value.map { "[\(number($0.minX)),\(number($0.minY)),\(number($0.width)),\(number($0.height))]" } ?? "nil"
+        }
+        return "stage=\(stage.rawValue) group=\(group?.rawValue ?? "nil")"
+            + " eventNumber=\(value(snapshot.eventNumber)) eventWindow=\(value(snapshot.eventWindow)) window=\(value(snapshot.window))"
+            + " key=\(value(snapshot.key)) visible=\(value(snapshot.visible)) appActive=\(value(snapshot.appActive)) onActiveSpace=\(value(snapshot.onActiveSpace))"
+            + " trackingProtected=\(value(snapshot.trackingProtected)) focusGeneration=\(value(snapshot.focusGeneration))"
+            + " screens=\(snapshot.screenCount) screenOrdinal=\(value(snapshot.screenOrdinal))"
+            + " screenFrame=\(rect(snapshot.screenFrame)) screenVisibleFrame=\(rect(snapshot.screenVisibleFrame))"
+            + " windowScale=\(scale(snapshot.windowScale)) screenScale=\(scale(snapshot.screenScale)) windowFrame=\(rect(snapshot.windowFrame))"
+            + " controlBounds=\(rect(snapshot.controlBounds)) controlVisibleRect=\(rect(snapshot.controlVisibleRect))"
+            + " eventWindowPoint=\(point(snapshot.eventWindowPoint)) eventControlPoint=\(point(snapshot.eventControlPoint)) eventScreenPoint=\(point(snapshot.eventScreenPoint))"
     }
 }
 
@@ -47,8 +244,9 @@ struct ClipboardNativeFilterMenuEntry: Equatable {
     var usesSourceIcon = false
 }
 
-/// Protection starts before first-mouse activation and ends only after native
-/// tracking and its closing event unwind. This is not menu-open evidence;
+/// Protection starts when this control receives its mouse interaction and ends
+/// after native tracking and its closing event unwind. Window activation can
+/// happen before mouseDown. This is not menu-open evidence;
 /// only NSMenuDelegate callbacks emit native open/close diagnostics.
 @MainActor
 final class ClipboardFilterMenuTracking {
@@ -135,6 +333,9 @@ struct ClipboardNativeFilterMenu: NSViewRepresentable {
     func makeNSView(context: Context) -> FirstMousePopUpButton {
         let button = FirstMousePopUpButton(frame: .zero, pullsDown: false)
         button.isBordered = false
+        // SwiftUI supplies the entire visible surface. Suppress only AppKit's
+        // extra rectangle, not keyboard focus or first-mouse activation.
+        button.focusRingType = .none
         button.setContentHuggingPriority(.defaultLow, for: .horizontal)
         button.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         context.coordinator.attach(button)
@@ -160,8 +361,16 @@ struct ClipboardNativeFilterMenu: NSViewRepresentable {
     final class FirstMousePopUpButton: NSPopUpButton {
         var tracking: ClipboardFilterMenuTracking?
         var group: ClipboardFilterGroup = .format
+        private var diagnosticMouseAttempt: ClipboardFilterInteractionDiagnostics.MouseAttempt?
+        private var isHandlingMouseDown = false
 
-        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+            if let mouse = ClipboardFilterInteractionDiagnostics.MouseAttempt(event) {
+                diagnosticMouseAttempt = mouse
+                recordDiagnostic(.firstMouse)
+            }
+            return true
+        }
         override var needsPanelToBecomeKey: Bool { true }
         override var alignmentRectInsets: NSEdgeInsets {
             // SwiftUI supplies the entire visual surface. Native popup optical
@@ -176,16 +385,44 @@ struct ClipboardNativeFilterMenu: NSViewRepresentable {
 
         func prepareForMenuInteraction() {
             tracking?.begin()
+            recordDiagnostic(.trackingBegan)
+            recordDiagnostic(.makeKeyBefore)
             window?.makeKey()
+            recordDiagnostic(.makeKeyAfter)
+        }
+
+        func diagnosticSnapshot() -> ClipboardFilterInteractionDiagnostics.Snapshot {
+            ClipboardFilterInteractionDiagnostics.snapshot(window: window, control: self,
+                mouse: diagnosticMouseAttempt, trackingProtected: tracking?.isActive)
+        }
+
+        func beginNativeMenuDiagnostics() {
+            // Keyboard/AX opening must not inherit a prior first-mouse query.
+            if !isHandlingMouseDown { clearDiagnosticMouseAttempt() }
+        }
+
+        func clearDiagnosticMouseAttempt() {
+            diagnosticMouseAttempt = nil
+        }
+
+        private func recordDiagnostic(_ stage: ClipboardFilterInteractionDiagnostics.Stage) {
+            ClipboardFilterInteractionDiagnostics.record(stage, group: group, snapshot: diagnosticSnapshot())
         }
 
         override func mouseDown(with event: NSEvent) {
+            diagnosticMouseAttempt = ClipboardFilterInteractionDiagnostics.MouseAttempt(event)
+            isHandlingMouseDown = true
+            recordDiagnostic(.mouseDown)
             if let window {
                 ClipboardFilterInteractionDiagnostics.pointer(group: group,
                     windowNumber: window.windowNumber, isKeyWindow: window.isKeyWindow)
             }
             prepareForMenuInteraction()
-            defer { tracking?.mouseInteractionDidReturn() }
+            defer {
+                tracking?.mouseInteractionDidReturn()
+                recordDiagnostic(.mouseDownReturned)
+                isHandlingMouseDown = false
+            }
             super.mouseDown(with: event)
         }
     }
@@ -203,7 +440,10 @@ struct ClipboardNativeFilterMenu: NSViewRepresentable {
             // Finish the callback pair that began this session before adopting
             // a newer closure supplied by a SwiftUI update during tracking.
             configuration?.onTrackingChange(active)
-            if !active { applyPendingUpdates() }
+            if !active {
+                button?.clearDiagnosticMouseAttempt()
+                applyPendingUpdates()
+            }
         }, scheduleRelease: scheduleRelease)
 
         init(group: ClipboardFilterGroup,
@@ -268,19 +508,20 @@ struct ClipboardNativeFilterMenu: NSViewRepresentable {
             guard !isDetaching, sender === button, let configuration,
                   let id = sender.selectedItem?.representedObject as? String,
                   configuration.entries.contains(where: { $0.id == id }) else { return }
-            ClipboardFilterInteractionDiagnostics.selection(group: group)
+            ClipboardFilterInteractionDiagnostics.selection(group: group, snapshot: button?.diagnosticSnapshot())
             configuration.onSelection(id)
         }
 
         func menuWillOpen(_ menu: NSMenu) {
             guard menu === button?.menu else { return }
+            button?.beginNativeMenuDiagnostics()
             tracking.menuWillOpen()
-            ClipboardFilterInteractionDiagnostics.nativeMenu(group: group, isOpen: true)
+            ClipboardFilterInteractionDiagnostics.nativeMenu(group: group, isOpen: true, snapshot: button?.diagnosticSnapshot())
         }
 
         func menuDidClose(_ menu: NSMenu) {
             guard menu === button?.menu else { return }
-            ClipboardFilterInteractionDiagnostics.nativeMenu(group: group, isOpen: false)
+            ClipboardFilterInteractionDiagnostics.nativeMenu(group: group, isOpen: false, snapshot: button?.diagnosticSnapshot())
             tracking.menuDidClose()
         }
 
@@ -291,6 +532,7 @@ struct ClipboardNativeFilterMenu: NSViewRepresentable {
             button?.target = nil
             button?.action = nil
             button?.tracking = nil
+            button?.clearDiagnosticMouseAttempt()
             button = nil
             tracking.reset()
             configuration = nil

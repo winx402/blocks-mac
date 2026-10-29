@@ -2480,6 +2480,27 @@ final class AppAppearanceTests: XCTestCase {
             warnings: ["SENSITIVE_WARNING"]
         )
 
+        let privateFilterPresentation = "SENSITIVE_FILTER_WINDOW_MENU_AX_VALUE"
+        let filterWindow = NSWindow(contentRect: NSRect(x: -1600, y: -900, width: 240, height: 80),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        filterWindow.isReleasedWhenClosed = false
+        filterWindow.title = privateFilterPresentation
+        let filterButton = NSPopUpButton(frame: NSRect(x: 20, y: 30, width: 100, height: 34), pullsDown: false)
+        filterButton.addItem(withTitle: privateFilterPresentation)
+        filterButton.selectedItem?.representedObject = privateFilterPresentation
+        filterButton.menu?.title = privateFilterPresentation
+        filterButton.toolTip = privateFilterPresentation
+        filterButton.setAccessibilityLabel(privateFilterPresentation)
+        filterButton.setAccessibilityValue(privateFilterPresentation)
+        try XCTUnwrap(filterWindow.contentView).addSubview(filterButton)
+        defer { filterButton.removeFromSuperview(); filterWindow.close() }
+        let mousePoint = filterButton.convert(NSPoint(x: 6, y: 7), to: nil)
+        let mouseEvent = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseDown, location: mousePoint,
+            modifierFlags: [], timestamp: 0, windowNumber: filterWindow.windowNumber, context: nil,
+            eventNumber: 4321, clickCount: 1, pressure: 1))
+        let filterGeometry = ClipboardFilterInteractionDiagnostics.snapshot(window: filterWindow, control: filterButton,
+            mouse: ClipboardFilterInteractionDiagnostics.MouseAttempt(mouseEvent), trackingProtected: true, focusGeneration: 17)
+        ClipboardFilterInteractionDiagnostics.record(.nativeMenuOpen, group: .source, snapshot: filterGeometry)
         ClipboardInteractionTrace.shared.record(.filterPointer, group: .format, window: 123, key: false)
         let report = DiagnosticsExportService.makeReport(
             permissionSnapshot: snapshot,
@@ -2489,6 +2510,8 @@ final class AppAppearanceTests: XCTestCase {
         XCTAssertEqual(report.schemaVersion, 2)
         XCTAssertNotNil(report.clipboardInteractionTrace)
         XCTAssertLessThanOrEqual(report.clipboardInteractionTrace?.events.count ?? 0, 256)
+        XCTAssertNotNil(report.clipboardFilterDiagnostics)
+        XCTAssertLessThanOrEqual(report.clipboardFilterDiagnostics?.events.count ?? 0, 128)
         let directoryURL = try makeDiagnosticsExportFixtureDirectory()
         defer { try? FileManager.default.removeItem(at: directoryURL) }
         let destinationURL = directoryURL.appendingPathComponent("diagnostics.json")
@@ -2501,7 +2524,20 @@ final class AppAppearanceTests: XCTestCase {
         XCTAssertTrue(text.contains("translation_runtime"))
         XCTAssertTrue(text.contains("filterPointer"))
         XCTAssertTrue(text.contains("clipboardInteractionTrace"))
+        XCTAssertTrue(text.contains("clipboardFilterDiagnostics"))
+        XCTAssertFalse(text.contains("stage=native-menu-open"), "Export structured fields, never a raw formatter line")
         XCTAssertTrue(text.contains("\"warningCount\" : 1"))
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let exported = try decoder.decode(BlocksDiagnosticReport.self, from: data)
+        let exportedGeometry = try XCTUnwrap(exported.clipboardFilterDiagnostics?.events.last(where: {
+            $0.stage == .nativeMenuOpen && $0.snapshot.eventNumber == 4321
+        })?.snapshot)
+        XCTAssertEqual(exportedGeometry.windowFrame, filterGeometry.windowFrame)
+        XCTAssertEqual(exportedGeometry.controlBounds, filterGeometry.controlBounds)
+        XCTAssertEqual(exportedGeometry.eventControlPoint, NSPoint(x: 6, y: 7))
+        XCTAssertEqual(exportedGeometry.eventScreenPoint, filterWindow.convertPoint(toScreen: mousePoint))
+        XCTAssertEqual(exportedGeometry.windowScale, filterWindow.backingScaleFactor)
         for sensitiveValue in [
             "SENSITIVE_AUDIT_ID",
             "SENSITIVE_PROVIDER",
@@ -2510,10 +2546,21 @@ final class AppAppearanceTests: XCTestCase {
             "SENSITIVE_RESULT",
             "SENSITIVE_WARNING",
             "SENSITIVE_TEAM",
+            privateFilterPresentation,
             "/private/sensitive/path",
         ] {
             XCTAssertFalse(text.contains(sensitiveValue))
         }
+    }
+
+    func testDiagnosticReportDecodesOlderExportsWithoutFilterDiagnostics() throws {
+        let oldData = try JSONEncoder().encode(diagnosticsExportTestReport())
+        let oldObject = try XCTUnwrap(JSONSerialization.jsonObject(with: oldData) as? [String: Any])
+        XCTAssertNil(oldObject["clipboardFilterDiagnostics"])
+        let decoded = try JSONDecoder().decode(BlocksDiagnosticReport.self, from: oldData)
+        XCTAssertNil(decoded.clipboardFilterDiagnostics)
+        XCTAssertEqual(decoded.schemaVersion, 1)
+        XCTAssertEqual(decoded.application.bundleIdentifier, "app.blocks.tests")
     }
 
     func testDiagnosticExportCancellationBeforeCommitLeavesNewDestinationAbsentAndCleansTemporaryFile() async throws {
@@ -3572,7 +3619,8 @@ private func diagnosticsExportTestReport() -> BlocksDiagnosticReport {
         ),
         redactedAuditEvents: [],
         excludedData: [],
-        clipboardInteractionTrace: nil
+        clipboardInteractionTrace: nil,
+        clipboardFilterDiagnostics: nil
     )
 }
 

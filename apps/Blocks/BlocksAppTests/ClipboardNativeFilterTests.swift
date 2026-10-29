@@ -162,6 +162,8 @@ final class ClipboardNativeFilterTests: XCTestCase {
             }
             XCTAssertFalse(window.isKeyWindow)
             XCTAssertEqual(nativeButtons(in: host).count, 1)
+            XCTAssertEqual(defaultButton.focusRingType, .none)
+            XCTAssertFalse(defaultButton.refusesFirstResponder)
             XCTAssertEqual(defaultButton.alignmentRectInsets.left + defaultButton.alignmentRectInsets.right, 0)
             XCTAssertEqual(defaultButton.bounds.width, width, accuracy: 0.5)
             XCTAssertEqual(defaultButton.bounds.height, ClipboardFilterBarLayout.filterHitHeight, accuracy: 0.5)
@@ -170,6 +172,9 @@ final class ClipboardNativeFilterTests: XCTestCase {
             for x in [CGFloat(1), width / 2, width - 1] {
                 let pointInParent = defaultButton.convert(NSPoint(x: x, y: 17), to: defaultButton.superview)
                 XCTAssertTrue(defaultButton.hitTest(pointInParent) === defaultButton)
+                let pointInHost = defaultButton.convert(NSPoint(x: x, y: 17), to: host)
+                XCTAssertTrue(host.hitTest(host.convert(pointInHost, to: host.superview)) === defaultButton,
+                              "The real hosting root must deliver visible-control clicks to the native menu")
             }
             host.rootView = makeGroup(group: group, active: true)
                 .frame(width: width, height: 34)
@@ -177,9 +182,15 @@ final class ClipboardNativeFilterTests: XCTestCase {
             layout(host)
             let activeButton = try XCTUnwrap(nativeButtons(in: host).first)
             let activeFrame = activeButton.convert(activeButton.bounds, to: host)
+            XCTAssertEqual(activeButton.focusRingType, .none)
+            XCTAssertFalse(activeButton.refusesFirstResponder)
             XCTAssertEqual(activeButton.bounds.width + ClipboardFilterBarLayout.clearSlotWidth, width, accuracy: 0.5)
             XCTAssertEqual(activeFrame.minX, 0, accuracy: 0.5)
             XCTAssertEqual(activeFrame.maxX, width - ClipboardFilterBarLayout.clearSlotWidth, accuracy: 0.5)
+            for x in [CGFloat(1), activeFrame.width / 2, activeFrame.width - 1] {
+                let pointInHost = activeButton.convert(NSPoint(x: x, y: 17), to: host)
+                XCTAssertTrue(host.hitTest(host.convert(pointInHost, to: host.superview)) === activeButton)
+            }
             for offset in [CGFloat(1), ClipboardFilterBarLayout.clearSlotWidth / 2, ClipboardFilterBarLayout.clearSlotWidth - 1] {
                 let clearPoint = NSPoint(x: width - ClipboardFilterBarLayout.clearSlotWidth + offset, y: activeFrame.midY)
                 let hit = host.hitTest(host.convert(clearPoint, to: host.superview))
@@ -327,6 +338,177 @@ final class ClipboardNativeFilterTests: XCTestCase {
         XCTAssertFalse(presenter.isVisible)
     }
 
+    func testFilterDiagnosticFormatterExcludesPrivatePresentationAndUsesAppKitConversions() throws {
+        let privatePresentation = "PRIVATE_WINDOW_FILTER_SOURCE_VALUE_NOT_FOR_LOGS"
+        let window = makePanel(width: 200)
+        window.title = privatePresentation
+        let button = ClipboardNativeFilterMenu.FirstMousePopUpButton(
+            frame: NSRect(x: 20, y: 0, width: 100, height: 34), pullsDown: false)
+        button.addItem(withTitle: privatePresentation)
+        button.selectedItem?.representedObject = privatePresentation
+        button.menu?.title = privatePresentation
+        button.toolTip = privatePresentation
+        button.setAccessibilityLabel(privatePresentation)
+        button.setAccessibilityValue(privatePresentation)
+        try XCTUnwrap(window.contentView).addSubview(button)
+        defer { button.removeFromSuperview(); window.close() }
+
+        let controlPoint = NSPoint(x: 6, y: 7)
+        let windowPoint = button.convert(controlPoint, to: nil)
+        let event = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseDown, location: windowPoint,
+            modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil,
+            eventNumber: 321, clickCount: 1, pressure: 1))
+        let mouse = try XCTUnwrap(ClipboardFilterInteractionDiagnostics.MouseAttempt(event))
+        let snapshot = ClipboardFilterInteractionDiagnostics.snapshot(window: window, control: button,
+            mouse: mouse, trackingProtected: true, focusGeneration: 43)
+
+        XCTAssertEqual(snapshot.eventNumber, 321)
+        XCTAssertEqual(snapshot.eventWindow, window.windowNumber)
+        XCTAssertEqual(snapshot.eventWindowPoint, windowPoint)
+        XCTAssertEqual(snapshot.eventControlPoint, controlPoint)
+        XCTAssertEqual(snapshot.eventScreenPoint, window.convertPoint(toScreen: windowPoint))
+        XCTAssertEqual(snapshot.windowFrame, window.frame)
+        XCTAssertEqual(snapshot.controlBounds, button.bounds)
+        XCTAssertEqual(snapshot.controlVisibleRect, button.visibleRect)
+        XCTAssertEqual(snapshot.windowScale, window.backingScaleFactor)
+        for stage in ClipboardFilterInteractionDiagnostics.Stage.allCases {
+            let line = ClipboardFilterInteractionDiagnostics.formatted(stage, group: .source, snapshot: snapshot)
+            XCTAssertTrue(line.contains("stage=\(stage.rawValue) group=source"))
+            XCTAssertTrue(line.contains("eventNumber=321"))
+            XCTAssertTrue(line.contains("trackingProtected=true focusGeneration=43"))
+            XCTAssertFalse(line.contains(privatePresentation))
+            for forbiddenField in ["title=", "selectedID=", "bundle=", "uuid=", "keyCode=", "characters="] {
+                XCTAssertFalse(line.contains(forbiddenField))
+            }
+        }
+    }
+
+    func testFilterDiagnosticsReportMissingWindowAndRejectKeyboardPayload() throws {
+        let privateCharacters = "PRIVATE_TYPED_TEXT_NOT_FOR_LOGS"
+        let keyEvent = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero,
+            modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil,
+            characters: privateCharacters, charactersIgnoringModifiers: privateCharacters,
+            isARepeat: false, keyCode: 0))
+        XCTAssertNil(ClipboardFilterInteractionDiagnostics.MouseAttempt(keyEvent))
+        XCTAssertNil(ClipboardFilterInteractionDiagnostics.MouseAttempt(nil))
+        let snapshot = ClipboardFilterInteractionDiagnostics.snapshot(window: nil)
+        let line = ClipboardFilterInteractionDiagnostics.formatted(.nativeMenuOpen, snapshot: snapshot)
+        for field in ["group=nil", "eventNumber=nil", "eventWindow=nil", "window=nil", "key=nil",
+                      "visible=nil", "onActiveSpace=nil", "trackingProtected=nil", "focusGeneration=nil",
+                      "screenOrdinal=nil", "screenFrame=nil", "screenVisibleFrame=nil", "windowScale=nil",
+                      "screenScale=nil", "windowFrame=nil", "controlBounds=nil", "controlVisibleRect=nil",
+                      "eventWindowPoint=nil", "eventControlPoint=nil", "eventScreenPoint=nil"] {
+            XCTAssertTrue(line.contains(field), "Missing data must remain explicit: \(field)")
+        }
+        XCTAssertFalse(line.contains(privateCharacters))
+    }
+
+    func testKeyboardMenuDiagnosticsDoNotReuseAnEarlierFirstMouseAttempt() throws {
+        let window = makePanel(width: 200)
+        let button = ClipboardNativeFilterMenu.FirstMousePopUpButton(
+            frame: NSRect(x: 0, y: 0, width: 100, height: 34), pullsDown: false)
+        try XCTUnwrap(window.contentView).addSubview(button)
+        let coordinator = ClipboardNativeFilterMenu.Coordinator(group: .format)
+        coordinator.attach(button)
+        coordinator.update(configuration())
+        defer { coordinator.detach(); button.removeFromSuperview(); window.close() }
+        let event = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseDown, location: NSPoint(x: 6, y: 7),
+            modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil,
+            eventNumber: 654, clickCount: 1, pressure: 1))
+        XCTAssertTrue(button.acceptsFirstMouse(for: event))
+        XCTAssertEqual(button.diagnosticSnapshot().eventNumber, 654)
+        XCTAssertFalse(coordinator.tracking.isActive, "Logging first mouse must not begin protection or activate the panel")
+        XCTAssertFalse(window.isKeyWindow)
+
+        // A delegate callback outside mouseDown models keyboard/AX opening,
+        // not a claim that AppKit displayed a menu or that an external screen works.
+        coordinator.menuWillOpen(try XCTUnwrap(button.menu))
+        XCTAssertNil(button.diagnosticSnapshot().eventNumber)
+        XCTAssertTrue(coordinator.tracking.isMenuOpen)
+    }
+
+    func testFilterDiagnosticCoordinatesStayNilWhenTheEventBelongsToAnotherWindow() throws {
+        let window = makePanel(width: 200)
+        let other = makePanel(width: 200)
+        let button = ClipboardNativeFilterMenu.FirstMousePopUpButton(
+            frame: NSRect(x: 0, y: 0, width: 100, height: 34), pullsDown: false)
+        try XCTUnwrap(window.contentView).addSubview(button)
+        defer { button.removeFromSuperview(); window.close(); other.close() }
+        let point = NSPoint(x: 6, y: 7)
+        let event = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseDown, location: point,
+            modifierFlags: [], timestamp: 0, windowNumber: other.windowNumber, context: nil,
+            eventNumber: 987, clickCount: 1, pressure: 1))
+        let snapshot = ClipboardFilterInteractionDiagnostics.snapshot(window: window, control: button,
+            mouse: ClipboardFilterInteractionDiagnostics.MouseAttempt(event))
+        XCTAssertEqual(snapshot.eventWindow, other.windowNumber)
+        XCTAssertEqual(snapshot.eventWindowPoint, point)
+        XCTAssertNil(snapshot.eventControlPoint)
+        XCTAssertNil(snapshot.eventScreenPoint)
+    }
+
+    func testFilterDiagnosticJournalIsBoundedOrderedAndCodableWithoutChangingLegacyTrace() throws {
+        let journal = ClipboardFilterInteractionDiagnostics.Journal()
+        let geometry = ClipboardFilterInteractionDiagnostics.snapshot(window: nil)
+        let legacySequence = ClipboardInteractionTrace.shared.snapshot().events.last?.sequence
+        for _ in 0..<300 {
+            journal.record(.mouseDown, group: .format, snapshot: geometry)
+        }
+        let snapshot = journal.snapshot()
+        XCTAssertEqual(snapshot.capacity, 128)
+        XCTAssertEqual(snapshot.events.count, 128)
+        XCTAssertEqual(snapshot.dropped, 172)
+        XCTAssertEqual(snapshot.events.map(\.sequence), Array(UInt64(173)...UInt64(300)))
+        XCTAssertTrue(snapshot.events.allSatisfy { $0.stage == .mouseDown && $0.group == .format })
+        XCTAssertEqual(ClipboardInteractionTrace.shared.snapshot().events.last?.sequence, legacySequence)
+
+        let decoded = try JSONDecoder().decode(ClipboardFilterInteractionDiagnostics.JournalSnapshot.self,
+            from: JSONEncoder().encode(snapshot))
+        XCTAssertEqual(decoded.capacity, 128)
+        XCTAssertEqual(decoded.dropped, 172)
+        XCTAssertEqual(decoded.events.map(\.sequence), snapshot.events.map(\.sequence))
+        XCTAssertTrue(decoded.events.allSatisfy { $0.snapshot.window == nil && $0.snapshot.eventNumber == nil })
+        journal.record(.nativeMenuClose, snapshot: geometry)
+        XCTAssertEqual(snapshot.events.last?.sequence, 300, "An exported value snapshot must not change with later events")
+        XCTAssertEqual(journal.snapshot().dropped, 173)
+    }
+
+    func testFilterDiagnosticJournalSerializesConcurrentWritersUnderItsBound() {
+        let journal = ClipboardFilterInteractionDiagnostics.Journal()
+        let geometry = ClipboardFilterInteractionDiagnostics.snapshot(window: nil)
+        DispatchQueue.concurrentPerform(iterations: 300) { _ in
+            journal.record(.panelMouseDown, snapshot: geometry)
+        }
+        let snapshot = journal.snapshot()
+        XCTAssertEqual(snapshot.events.count, 128)
+        XCTAssertEqual(snapshot.dropped, 172)
+        XCTAssertEqual(snapshot.events.map(\.sequence), Array(UInt64(173)...UInt64(300)))
+    }
+
+    func testFilterDiagnosticCaptureDropsInvalidGeometryBeforeJSONEncoding() throws {
+        XCTAssertNil(ClipboardFilterInteractionDiagnostics.finitePoint(NSPoint(x: CGFloat.nan, y: 0)))
+        XCTAssertNil(ClipboardFilterInteractionDiagnostics.finitePoint(NSPoint(x: 0, y: CGFloat.infinity)))
+        XCTAssertNil(ClipboardFilterInteractionDiagnostics.finiteRect(NSRect(x: -CGFloat.infinity, y: 0, width: 1, height: 1)))
+        XCTAssertNil(ClipboardFilterInteractionDiagnostics.finiteRect(NSRect(x: 0, y: 0, width: CGFloat.nan, height: 1)))
+        XCTAssertNil(ClipboardFilterInteractionDiagnostics.finiteRect(NSRect(x: 0, y: 0, width: -1, height: 1)))
+        let invalidScales: [CGFloat] = [.nan, .infinity, -.infinity, 0, -1]
+        for scale in invalidScales {
+            XCTAssertNil(ClipboardFilterInteractionDiagnostics.finiteScale(scale))
+        }
+        let externalOrigin = NSPoint(x: -1920, y: -1080)
+        let externalFrame = NSRect(origin: externalOrigin, size: NSSize(width: 1920, height: 1080))
+        XCTAssertEqual(ClipboardFilterInteractionDiagnostics.finitePoint(externalOrigin), externalOrigin)
+        XCTAssertEqual(ClipboardFilterInteractionDiagnostics.finiteRect(externalFrame), externalFrame)
+        XCTAssertEqual(ClipboardFilterInteractionDiagnostics.finiteScale(2), 2)
+
+        let view = ClipboardNonFiniteDiagnosticView(frame: NSRect(x: 0, y: 0, width: 100, height: 34))
+        let snapshot = ClipboardFilterInteractionDiagnostics.snapshot(window: nil, control: view)
+        XCTAssertNil(snapshot.controlVisibleRect)
+        XCTAssertEqual(snapshot.controlBounds, view.bounds)
+        let journal = ClipboardFilterInteractionDiagnostics.Journal()
+        journal.record(.mouseDown, snapshot: snapshot)
+        XCTAssertNoThrow(try JSONEncoder().encode(journal.snapshot()))
+    }
+
     private func configuration(
         entries: [ClipboardNativeFilterMenuEntry] = [.init(id: "all", title: "All"), .init(id: "synthetic", title: "Synthetic value")],
         selectedID: String = "all", value: String = "All",
@@ -396,4 +578,11 @@ final class ClipboardNativeFilterTests: XCTestCase {
 @MainActor
 private final class ClipboardFilterLabelGeometryCapture {
     var frames: [String: CGRect] = [:]
+}
+
+@MainActor
+private final class ClipboardNonFiniteDiagnosticView: NSView {
+    override var visibleRect: NSRect {
+        NSRect(x: CGFloat.infinity, y: 0, width: 100, height: 34)
+    }
 }

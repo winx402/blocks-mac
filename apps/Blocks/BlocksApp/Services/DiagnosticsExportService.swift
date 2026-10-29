@@ -119,6 +119,7 @@ struct BlocksDiagnosticReport: Codable, Sendable {
     let redactedAuditEvents: [RedactedAuditEvent]
     let excludedData: [String]
     let clipboardInteractionTrace: ClipboardInteractionTrace.Snapshot?
+    let clipboardFilterDiagnostics: ClipboardFilterInteractionDiagnostics.JournalSnapshot?
 }
 
 enum DiagnosticsExportService {
@@ -182,7 +183,8 @@ enum DiagnosticsExportService {
                 "team_identifier",
                 "raw_application_logs",
             ],
-            clipboardInteractionTrace: ClipboardInteractionTrace.shared.snapshot()
+            clipboardInteractionTrace: ClipboardInteractionTrace.shared.snapshot(),
+            clipboardFilterDiagnostics: ClipboardFilterInteractionDiagnostics.journal.snapshot()
         )
     }
 

@@ -1064,6 +1064,9 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
             return
         }
         focusCoordinator.windowResignedKey(.parent, window: window)
+        ClipboardFilterInteractionDiagnostics.record(.panelResignedKey,
+            snapshot: ClipboardFilterInteractionDiagnostics.snapshot(window: window,
+                trackingProtected: isFilterMenuInteractionProtected, focusGeneration: focusCoordinator.generation))
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
@@ -1071,6 +1074,9 @@ final class ClipboardHistoryPanelPresenter: NSObject, NSWindowDelegate {
             return
         }
         focusCoordinator.windowBecameKey(.parent, window: window)
+        ClipboardFilterInteractionDiagnostics.record(.panelBecameKey,
+            snapshot: ClipboardFilterInteractionDiagnostics.snapshot(window: window,
+                trackingProtected: isFilterMenuInteractionProtected, focusGeneration: focusCoordinator.generation))
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -1182,6 +1188,13 @@ private final class ClipboardHistoryPanel: NSPanel {
     }
 
     override func sendEvent(_ event: NSEvent) {
+        if event.type == .leftMouseDown {
+            // Observe before this NSWindow super.sendEvent dispatch, without an extra hitTest.
+            ClipboardFilterInteractionDiagnostics.record(.panelMouseDown,
+                snapshot: ClipboardFilterInteractionDiagnostics.snapshot(window: self,
+                    mouse: ClipboardFilterInteractionDiagnostics.MouseAttempt(event),
+                    trackingProtected: isFilterMenuInteractionProtected?()))
+        }
         if event.type == .flagsChanged {
             onCommandModifierChanged?(Self.commandModifierPressed(in: event))
         }

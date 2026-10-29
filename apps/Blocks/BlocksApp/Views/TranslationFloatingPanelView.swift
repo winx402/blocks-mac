@@ -295,7 +295,6 @@ struct TranslationFloatingPanelView: View {
 
     @StateObject private var preparationController = AppleTranslationPreparationController()
     @StateObject private var speechController = TranslationSpeechController()
-    @State private var sourceEditorFocused = false
     @State private var sourceEditorHasDisplayedText = false
     @State private var feedbackHeight: CGFloat = 0
 
@@ -621,9 +620,6 @@ struct TranslationFloatingPanelView: View {
                     onTextChange: {
                         model.updateSourceTextFromUser($0)
                     },
-                    onFocusChange: {
-                        sourceEditorFocused = $0
-                    },
                     onDisplayedTextChange: {
                         sourceEditorHasDisplayedText = $0
                     },
@@ -649,10 +645,6 @@ struct TranslationFloatingPanelView: View {
                         .allowsHitTesting(false)
                 }
             }
-            .blocksInteractionChrome(
-                sourceEditorFocused ? .focused : .idle,
-                cornerRadius: BlocksVisualTokens.CornerRadius.control
-            )
         }
     }
 

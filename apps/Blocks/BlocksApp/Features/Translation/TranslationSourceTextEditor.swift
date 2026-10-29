@@ -40,6 +40,7 @@ struct TranslationSourceTextEditor:
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
         textView.drawsBackground = false
+        textView.focusRingType = .none
         textView.font = NSFont.systemFont(
             ofSize: 14
         )
@@ -65,6 +66,7 @@ struct TranslationSourceTextEditor:
         let scrollView = NSScrollView()
         scrollView.drawsBackground = false
         scrollView.borderType = .noBorder
+        scrollView.focusRingType = .none
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.documentView = textView

@@ -6,6 +6,44 @@ import XCTest
 
 @MainActor
 final class TranslationPanelInteractionTests: XCTestCase {
+    func testSourceEditorRemainsTransparentAndEditableWithoutNativeFocusDecoration() throws {
+        let host = NSHostingView(rootView: TranslationSourceTextEditor(
+            text: "Synthetic editor text", focusRequest: 0, onTextChange: { _ in }
+        ).frame(width: 400, height: 120))
+        let window = NSPanel(contentRect: NSRect(x: -4000, y: -4000, width: 400, height: 120),
+                             styleMask: [.titled, .nonactivatingPanel], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        defer { window.contentView = nil; window.close() }
+        host.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.03))
+        host.layoutSubtreeIfNeeded()
+        func descendants(_ view: NSView) -> [NSView] {
+            [view] + view.subviews.flatMap(descendants)
+        }
+        let scroll = try XCTUnwrap(descendants(host).compactMap { $0 as? NSScrollView }
+            .first { $0.documentView is TranslationSourceNSTextView })
+        let editor = try XCTUnwrap(scroll.documentView as? TranslationSourceNSTextView)
+        XCTAssertFalse(scroll.drawsBackground)
+        XCTAssertEqual(scroll.borderType, .noBorder)
+        XCTAssertEqual(scroll.focusRingType, .none)
+        XCTAssertFalse(editor.drawsBackground)
+        XCTAssertEqual(editor.focusRingType, .none)
+        XCTAssertTrue(editor.isEditable)
+        XCTAssertTrue(editor.isSelectable)
+        XCTAssertTrue(editor.allowsUndo)
+        XCTAssertTrue(window.makeFirstResponder(editor))
+        XCTAssertTrue(window.firstResponder === editor)
+        editor.setSelectedRange(NSRange(location: 0, length: 9))
+        XCTAssertEqual(editor.selectedRange(), NSRange(location: 0, length: 9))
+        editor.insertText("中文", replacementRange: editor.selectedRange())
+        XCTAssertEqual(editor.string, "中文 editor text")
+        XCTAssertTrue(window.makeFirstResponder(nil))
+        XCTAssertEqual(editor.string, "中文 editor text")
+        XCTAssertFalse(editor.drawsBackground)
+        XCTAssertEqual(editor.focusRingType, .none)
+    }
+
     func testHelperSetupUsesItsDedicatedPanelAction() {
         var translationSettingsCount = 0
         var helperSetupCount = 0
