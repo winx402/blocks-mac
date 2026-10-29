@@ -2563,6 +2563,114 @@ final class AppAppearanceTests: XCTestCase {
         XCTAssertEqual(decoded.application.bundleIdentifier, "app.blocks.tests")
     }
 
+    func testDiagnosticExportUsesPrivateReplacementDirectoryAndCleansItAfterCommit() async throws {
+        let fileManager = FileManager.default
+        let directoryURL = try makeDiagnosticsExportFixtureDirectory()
+        defer { try? fileManager.removeItem(at: directoryURL) }
+
+        for replacesExistingFile in [false, true] {
+            let destinationURL = directoryURL.appendingPathComponent(
+                replacesExistingFile ? "existing-diagnostics.json" : "new-diagnostics.json"
+            )
+            let originalData = Data("previous export".utf8)
+            if replacesExistingFile {
+                try originalData.write(to: destinationURL, options: .atomic)
+                try fileManager.setAttributes([.posixPermissions: 0o644], ofItemAtPath: destinationURL.path)
+            }
+            let gate = DiagnosticsExportCommitGate()
+            let exportTask = Task {
+                try await DiagnosticsExportService.writeReport(
+                    diagnosticsExportTestReport(),
+                    to: destinationURL,
+                    temporaryDirectoryCreated: { gate.recordTemporaryDirectory($0) },
+                    beforeCommit: { gate.pauseBeforeCommit() }
+                )
+            }
+            defer { exportTask.cancel(); gate.resume() }
+
+            let reachedCommit = await Task.detached(priority: .utility) {
+                gate.waitUntilPaused(timeout: 2)
+            }.value
+            XCTAssertTrue(reachedCommit)
+            let temporaryDirectoryURL = try XCTUnwrap(gate.temporaryDirectoryURL)
+            let temporaryFiles = try fileManager.contentsOfDirectory(
+                at: temporaryDirectoryURL,
+                includingPropertiesForKeys: nil
+            )
+            XCTAssertEqual(temporaryFiles.count, 1)
+            let temporaryFileURL = try XCTUnwrap(temporaryFiles.first)
+            let temporaryAttributes = try fileManager.attributesOfItem(atPath: temporaryFileURL.path)
+            XCTAssertEqual((temporaryAttributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+            XCTAssertNotEqual(
+                temporaryDirectoryURL.deletingLastPathComponent().resolvingSymlinksInPath(),
+                directoryURL.resolvingSymlinksInPath(),
+                "An NSSavePanel file grant does not authorize sibling temporary files or directories"
+            )
+            let destinationVolume = try directoryURL.resourceValues(forKeys: [.volumeIdentifierKey])
+            let temporaryVolume = try temporaryDirectoryURL.resourceValues(forKeys: [.volumeIdentifierKey])
+            XCTAssertEqual(
+                try XCTUnwrap(destinationVolume.volumeIdentifier as? NSObject),
+                try XCTUnwrap(temporaryVolume.volumeIdentifier as? NSObject)
+            )
+            if replacesExistingFile {
+                XCTAssertEqual(try Data(contentsOf: destinationURL), originalData)
+            } else {
+                XCTAssertFalse(fileManager.fileExists(atPath: destinationURL.path))
+            }
+            // Whole-directory cleanup must remove more than just the report file.
+            let cleanupMarker = temporaryDirectoryURL.appendingPathComponent("cleanup-marker")
+            try Data("fixture".utf8).write(to: cleanupMarker)
+            gate.resume()
+            try await exportTask.value
+
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let report = try decoder.decode(BlocksDiagnosticReport.self, from: Data(contentsOf: destinationURL))
+            XCTAssertEqual(report.application.bundleIdentifier, "app.blocks.tests")
+            let destinationAttributes = try fileManager.attributesOfItem(atPath: destinationURL.path)
+            XCTAssertEqual((destinationAttributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+            XCTAssertFalse(fileManager.fileExists(atPath: temporaryDirectoryURL.path))
+        }
+    }
+
+    func testDiagnosticExportCommitFailurePreservesNonFileDestinationAndCleansReplacementDirectory() async throws {
+        let fileManager = FileManager.default
+        let directoryURL = try makeDiagnosticsExportFixtureDirectory()
+        defer { try? fileManager.removeItem(at: directoryURL) }
+        let destinationURL = directoryURL.appendingPathComponent("occupied-destination")
+        try fileManager.createDirectory(at: destinationURL, withIntermediateDirectories: false)
+        let markerURL = destinationURL.appendingPathComponent("existing-marker")
+        let originalData = Data("existing directory contents".utf8)
+        try originalData.write(to: markerURL)
+        let gate = DiagnosticsExportCommitGate()
+        let exportTask = Task {
+            try await DiagnosticsExportService.writeReport(
+                diagnosticsExportTestReport(),
+                to: destinationURL,
+                temporaryDirectoryCreated: { gate.recordTemporaryDirectory($0) },
+                beforeCommit: { gate.pauseBeforeCommit() }
+            )
+        }
+        defer { exportTask.cancel(); gate.resume() }
+
+        let reachedCommit = await Task.detached(priority: .utility) {
+            gate.waitUntilPaused(timeout: 2)
+        }.value
+        XCTAssertTrue(reachedCommit)
+        let temporaryDirectoryURL = try XCTUnwrap(gate.temporaryDirectoryURL)
+        XCTAssertTrue(fileManager.fileExists(atPath: temporaryDirectoryURL.path))
+        gate.resume()
+
+        do {
+            try await exportTask.value
+            XCTFail("A non-file destination must not be replaced")
+        } catch is POSIXError {
+            // RENAME_EXCL must fail closed when the path is already occupied.
+        }
+        XCTAssertEqual(try Data(contentsOf: markerURL), originalData)
+        XCTAssertFalse(fileManager.fileExists(atPath: temporaryDirectoryURL.path))
+    }
+
     func testDiagnosticExportCancellationBeforeCommitLeavesNewDestinationAbsentAndCleansTemporaryFile() async throws {
         let directoryURL = try makeDiagnosticsExportFixtureDirectory()
         defer { try? FileManager.default.removeItem(at: directoryURL) }
@@ -2572,14 +2680,18 @@ final class AppAppearanceTests: XCTestCase {
             try await DiagnosticsExportService.writeReport(
                 diagnosticsExportTestReport(),
                 to: destinationURL,
+                temporaryDirectoryCreated: { gate.recordTemporaryDirectory($0) },
                 beforeCommit: { gate.pauseBeforeCommit() }
             )
         }
+        defer { exportTask.cancel(); gate.resume() }
 
         let reachedCommit = await Task.detached(priority: .utility) {
             gate.waitUntilPaused(timeout: 2)
         }.value
         XCTAssertTrue(reachedCommit)
+        let temporaryDirectoryURL = try XCTUnwrap(gate.temporaryDirectoryURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: temporaryDirectoryURL.path))
         exportTask.cancel()
         gate.resume()
 
@@ -2591,7 +2703,7 @@ final class AppAppearanceTests: XCTestCase {
         }
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: destinationURL.path))
-        XCTAssertTrue(diagnosticsExportTemporaryFiles(in: directoryURL).isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: temporaryDirectoryURL.path))
     }
 
     func testDiagnosticExportCancellationBeforeCommitPreservesExistingDestination() async throws {
@@ -2605,14 +2717,18 @@ final class AppAppearanceTests: XCTestCase {
             try await DiagnosticsExportService.writeReport(
                 diagnosticsExportTestReport(),
                 to: destinationURL,
+                temporaryDirectoryCreated: { gate.recordTemporaryDirectory($0) },
                 beforeCommit: { gate.pauseBeforeCommit() }
             )
         }
+        defer { exportTask.cancel(); gate.resume() }
 
         let reachedCommit = await Task.detached(priority: .utility) {
             gate.waitUntilPaused(timeout: 2)
         }.value
         XCTAssertTrue(reachedCommit)
+        let temporaryDirectoryURL = try XCTUnwrap(gate.temporaryDirectoryURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: temporaryDirectoryURL.path))
         exportTask.cancel()
         gate.resume()
 
@@ -2624,7 +2740,7 @@ final class AppAppearanceTests: XCTestCase {
         }
 
         XCTAssertEqual(try Data(contentsOf: destinationURL), originalData)
-        XCTAssertTrue(diagnosticsExportTemporaryFiles(in: directoryURL).isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: temporaryDirectoryURL.path))
     }
 
     func testDiagnosticExportDoesNotOverwriteDestinationCreatedAfterSaveConfirmation() async throws {
@@ -2637,14 +2753,18 @@ final class AppAppearanceTests: XCTestCase {
             try await DiagnosticsExportService.writeReport(
                 diagnosticsExportTestReport(),
                 to: destinationURL,
+                temporaryDirectoryCreated: { gate.recordTemporaryDirectory($0) },
                 beforeCommit: { gate.pauseBeforeCommit() }
             )
         }
+        defer { exportTask.cancel(); gate.resume() }
 
         let reachedCommit = await Task.detached(priority: .utility) {
             gate.waitUntilPaused(timeout: 2)
         }.value
         XCTAssertTrue(reachedCommit)
+        let temporaryDirectoryURL = try XCTUnwrap(gate.temporaryDirectoryURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: temporaryDirectoryURL.path))
         try laterWriterData.write(to: destinationURL, options: .atomic)
         gate.resume()
 
@@ -2655,7 +2775,7 @@ final class AppAppearanceTests: XCTestCase {
             XCTAssertEqual(error, .destinationChanged)
         }
         XCTAssertEqual(try Data(contentsOf: destinationURL), laterWriterData)
-        XCTAssertTrue(diagnosticsExportTemporaryFiles(in: directoryURL).isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: temporaryDirectoryURL.path))
     }
 
     func testDiagnosticExportDoesNotOverwriteExistingDestinationReplacedBeforeCommit() async throws {
@@ -2669,14 +2789,18 @@ final class AppAppearanceTests: XCTestCase {
             try await DiagnosticsExportService.writeReport(
                 diagnosticsExportTestReport(),
                 to: destinationURL,
+                temporaryDirectoryCreated: { gate.recordTemporaryDirectory($0) },
                 beforeCommit: { gate.pauseBeforeCommit() }
             )
         }
+        defer { exportTask.cancel(); gate.resume() }
 
         let reachedCommit = await Task.detached(priority: .utility) {
             gate.waitUntilPaused(timeout: 2)
         }.value
         XCTAssertTrue(reachedCommit)
+        let temporaryDirectoryURL = try XCTUnwrap(gate.temporaryDirectoryURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: temporaryDirectoryURL.path))
         try laterWriterData.write(to: destinationURL, options: .atomic)
         gate.resume()
 
@@ -2687,7 +2811,7 @@ final class AppAppearanceTests: XCTestCase {
             XCTAssertEqual(error, .destinationChanged)
         }
         XCTAssertEqual(try Data(contentsOf: destinationURL), laterWriterData)
-        XCTAssertTrue(diagnosticsExportTemporaryFiles(in: directoryURL).isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: temporaryDirectoryURL.path))
     }
 
     func testPermissionAssistRestoresCapturedSettingsWindowForEveryTerminalPath() {
@@ -3634,20 +3758,23 @@ private func makeDiagnosticsExportFixtureDirectory() throws -> URL {
     return directoryURL
 }
 
-private func diagnosticsExportTemporaryFiles(in directoryURL: URL) -> [URL] {
-    (try? FileManager.default.contentsOfDirectory(
-        at: directoryURL,
-        includingPropertiesForKeys: nil
-    ))?.filter {
-        $0.lastPathComponent.hasPrefix(".")
-            && $0.lastPathComponent.contains(".diagnostics-")
-            && $0.pathExtension == "tmp"
-    } ?? []
-}
-
 private final class DiagnosticsExportCommitGate: @unchecked Sendable {
     private let reachedCommit = DispatchSemaphore(value: 0)
     private let resumeCommit = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var recordedTemporaryDirectoryURL: URL?
+
+    var temporaryDirectoryURL: URL? {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedTemporaryDirectoryURL
+    }
+
+    func recordTemporaryDirectory(_ url: URL) {
+        lock.lock()
+        recordedTemporaryDirectoryURL = url
+        lock.unlock()
+    }
 
     func pauseBeforeCommit() {
         reachedCommit.signal()

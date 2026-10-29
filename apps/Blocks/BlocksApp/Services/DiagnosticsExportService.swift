@@ -209,6 +209,7 @@ enum DiagnosticsExportService {
     static func writeReport(
         _ report: BlocksDiagnosticReport,
         to destinationURL: URL,
+        temporaryDirectoryCreated: @escaping @Sendable (URL) -> Void = { _ in },
         beforeCommit: @escaping @Sendable () -> Void = {}
     ) async throws {
         try Task.checkCancellation()
@@ -222,6 +223,7 @@ enum DiagnosticsExportService {
             try writeData(
                 data,
                 to: destinationURL,
+                temporaryDirectoryCreated: temporaryDirectoryCreated,
                 beforeCommit: beforeCommit
             )
         }
@@ -240,23 +242,32 @@ enum DiagnosticsExportService {
         }
     }
 
-    /// Writes the private temporary file beside its destination, then commits it
-    /// with a single rename. Cancellation is intentionally checked only before
-    /// that commit: once rename succeeds, this returns success even if the
-    /// caller is cancelled concurrently.
+    /// Writes a private temporary file on the destination's volume, then commits
+    /// it with a single rename. A Save panel authorizes the selected file, not
+    /// arbitrary siblings, so Foundation must allocate the replacement directory.
+    /// Cancellation is checked only before commit: once rename succeeds, this
+    /// returns success even if the caller is cancelled concurrently.
     private static func writeData(
         _ data: Data,
         to destinationURL: URL,
+        temporaryDirectoryCreated: @escaping @Sendable (URL) -> Void,
         beforeCommit: @escaping @Sendable () -> Void
     ) throws {
         let fileManager = FileManager.default
         let destinationIdentity = fileIdentity(at: destinationURL)
-        let temporaryURL = destinationURL
-            .deletingLastPathComponent()
+        try Task.checkCancellation()
+        let temporaryDirectoryURL = try fileManager.url(
+            for: .itemReplacementDirectory,
+            in: .userDomainMask,
+            appropriateFor: destinationURL,
+            create: true
+        )
+        defer { try? fileManager.removeItem(at: temporaryDirectoryURL) }
+        temporaryDirectoryCreated(temporaryDirectoryURL)
+        let temporaryURL = temporaryDirectoryURL
             .appendingPathComponent(
                 ".\(destinationURL.lastPathComponent).diagnostics-\(UUID().uuidString).tmp"
             )
-        defer { try? fileManager.removeItem(at: temporaryURL) }
 
         try Task.checkCancellation()
         guard fileManager.createFile(
