@@ -59,7 +59,6 @@ final class ClipboardEmptyStateTests: XCTestCase {
     func testLongDescriptionWrapsWithoutTruncatingOrOverflowingHorizontally() throws {
         let detail = String(repeating: "Adjust the selected filters to show more clipboard records. ", count: 12)
         let presentation = ClipboardSearchStatusPresentation(title: "No matching records", detail: detail, systemImage: "tray")
-        var detailHeights: [CGFloat] = []
         for height: CGFloat in [204, 1_600] {
             let capture = ClipboardEmptyStateGeometryCapture()
             let window = makeWindow(
@@ -73,7 +72,21 @@ final class ClipboardEmptyStateTests: XCTestCase {
             let viewport = try XCTUnwrap(capture.frames["clipboard.empty.viewport"])
             let detailFrame = try XCTUnwrap(capture.frames["clipboard.empty.detail"])
             let content = try XCTUnwrap(capture.frames["clipboard.empty.content"])
-            detailHeights.append(detailFrame.height)
+            // Equal outer widths need not offer Text equal widths: a vertical
+            // scroller can consume space in the short viewport. Leave SwiftUI
+            // in charge of its native backing and compare each full paragraph
+            // with an independent, height-unconstrained Text at its real width.
+            let idealDetailSize = idealDescriptionSize(detail, width: detailFrame.width)
+            attachLongDescriptionGeometry(
+                window: window, height: height, capture: capture,
+                idealDetailSize: idealDetailSize
+            )
+            XCTAssertGreaterThan(detailFrame.width, 0)
+            XCTAssertEqual(idealDetailSize.width, detailFrame.width, accuracy: 1)
+            XCTAssertEqual(
+                detailFrame.height, idealDetailSize.height, accuracy: 1,
+                "The full paragraph must retain its ideal height at the actual available width"
+            )
             XCTAssertGreaterThanOrEqual(detailFrame.minX, viewport.minX)
             XCTAssertLessThanOrEqual(detailFrame.maxX, viewport.maxX)
             XCTAssertGreaterThan(detailFrame.height, 100)
@@ -83,7 +96,72 @@ final class ClipboardEmptyStateTests: XCTestCase {
                 XCTAssertEqual(content.midY, viewport.midY, accuracy: 1)
             }
         }
-        XCTAssertEqual(detailHeights[0], detailHeights[1], accuracy: 1)
+    }
+
+    private func idealDescriptionSize(_ detail: String, width: CGFloat) -> CGSize {
+        let text = Text(detail)
+            .blocksFont(size: BlocksVisualTokens.Typography.body)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(width: width)
+            .environment(\.colorScheme, .light)
+        let hosting = NSHostingView(rootView: text)
+        // Only the width is constrained in the SwiftUI tree. fittingSize must
+        // derive height from the entire paragraph, not a record viewport.
+        hosting.frame = NSRect(x: 0, y: 0, width: width, height: 1)
+        hosting.layoutSubtreeIfNeeded()
+        return hosting.fittingSize
+    }
+
+    private func attachLongDescriptionGeometry(
+        window: NSWindow,
+        height: CGFloat,
+        capture: ClipboardEmptyStateGeometryCapture,
+        idealDetailSize: CGSize
+    ) {
+        var lines = [
+            "os=\(ProcessInfo.processInfo.operatingSystemVersionString)",
+            "windowHeight=\(height) contentBounds=\(String(describing: window.contentView?.bounds))",
+            "preferredScrollerStyle=\(scrollerStyleName(NSScroller.preferredScrollerStyle))",
+            "scrollerPolicy=automatic; native style is observed, never overwritten",
+            "idealDetailSizeAtMeasuredWidth=\(idealDetailSize)",
+        ]
+        for identifier in capture.frames.keys.sorted() {
+            lines.append("\(identifier)=\(capture.frames[identifier]!)")
+        }
+        if let root = window.contentView {
+            let scrollViews = nativeScrollViews(in: root)
+            lines.append("nativeScrollViewCount=\(scrollViews.count)")
+            for (index, scroll) in scrollViews.enumerated() {
+                lines.append(
+                    "scroll[\(index)] actualScrollerStyle=\(scrollerStyleName(scroll.scrollerStyle)) "
+                    + "hasVerticalScroller=\(scroll.hasVerticalScroller) "
+                    + "autohidesScrollers=\(scroll.autohidesScrollers) "
+                    + "verticalScrollerHidden=\(String(describing: scroll.verticalScroller?.isHidden)) "
+                    + "frame=\(scroll.frame) clipBounds=\(scroll.contentView.bounds) "
+                    + "documentFrame=\(String(describing: scroll.documentView?.frame)) "
+                    + "contentInsets=\(scroll.contentInsets)"
+                )
+            }
+        }
+        let attachment = XCTAttachment(string: lines.joined(separator: "\n"))
+        attachment.name = "Clipboard empty paragraph geometry - \(Int(height))pt - automatic"
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    private func nativeScrollViews(in view: NSView) -> [NSScrollView] {
+        let own = (view as? NSScrollView).map { [$0] } ?? []
+        return own + view.subviews.flatMap { nativeScrollViews(in: $0) }
+    }
+
+    private func scrollerStyleName(_ style: NSScroller.Style) -> String {
+        switch style {
+        case .legacy: return "legacy"
+        case .overlay: return "overlay"
+        @unknown default: return "unknown(\(style.rawValue))"
+        }
     }
 
     func testHistoryEmptyAndFailurePresentationsDoNotInventAFilterAction() throws {
