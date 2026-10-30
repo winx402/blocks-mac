@@ -53,10 +53,7 @@ enum TranslationSelectionFailurePresentation {
         switch reason {
         case .noFrontmostApplication,
              .blocksIsFrontmost,
-             .cancelled,
-             .focusedElementUnavailable,
-             .selectionUnavailable,
-             .emptySelection:
+             .cancelled:
             true
         case .accessibilityPermissionDenied,
              .agentUnavailable,
@@ -67,7 +64,10 @@ enum TranslationSelectionFailurePresentation {
              .targetExited,
              .timedOut,
              .selectionTooLarge,
-             .passwordField:
+             .passwordField,
+             .focusedElementUnavailable,
+             .selectionUnavailable,
+             .emptySelection:
             false
         }
     }

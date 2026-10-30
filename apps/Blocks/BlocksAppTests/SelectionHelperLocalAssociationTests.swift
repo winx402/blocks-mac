@@ -210,3 +210,247 @@ struct SelectionHelperLocalAssociationFixtureMain {
 }
 #endif
 #endif
+
+#if !BLOCKS_LOCAL_DEVELOPMENT && !SELECTION_HELPER_ASSOCIATION_FIXTURE
+final class SelectionHelperOfficialAssociationTests: XCTestCase {
+    private let now = Date(timeIntervalSince1970: 1_700_000_000)
+    private let peer = Data(repeating: 0x11, count: MemoryLayout<audit_token_t>.size)
+
+    func testOfficialGrantRequiresKernelTokenAndIsBoundToProcessIncarnation() throws {
+        var authority = SelectionHelperLocalAssociation.Authority()
+        let publicKey = P256.KeyAgreement.PrivateKey().publicKey.rawRepresentation
+        XCTAssertNil(authority.issue(requestID: UUID().uuidString, clientPublicKey: publicKey,
+                                     generation: 3, isPaired: false, now: now))
+        let grant = try XCTUnwrap(authority.issue(requestID: UUID().uuidString, clientPublicKey: publicKey,
+                                                  generation: 3, isPaired: false, now: now, peerToken: peer))
+        let request = SelectionHelperPairRequest(requestID: grant.requestID, pairingCode: grant.code,
+                                                 clientPublicKey: publicKey, clientProof: Data())
+        let reusedPID = Data(repeating: 0x22, count: peer.count)
+        XCTAssertNil(authority.consume(request: request, generation: 3, isPaired: false, now: now, peerToken: reusedPID))
+        XCTAssertNil(authority.consume(request: request, generation: 3, isPaired: false, now: now, peerToken: peer))
+    }
+
+    func testOfficialGrantPreservesECDHProofExpiryGenerationAndOneUseContract() throws {
+        for rejection in ["none", "expired", "generation", "paired", "request", "public-key"] {
+            var authority = SelectionHelperLocalAssociation.Authority()
+            let client = P256.KeyAgreement.PrivateKey()
+            let grant = try XCTUnwrap(authority.issue(requestID: UUID().uuidString,
+                clientPublicKey: client.publicKey.rawRepresentation, generation: 4, isPaired: false, now: now, peerToken: peer))
+            let publicKey = rejection == "public-key" ? P256.KeyAgreement.PrivateKey().publicKey.rawRepresentation : grant.clientPublicKey
+            let requestID = rejection == "request" ? UUID().uuidString : grant.requestID
+            let proof = try XCTUnwrap(SelectionHelperPairingAuthentication.clientProof(bootstrapKey: grant.bootstrapKey,
+                requestID: requestID, pairingCode: grant.code, clientPublicKey: publicKey))
+            let request = SelectionHelperPairRequest(requestID: requestID, pairingCode: grant.code,
+                                                     clientPublicKey: publicKey, clientProof: proof)
+            let consumed = authority.consume(request: request, generation: rejection == "generation" ? 5 : 4,
+                isPaired: rejection == "paired", now: rejection == "expired" ? now.addingTimeInterval(5) : now, peerToken: peer)
+            if rejection == "none" {
+                XCTAssertNotNil(consumed)
+                XCTAssertTrue(SelectionHelperPairingAuthentication.verifiesClientProof(proof, bootstrapKey: grant.bootstrapKey, request: request))
+                let helper = P256.KeyAgreement.PrivateKey()
+                let helperProof = try XCTUnwrap(SelectionHelperPairingAuthentication.helperProof(bootstrapKey: grant.bootstrapKey,
+                    request: request, helperPublicKey: helper.publicKey.rawRepresentation))
+                XCTAssertTrue(SelectionHelperPairingAuthentication.verifiesHelperProof(helperProof, bootstrapKey: grant.bootstrapKey,
+                    request: request, helperPublicKey: helper.publicKey.rawRepresentation))
+                XCTAssertEqual(try SelectionHelperAuthenticatedCodec.deriveSharedKey(privateKey: client,
+                    peerPublicKeyData: helper.publicKey.rawRepresentation, requestID: requestID),
+                    try SelectionHelperAuthenticatedCodec.deriveSharedKey(privateKey: helper,
+                    peerPublicKeyData: client.publicKey.rawRepresentation, requestID: requestID))
+            } else { XCTAssertNil(consumed, rejection) }
+            XCTAssertNil(authority.consume(request: request, generation: 4, isPaired: false, now: now, peerToken: peer))
+        }
+    }
+
+    func testOfficialIdentityPolicyRejectsEmptyTeamWrongRolePathAndHash() {
+        typealias Identity = SelectionHelperOfficialAssociationTrust.Identity
+        let expected = Identity(identifier: "app.blocks.selection-helper", team: "ABCDEFGHIJ",
+                                path: "/fixture/Blocks.app/Contents/Helpers/blocksHelper.app/Contents/MacOS/blocksHelper",
+                                cdHash: String(repeating: "a", count: 40))
+        XCTAssertTrue(SelectionHelperOfficialAssociationTrust.matches(expected, expected: expected))
+        for other in [
+            Identity(identifier: expected.identifier, team: "", path: expected.path, cdHash: expected.cdHash),
+            Identity(identifier: "app.blocks.dev.selection-helper", team: expected.team, path: expected.path, cdHash: expected.cdHash),
+            Identity(identifier: expected.identifier, team: expected.team, path: "/other/blocksHelper", cdHash: expected.cdHash),
+            Identity(identifier: expected.identifier, team: expected.team, path: expected.path, cdHash: String(repeating: "b", count: 40)),
+        ] { XCTAssertFalse(SelectionHelperOfficialAssociationTrust.matches(other, expected: expected)) }
+    }
+
+    func testOfficialAbsenceRequiresActiveLegacyAndDurableMarkerToBeMissing() {
+        let fixture = OfficialAssociationKeychainFixture()
+        XCTAssertTrue(fixture.store.permitsLocalAssociation())
+        for slot in [fixture.active, fixture.legacy, fixture.disabled] {
+            fixture.items[slot] = Data()
+            XCTAssertFalse(fixture.store.permitsLocalAssociation(), slot)
+            fixture.items.removeValue(forKey: slot)
+        }
+        for status in [errSecAuthFailed, errSecInteractionNotAllowed, errSecDecode] {
+            fixture.copyFailure = status
+            XCTAssertFalse(fixture.store.permitsLocalAssociation())
+            XCTAssertFalse(fixture.store.prepareExplicitLocalAssociation())
+        }
+        XCTAssertEqual(fixture.adds, 0)
+        XCTAssertEqual(fixture.updates, 0)
+        XCTAssertEqual(fixture.deletes, 0)
+    }
+
+    func testAppPreflightCannotClearMarkerAndHelperClearPreservesLegacyOrCorruptState() {
+        let fixture = OfficialAssociationKeychainFixture()
+        fixture.items[fixture.disabled] = SelectionHelperLocalAssociation.disabledMarker
+        fixture.items[fixture.tombstone] = Data([7])
+        XCTAssertFalse(fixture.store.permitsLocalAssociation())
+        XCTAssertTrue(fixture.store.prepareExplicitLocalAssociation())
+        XCTAssertFalse(fixture.store.permitsLocalAssociation())
+        XCTAssertNotNil(fixture.items[fixture.disabled])
+        XCTAssertEqual(fixture.deletes, 0)
+        XCTAssertTrue(fixture.clearAsHelper())
+        XCTAssertTrue(fixture.store.permitsLocalAssociation())
+        XCTAssertEqual(fixture.items[fixture.tombstone], Data([7]))
+        XCTAssertEqual(fixture.deletes, 1)
+        for slot in [fixture.active, fixture.legacy, fixture.disabled] {
+            fixture.items[fixture.disabled] = SelectionHelperLocalAssociation.disabledMarker
+            fixture.items[slot] = Data()
+            XCTAssertFalse(fixture.store.prepareExplicitLocalAssociation(), slot)
+            XCTAssertNotNil(fixture.items[fixture.disabled])
+            fixture.items.removeValue(forKey: slot)
+        }
+        XCTAssertEqual(fixture.deletes, 1)
+        XCTAssertEqual(fixture.updates, 0)
+    }
+
+    func testPersistentOptOutSurvivesAcknowledgementExpiryAndStoreRestart() {
+        let fixture = OfficialAssociationKeychainFixture()
+        XCTAssertTrue(fixture.persistAsHelper())
+        fixture.items[fixture.tombstone] = Data([7])
+        fixture.items.removeValue(forKey: fixture.tombstone)
+        XCTAssertFalse(fixture.store.permitsLocalAssociation())
+        let restarted = fixture.makeStore()
+        XCTAssertFalse(restarted.permitsLocalAssociation())
+        XCTAssertTrue(restarted.prepareExplicitLocalAssociation())
+        XCTAssertFalse(restarted.permitsLocalAssociation())
+        XCTAssertTrue(fixture.clearAsHelper())
+        XCTAssertTrue(restarted.permitsLocalAssociation())
+    }
+
+    func testMarkerWriteOrDeleteFailureNeverClaimsSuccessfulIntentChange() {
+        let fixture = OfficialAssociationKeychainFixture()
+        fixture.addFailure = errSecInteractionNotAllowed
+        XCTAssertFalse(fixture.persistAsHelper())
+        fixture.addFailure = nil
+        fixture.items[fixture.disabled] = SelectionHelperLocalAssociation.disabledMarker
+        fixture.deleteFailure = errSecAuthFailed
+        XCTAssertTrue(fixture.store.prepareExplicitLocalAssociation())
+        XCTAssertFalse(fixture.clearAsHelper())
+        XCTAssertNotNil(fixture.items[fixture.disabled])
+        fixture.items[fixture.disabled] = Data([99])
+        XCTAssertFalse(fixture.persistAsHelper())
+        XCTAssertFalse(fixture.store.prepareExplicitLocalAssociation())
+        XCTAssertEqual(fixture.items[fixture.disabled], Data([99]))
+    }
+
+    func testOfficialAppCannotCreateOrResurrectSharedActiveKey() {
+        let fixture = OfficialAssociationKeychainFixture()
+        let original = Data(repeating: 0x37, count: 32)
+        XCTAssertFalse(fixture.store.saveLocalAssociationIfAbsent(original))
+        XCTAssertNil(fixture.items[fixture.active])
+        fixture.items[fixture.active] = original // Helper-owned shared commit.
+        XCTAssertFalse(fixture.store.saveLocalAssociationIfAbsent(Data(repeating: 0x44, count: 32)))
+        XCTAssertEqual(fixture.items[fixture.active], original)
+        XCTAssertEqual(fixture.updates, 0)
+        XCTAssertEqual(fixture.deletes, 0)
+        XCTAssertEqual(fixture.adds, 0)
+        XCTAssertFalse(fixture.store.persistAutomaticAssociationDisabled())
+    }
+
+    func testOfficialResetInvalidatesStatusIntentBeforeItCanClearNewMarker() throws {
+        let fixture = OfficialAssociationKeychainFixture()
+        var authority = SelectionHelperLocalAssociation.Authority()
+        let requestID = UUID().uuidString
+        let publicKey = P256.KeyAgreement.PrivateKey().publicKey.rawRepresentation
+        let intent = try XCTUnwrap(authority.issueIntent(requestID: requestID, clientPublicKey: publicKey,
+            generation: 7, isPaired: false, now: now, peerToken: peer))
+        // Exact window B: status has replied; Helper reset writes the newer
+        // opt-out and invalidates this process-local intent on the same queue.
+        authority.invalidate()
+        XCTAssertTrue(fixture.persistAsHelper())
+        let accepted = authority.consumeIntent(intent, requestID: requestID, clientPublicKey: publicKey,
+            generation: 8, isPaired: false, now: now, peerToken: peer)
+        if accepted { _ = fixture.clearAsHelper() }
+        XCTAssertFalse(accepted)
+        XCTAssertEqual(fixture.items[fixture.disabled], SelectionHelperLocalAssociation.disabledMarker)
+        XCTAssertEqual(fixture.deletes, 0)
+    }
+
+    func testOfficialIntentIsPeerKeyGenerationAndOneUseBound() throws {
+        for reject in ["none", "peer", "key", "generation", "expired"] {
+            var authority = SelectionHelperLocalAssociation.Authority()
+            let requestID = UUID().uuidString
+            let publicKey = P256.KeyAgreement.PrivateKey().publicKey.rawRepresentation
+            let intent = try XCTUnwrap(authority.issueIntent(requestID: requestID, clientPublicKey: publicKey,
+                generation: 2, isPaired: false, now: now, peerToken: peer))
+            let accepted = authority.consumeIntent(intent, requestID: requestID,
+                clientPublicKey: reject == "key" ? Data(repeating: 9, count: 64) : publicKey,
+                generation: reject == "generation" ? 3 : 2, isPaired: false,
+                now: reject == "expired" ? now.addingTimeInterval(5) : now,
+                peerToken: reject == "peer" ? Data(repeating: 9, count: peer.count) : peer)
+            XCTAssertEqual(accepted, reject == "none", reject)
+            XCTAssertFalse(authority.consumeIntent(intent, requestID: requestID, clientPublicKey: publicKey,
+                generation: 2, isPaired: false, now: now, peerToken: peer))
+        }
+    }
+}
+
+private final class OfficialAssociationKeychainFixture {
+    var items: [String: Data] = [:]
+    var copyFailure: OSStatus?
+    var addFailure: OSStatus?
+    var deleteFailure: OSStatus?
+    var adds = 0
+    var updates = 0
+    var deletes = 0
+    let active = BlocksSelectionHelperProtocol.keychainService + "/" + BlocksSelectionHelperProtocol.keychainAccount
+    let legacy = BlocksSelectionHelperProtocol.legacyKeychainService + "/" + BlocksSelectionHelperProtocol.legacyKeychainAccount
+    let disabled = SelectionHelperLocalAssociation.disabledKeychainService + "/" + SelectionHelperLocalAssociation.disabledKeychainAccount
+    let tombstone = BlocksSelectionHelperProtocol.keychainService + ".disconnect-tombstone/v1"
+    lazy var store = makeStore()
+    private func slot(_ query: CFDictionary) -> String {
+        let values = query as! [String: Any]
+        return (values[kSecAttrService as String] as! String) + "/" + (values[kSecAttrAccount as String] as! String)
+    }
+    private var markerQuery: [String: Any] {
+        [kSecAttrService as String: SelectionHelperLocalAssociation.disabledKeychainService,
+         kSecAttrAccount as String: SelectionHelperLocalAssociation.disabledKeychainAccount]
+    }
+    func persistAsHelper() -> Bool {
+        SelectionHelperLocalAssociation.persistDisabledMarker(query: markerQuery, copy: copy, add: add)
+    }
+    func clearAsHelper() -> Bool {
+        SelectionHelperLocalAssociation.clearDisabledMarkerForExplicitOptIn(query: markerQuery, copy: copy, delete: delete)
+    }
+    private func copy(_ query: CFDictionary, _ result: UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus {
+        if let failure = copyFailure { return failure }
+        guard let value = items[slot(query)] else { return errSecItemNotFound }
+        result?.pointee = value as CFData
+        return errSecSuccess
+    }
+    private func add(_ query: CFDictionary, _ result: UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus {
+        adds += 1
+        if let failure = addFailure { return failure }
+        let key = slot(query)
+        guard items[key] == nil else { return errSecDuplicateItem }
+        items[key] = (query as! [String: Any])[kSecValueData as String] as? Data
+        return errSecSuccess
+    }
+    private func delete(_ query: CFDictionary) -> OSStatus {
+        deletes += 1
+        if let failure = deleteFailure { return failure }
+        return items.removeValue(forKey: slot(query)) == nil ? errSecItemNotFound : errSecSuccess
+    }
+    func makeStore() -> SelectionHelperSharedKeyStore {
+        SelectionHelperSharedKeyStore(accessGroupProvider: { "ABCDEFGHIJ.app.blocks.selection-helper.shared" },
+            itemCopyMatching: copy, itemUpdate: { [unowned self] _, _ in
+                self.updates += 1
+                return errSecAuthFailed
+            }, itemAdd: add, itemDelete: delete)
+    }
+}
+#endif

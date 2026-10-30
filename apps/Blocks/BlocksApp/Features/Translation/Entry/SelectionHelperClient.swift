@@ -356,12 +356,16 @@ protocol SelectionHelperSharedKeyStoring: AnyObject {
     func delete()
     func permitsLocalAssociation() -> Bool
     func saveLocalAssociationIfAbsent(_ data: Data) -> Bool
+    func persistAutomaticAssociationDisabled() -> Bool
+    func prepareExplicitLocalAssociation() -> Bool
 }
 
 extension SelectionHelperSharedKeyStoring {
     func loadForAssociation() -> Result<Data?, SelectionAgentServiceFailure> { .success(load()) }
     func permitsLocalAssociation() -> Bool { false }
     func saveLocalAssociationIfAbsent(_ data: Data) -> Bool { false }
+    func persistAutomaticAssociationDisabled() -> Bool { false }
+    func prepareExplicitLocalAssociation() -> Bool { false }
 }
 
 protocol SelectionHelperBootstrapKeyLoading: AnyObject {
@@ -508,10 +512,13 @@ final class SelectionHelperSharedKeyStore:
     }
 
     func permitsLocalAssociation() -> Bool {
+        var identities = [(service, account),
+                          (BlocksSelectionHelperProtocol.legacyKeychainService, BlocksSelectionHelperProtocol.legacyKeychainAccount)]
         #if BLOCKS_LOCAL_DEVELOPMENT
-        let identities = [(service, account),
-                          (BlocksSelectionHelperProtocol.legacyKeychainService, BlocksSelectionHelperProtocol.legacyKeychainAccount),
-                          ("\(service).disconnect-tombstone", "v1")]
+        identities.append(("\(service).disconnect-tombstone", "v1"))
+        #else
+        identities.append((SelectionHelperLocalAssociation.disabledKeychainService, SelectionHelperLocalAssociation.disabledKeychainAccount))
+        #endif
         return identities.enumerated().allSatisfy { index, identity in
             let (service, account) = identity
             guard var query = keychainQuery(service: service, account: account) else { return false }
@@ -522,20 +529,42 @@ final class SelectionHelperSharedKeyStore:
             }
             return status == errSecItemNotFound
         }
-        #else
-        return false
-        #endif
     }
 
     func saveLocalAssociationIfAbsent(_ data: Data) -> Bool {
-        #if BLOCKS_LOCAL_DEVELOPMENT
+        #if !BLOCKS_LOCAL_DEVELOPMENT
+        // The official Helper exclusively commits the shared active item.
+        return false
+        #else
         guard data.count == 32, var query = keychainQuery(service: service, account: account) else { return false }
         query[kSecValueData as String] = data
         // Deliberately no SecItemUpdate and no deletion of a legacy pairing.
         return itemAdd(query as CFDictionary, nil) == errSecSuccess
-        #else
-        return false
         #endif
+    }
+
+    func persistAutomaticAssociationDisabled() -> Bool {
+        #if !BLOCKS_LOCAL_DEVELOPMENT
+        // Runtime official intent writes belong to the Helper pairing queue.
+        return false
+        #else
+        guard let query = keychainQuery(service: SelectionHelperLocalAssociation.disabledKeychainService,
+                                        account: SelectionHelperLocalAssociation.disabledKeychainAccount) else { return false }
+        return SelectionHelperLocalAssociation.persistDisabledMarker(query: query, copy: itemCopyMatching, add: itemAdd)
+        #endif
+    }
+
+    /// Read-only preflight. Only the Helper may consume an intent and clear a
+    /// marker; an App-side read/delete would race a newer Helper reset.
+    func prepareExplicitLocalAssociation() -> Bool {
+        for (service, account) in [(service, account),
+                                   (BlocksSelectionHelperProtocol.legacyKeychainService, BlocksSelectionHelperProtocol.legacyKeychainAccount)] {
+            guard let query = keychainQuery(service: service, account: account),
+                  itemCopyMatching(query as CFDictionary, nil) == errSecItemNotFound else { return false }
+        }
+        guard let query = keychainQuery(service: SelectionHelperLocalAssociation.disabledKeychainService,
+                                        account: SelectionHelperLocalAssociation.disabledKeychainAccount) else { return false }
+        return SelectionHelperLocalAssociation.disabledMarkerPresence(query: query, copy: itemCopyMatching) != nil
     }
 
     func delete() {
@@ -843,7 +872,7 @@ final class SelectionHelperClient: @unchecked Sendable {
     }
 
     typealias UpdateLifecycleDiagnosticRecorder = @Sendable (UpdateLifecycleDiagnosticEvent) -> Void
-    private static let pairingMutationLock = NSLock()
+    private static let pairingMutationLock = NSRecursiveLock()
     private let applicationUpdateGate = ApplicationOperationAdmissionGate(name: "Selection Helper client")
     private let updateStateLock = NSLock()
     private var helperWasRunningBeforeUpdate = false
@@ -985,6 +1014,21 @@ final class SelectionHelperClient: @unchecked Sendable {
     private let bootstrapKeyStore: any SelectionHelperBootstrapKeyCreating
     private let connection: any SelectionHelperLoopbackConnecting
     private let applicationLocator: SelectionHelperApplicationLocator
+    #if DEBUG
+    private var localAssociationSendForTesting: ((SelectionHelperLocalAssociation.Request, TimeInterval) -> SelectionHelperLocalAssociation.Response?)?
+
+    func setLocalAssociationSendForTesting(
+        _ send: @escaping (SelectionHelperLocalAssociation.Request, TimeInterval) -> SelectionHelperLocalAssociation.Response?
+    ) { localAssociationSendForTesting = send }
+    #endif
+
+    private func sendLocalAssociation(_ request: SelectionHelperLocalAssociation.Request,
+                                      timeout: TimeInterval) -> SelectionHelperLocalAssociation.Response? {
+        #if DEBUG
+        if let send = localAssociationSendForTesting { return send(request, timeout) }
+        #endif
+        return SelectionHelperLocalAssociationTransport.send(request, timeout: timeout)
+    }
     /// Synchronous loopback IPC is intentionally isolated from UI/MainActor
     /// work. This gate rejects a concurrent hint instead of accumulating a
     /// queue of stale paste targets.
@@ -1067,16 +1111,29 @@ final class SelectionHelperClient: @unchecked Sendable {
         defer { Self.pairingMutationLock.unlock() }
         guard let lease = applicationUpdateGate.begin() else { return .failure(.connectionFailed) }
         defer { lease.release() }
+        let hasKey: Bool
         switch keyStore.loadForAssociation() {
         case .failure(let failure): return .failure(failure)
-        case .success(nil): return .success(())
-        case .success(.some): break
+        case .success(nil): hasKey = false
+        case .success(.some): hasKey = true
+        }
+        if !hasKey {
+            #if BLOCKS_LOCAL_DEVELOPMENT
+            return .success(())
+            #else
+            guard let response = sendLocalAssociation(.init(kind: .disable, requestID: UUID().uuidString), timeout: timeout),
+                  response.automaticAssociationDisabled == true, !response.isPaired,
+                  case .success(nil) = keyStore.loadForAssociation() else { return .failure(.disconnectNotConfirmed) }
+            return .success(())
+            #endif
         }
         switch booleanCommand(.disconnect, timeout: timeout) {
         case .success(true):
             // The Helper has authenticated the request and confirmed that its
             // key was removed, so it is now safe to remove this App's key.
+            #if BLOCKS_LOCAL_DEVELOPMENT
             keyStore.delete()
+            #endif
             return .success(())
         case .success(false):
             return .failure(.disconnectNotConfirmed)
@@ -1187,11 +1244,13 @@ final class SelectionHelperClient: @unchecked Sendable {
     }
 
     /// Call from a background queue after the trusted installed Helper is
-    /// running. Existing pairing always wins: an authentication failure never
-    /// triggers reset, replacement, installation, or an upgrade. Older Helpers
-    /// without this optional socket retain the manual pairing workflow.
+    /// running. Official first association additionally requires a new UI opt-in.
+    /// Existing pairing always wins: an authentication failure never
+    /// triggers reset, replacement, installation, or an upgrade. Helpers without
+    /// this socket report unavailable; official setup never downgrades trust.
     func associateLocallyIfNeeded(
-        timeout: TimeInterval = 0.5
+        timeout: TimeInterval = 0.5,
+        explicitUserOptIn: Bool = false
     ) -> Result<SelectionHelperHealth, SelectionAgentServiceFailure> {
         Self.pairingMutationLock.lock()
         defer { Self.pairingMutationLock.unlock() }
@@ -1200,21 +1259,33 @@ final class SelectionHelperClient: @unchecked Sendable {
         case .success(.some): return health(timeout: timeout)
         case .success(nil): break
         }
-        #if BLOCKS_LOCAL_DEVELOPMENT
+        #if !BLOCKS_LOCAL_DEVELOPMENT
+        guard explicitUserOptIn else { return .failure(.notPaired) }
+        #endif
         guard let lease = applicationUpdateGate.begin() else { return .failure(.connectionFailed) }
         defer { lease.release() }
         guard !hasInstallationConflict else { return .failure(.helperInstallationConflict) }
         guard applicationLocator.isInstalled else { return .failure(.helperNotInstalled) }
         guard applicationLocator.isRunning else { return .failure(.helperNotRunning) }
-        guard keyStore.permitsLocalAssociation() else { return .failure(.notPaired) }
         let privateKey = P256.KeyAgreement.PrivateKey()
         let publicKey = privateKey.publicKey.rawRepresentation
         let requestID = UUID().uuidString
-        guard let authorization = SelectionHelperLocalAssociationTransport.send(
-            .init(kind: .authorize, requestID: requestID, clientPublicKey: publicKey), timeout: timeout
+        #if !BLOCKS_LOCAL_DEVELOPMENT
+        guard keyStore.prepareExplicitLocalAssociation() else { return .failure(.keychainUnavailable) }
+        guard let status = sendLocalAssociation(.init(kind: .status, requestID: requestID, clientPublicKey: publicKey), timeout: timeout),
+              !status.isPaired, let intent = status.intent else { return .failure(.bootstrapUnavailable) }
+        let authorizationRequest = SelectionHelperLocalAssociation.Request(kind: .authorize,
+            requestID: requestID, clientPublicKey: publicKey, intent: intent)
+        #else
+        guard keyStore.permitsLocalAssociation() else { return .failure(.keychainUnavailable) }
+        let authorizationRequest = SelectionHelperLocalAssociation.Request(kind: .authorize,
+            requestID: requestID, clientPublicKey: publicKey)
+        #endif
+        guard let authorization = sendLocalAssociation(
+            authorizationRequest, timeout: timeout
         )?.authorization else {
             Self.logger.notice("local-association stage=authorization-unavailable")
-            return .failure(.connectionFailed)
+            return .failure(.bootstrapUnavailable)
         }
         guard authorization.requestID == requestID, authorization.clientPublicKey == publicKey,
               authorization.bootstrapKey.count == 32, !authorization.code.isEmpty,
@@ -1232,7 +1303,7 @@ final class SelectionHelperClient: @unchecked Sendable {
         }
         let request = SelectionHelperPairRequest(requestID: requestID, pairingCode: authorization.code,
                                                  clientPublicKey: publicKey, clientProof: proof)
-        guard let data = SelectionHelperLocalAssociationTransport.send(
+        guard let data = sendLocalAssociation(
             .init(kind: .pair, requestID: requestID, pairRequest: request), timeout: timeout
         )?.pairPacket,
               let packet = try? JSONDecoder().decode(SelectionHelperWirePacket.self, from: data),
@@ -1249,18 +1320,51 @@ final class SelectionHelperClient: @unchecked Sendable {
               let key = try? SelectionHelperAuthenticatedCodec.deriveSharedKey(
                 privateKey: privateKey, peerPublicKeyData: helperPublicKey, requestID: requestID
               ) else { return .failure(.notPaired) }
-        // The login-keychain backend may already expose the same entry saved
-        // by the Helper. Never update it, even if a conflicting key appeared
-        // while this request was in flight.
+        #if BLOCKS_LOCAL_DEVELOPMENT
         if let existing = keyStore.load() {
             guard existing == key else { return .failure(.notPaired) }
         } else if !keyStore.saveLocalAssociationIfAbsent(key) {
-            guard keyStore.load() == key else { return .failure(.connectionFailed) }
+            guard keyStore.load() == key else { return .failure(.keychainUnavailable) }
         }
-        return health(timeout: timeout)
         #else
-        return .failure(.notPaired)
+        // The Helper already committed this shared item. A reset can delete
+        // it after the reply was sent; never resurrect it from a delayed reply.
+        switch keyStore.loadForAssociation() {
+        case .failure(let failure): return .failure(failure)
+        case .success(.some(let stored)) where stored == key: break
+        default: return .failure(.notPaired)
+        }
         #endif
+        return health(timeout: timeout)
+    }
+
+    /// A new, explicit UI opt-in only. No durable setting authorizes a future
+    /// first association, and no readiness retry repeats a mutating bootstrap.
+    func connectAfterExplicitOptIn(timeout: TimeInterval = 3) -> Result<SelectionHelperHealth, SelectionAgentServiceFailure> {
+        // Covers launch/readiness as well as the exchange, so a same-App
+        // disconnect cannot finish and then be undone by this older operation.
+        Self.pairingMutationLock.lock()
+        defer { Self.pairingMutationLock.unlock() }
+        switch keyStore.loadForAssociation() {
+        case .failure(let failure): return .failure(failure)
+        case .success(.some): return recoverHealth(timeout: timeout, allowLaunch: true)
+        case .success(nil): break
+        }
+        guard let lease = applicationUpdateGate.begin() else { return .failure(.connectionFailed) }
+        defer { lease.release() }
+        guard !hasInstallationConflict else { return .failure(.helperInstallationConflict) }
+        guard isInstalled else { return .failure(.helperNotInstalled) }
+        if !isRunning, !openHelper(activates: false) { return .failure(.helperNotRunning) }
+        let deadline = ProcessInfo.processInfo.systemUptime + max(0.1, min(timeout, 5))
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            guard !hasInstallationConflict else { return .failure(.helperInstallationConflict) }
+            if isRunning,
+               sendLocalAssociation(.init(kind: .status, requestID: UUID().uuidString), timeout: 0.25) != nil {
+                return associateLocallyIfNeeded(timeout: 0.8, explicitUserOptIn: true)
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return .failure(.bootstrapUnavailable)
     }
 
     func health(
@@ -2182,6 +2286,42 @@ final class SelectionHelperSettingsController:
         }
     }
 
+    /// The normal setup action, distinct from merely presenting settings or
+    /// opening a Helper window. Consent lasts for this bounded operation only.
+    func connectAfterExplicitOptIn() {
+        guard !isPairing else { return }
+        guard !pendingDisconnectRecovery else {
+            lastError = L10n.string("translation.selectionHelper.error.disconnectRepairRequired")
+            return
+        }
+        guard let lease = client.beginApplicationOperation() else { return }
+        generation &+= 1
+        let currentGeneration = generation
+        isPairing = true
+        state = .connecting
+        lastPairingFailure = nil
+        lastError = nil
+        let client = client
+        Task.detached(priority: .userInitiated) {
+            client.connectAfterExplicitOptIn()
+        }.valueTask(holding: lease) { [weak self] result in
+            guard let self else { return }
+            isPairing = false
+            guard generation == currentGeneration else { return }
+            if case .success = result {
+                pairingCode = ""
+                disconnectRecoveryExpired = false
+            } else if case let .failure(failure) = result {
+                lastPairingFailure = failure
+            }
+            applyHealthResult(result)
+            if refreshAgainWithoutLaunch {
+                refreshAgainWithoutLaunch = false
+                refresh(allowLaunch: false)
+            }
+        }
+    }
+
     func requestAccessibilityPermission() {
         // The primary action explains the exact Helper entry and opens the
         // drag-to-Settings guide. It never sends a naked system prompt request.
@@ -2367,9 +2507,10 @@ final class SelectionHelperSettingsController:
             suffix = "invalidCode"
         case .incompatibleVersion:
             suffix = "outdated"
-        case .connectionFailed, .timedOut,
-             .invalidResponse, .bootstrapUnavailable:
+        case .connectionFailed, .timedOut, .invalidResponse:
             suffix = "connectionFailed"
+        case .bootstrapUnavailable:
+            suffix = "associationUnavailable"
         case .disconnectNotConfirmed:
             suffix = "disconnectFailed"
         case .keychainUnavailable:

@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def main() -> None:
     platform = Path(subprocess.check_output(
-        ["xcrun", "--show-sdk-platform-path"], text=True
+        ["xcrun", "--sdk", "macosx", "--show-sdk-platform-path"], text=True
     ).strip())
     frameworks = platform / "Developer/Library/Frameworks"
     libraries = platform / "Developer/usr/lib"

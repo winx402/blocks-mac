@@ -1,3 +1,4 @@
+import ApplicationServices
 import CryptoKit
 import Foundation
 import Security
@@ -76,6 +77,502 @@ final class SelectionHelperServerTests: XCTestCase {
     private let bootstrapKey = Data(repeating: 0x42, count: 32)
     private let pairingCode = "123456"
     private let testAccessGroup = "TEAMID.app.blocks.shared"
+
+    func testCaptureTimeoutScopeConfiguresSystemWideBeforeAXAndRestoresAfterReturn() {
+        let now = Date(timeIntervalSince1970: 100)
+        var events: [String] = []
+        var configuredTimeouts: [Float] = []
+        let output = SelectionHelperAXMessagingTimeoutPolicy.withProcessWideTimeout(
+            systemWideElement: "system-wide timeout handle",
+            deadline: now.addingTimeInterval(10), now: now,
+            setTimeout: { handle, timeout in
+                XCTAssertEqual(handle, "system-wide timeout handle")
+                events.append("timeout")
+                configuredTimeouts.append(timeout)
+            },
+            operation: {
+                events.append("capture descendants")
+                return "completed"
+            }
+        )
+
+        XCTAssertEqual(output, "completed")
+        XCTAssertEqual(events, ["timeout", "capture descendants", "timeout"])
+        XCTAssertEqual(configuredTimeouts, [0.1, 0])
+    }
+
+    func testCaptureTimeoutScopeRestoresProcessDefaultWhenCaptureThrows() {
+        enum CaptureFailure: Error { case interrupted }
+        var configuredTimeouts: [Float] = []
+        XCTAssertThrowsError(try SelectionHelperAXMessagingTimeoutPolicy.withProcessWideTimeout(
+            systemWideElement: "system-wide timeout handle",
+            deadline: Date().addingTimeInterval(10),
+            setTimeout: { _, timeout in configuredTimeouts.append(timeout) },
+            operation: { () throws -> Void in throw CaptureFailure.interrupted }
+        ))
+        XCTAssertEqual(configuredTimeouts, [0.1, 0])
+    }
+
+    func testCaptureTimeoutPolicyRetainsShortProcessWideCeilingAndRemainingBudget() {
+        let now = Date(timeIntervalSince1970: 100)
+        XCTAssertEqual(SelectionHelperAXMessagingTimeoutPolicy.timeout(
+            deadline: now.addingTimeInterval(10), now: now
+        ), 0.1)
+        XCTAssertEqual(SelectionHelperAXMessagingTimeoutPolicy.timeout(
+            deadline: now.addingTimeInterval(0.08), now: now
+        ), 0.08, accuracy: 0.0001)
+        XCTAssertEqual(SelectionHelperAXMessagingTimeoutPolicy.timeout(
+            deadline: now.addingTimeInterval(0.01), now: now
+        ), 0.05)
+    }
+
+    func testSelectionTextResolverUsesCurrentRangeForNilEmptyAndWhitespaceDirectText() {
+        for direct in [nil, "", " \n\t"] as [String?] {
+            let reads = SelectionTextReadFixture()
+            reads.direct = direct
+            reads.ranges = [NSRange(location: 7, length: 5)]
+            reads.rangeText = "fresh"
+
+            XCTAssertEqual(reads.resolve(), .selected(.init(
+                text: "fresh", source: .range,
+                range: NSRange(location: 7, length: 5), marker: nil
+            )))
+            XCTAssertEqual(reads.calls, ["direct", "range", "rangeText", "range"])
+        }
+    }
+
+    func testSelectionTextResolverContinuesFromEmptyRangeTextToCurrentMarker() {
+        let reads = SelectionTextReadFixture()
+        reads.direct = ""
+        reads.ranges = [NSRange(location: 2, length: 3)]
+        reads.rangeText = " \n"
+        reads.markers = [11]
+        reads.markerLength = .known(6)
+        reads.markerText = "marker"
+
+        XCTAssertEqual(reads.resolve(), .selected(.init(
+            text: "marker", source: .marker, range: nil, marker: 11
+        )))
+        XCTAssertEqual(reads.calls, [
+            "direct", "range", "rangeText", "range", "marker",
+            "markerLength", "markerText", "marker",
+        ])
+    }
+
+    func testSelectionTextResolverSkipsCollapsedRangeAndMarkerWithoutReadingText() {
+        let reads = SelectionTextReadFixture()
+        reads.direct = ""
+        reads.ranges = [NSRange(location: 12, length: 0)]
+        reads.rangeText = "old range text"
+        reads.markers = [11]
+        reads.markerLength = .known(0)
+        reads.markerText = "old marker text"
+
+        XCTAssertEqual(reads.resolve(), .empty)
+        XCTAssertEqual(reads.calls, ["direct", "range", "marker", "markerLength"])
+    }
+
+    func testSelectionTextResolverRefusesInvalidAndNegativeMarkerLength() {
+        for length in [SelectionHelperMarkerLength.invalid, .known(-1)] {
+            let reads = SelectionTextReadFixture()
+            reads.markers = [11]
+            reads.markerLength = length
+            reads.markerText = "must not be read"
+
+            XCTAssertEqual(reads.resolve(), .unavailable)
+            XCTAssertFalse(reads.calls.contains("markerText"))
+        }
+    }
+
+    func testMarkerLengthDecoderSeparatesUnsupportedOrMissingFromMalformedValues() {
+        for status in [AXError.parameterizedAttributeUnsupported, .attributeUnsupported,
+                       .notImplemented, .noValue] {
+            XCTAssertEqual(SelectionHelperMarkerLength.decode(status: status, value: nil),
+                           .unavailable)
+        }
+        XCTAssertEqual(SelectionHelperMarkerLength.decode(status: .success, value: nil),
+                       .unavailable)
+        XCTAssertEqual(SelectionHelperMarkerLength.decode(
+            status: .success, value: NSNumber(value: 3)
+        ), .known(3))
+        XCTAssertEqual(SelectionHelperMarkerLength.decode(
+            status: .success, value: NSNumber(value: 0)
+        ), .known(0))
+        let invalidValues: [CFTypeRef] = [
+            NSNumber(value: -1), NSNumber(value: 1.5),
+            "not a number" as CFString, NSNumber(value: true),
+        ]
+        for value in invalidValues {
+            let length = SelectionHelperMarkerLength.decode(status: .success, value: value)
+            XCTAssertEqual(length, .invalid)
+            let reads = SelectionTextReadFixture()
+            reads.markers = [11]
+            reads.markerLength = length
+            reads.markerText = "must not be read"
+            XCTAssertEqual(reads.resolve(), .unavailable)
+            XCTAssertFalse(reads.calls.contains("markerText"))
+        }
+        XCTAssertEqual(SelectionHelperMarkerLength.decode(status: .cannotComplete, value: nil),
+                       .invalid)
+    }
+
+    func testSelectionTextResolverSupportsCurrentMarkerWhenLengthAttributeIsMissing() {
+        let reads = SelectionTextReadFixture()
+        reads.markers = [11]
+        reads.markerLength = .unavailable
+        reads.markerText = "string-only provider"
+
+        XCTAssertEqual(reads.resolve(), .selected(.init(
+            text: "string-only provider", source: .marker, range: nil, marker: 11
+        )))
+        XCTAssertEqual(reads.calls, ["direct", "range", "marker", "markerLength",
+                                     "markerText", "marker"])
+    }
+
+    func testSelectionTextResolverTreatsWhitespaceFromMissingLengthMarkerAsEmpty() {
+        let reads = SelectionTextReadFixture()
+        reads.markers = [11]
+        reads.markerLength = .unavailable
+        reads.markerText = " \n\t"
+
+        XCTAssertEqual(reads.resolve(), .empty)
+        XCTAssertEqual(reads.calls.last, "marker")
+    }
+
+    func testSelectionTextResolverStillEnforcesBothLimitsWhenMarkerLengthIsMissing() {
+        for (text, maximumCharacters, maximumBytes) in [
+            ("large", 4, 20), ("😀", 4, 3),
+        ] {
+            let reads = SelectionTextReadFixture()
+            reads.maximumCharacters = maximumCharacters
+            reads.maximumUTF8Bytes = maximumBytes
+            reads.markers = [11]
+            reads.markerLength = .unavailable
+            reads.markerText = text
+
+            XCTAssertEqual(reads.resolve(), .failure(.selectionTooLarge))
+            XCTAssertEqual(reads.calls.last, "markerText")
+        }
+    }
+
+    func testSelectionTextResolverRejectsChangedMissingLengthMarker() {
+        let reads = SelectionTextReadFixture()
+        reads.markers = [11, 12]
+        reads.markerLength = .unavailable
+        reads.markerText = "stale"
+
+        XCTAssertEqual(reads.resolve(), .unavailable)
+        XCTAssertEqual(reads.trace.marker, .unstable)
+    }
+
+    func testSelectionTextResolverPreservesCancellationAndDeadlineForMissingMarkerLength() {
+        for failure in [SelectionAgentFailureCode.cancelled, .timedOut] {
+            for stage in ["markerLength", "markerText", "marker"] {
+                let reads = SelectionTextReadFixture()
+                reads.markers = [11]
+                reads.markerLength = .unavailable
+                reads.markerText = "current"
+                reads.interruptAfterStage = stage
+                reads.interruptAfterOccurrence = stage == "marker" ? 2 : 1
+                reads.interruptWith = failure
+
+                XCTAssertEqual(reads.resolve(), .failure(failure))
+                XCTAssertEqual(reads.calls.last, stage)
+            }
+        }
+    }
+
+    func testSelectionTextResolverDoesNotFetchInvalidOrOverflowingRange() {
+        for range in [NSRange(location: -1, length: 1),
+                      NSRange(location: 0, length: -1),
+                      NSRange(location: Int.max, length: 1)] {
+            let reads = SelectionTextReadFixture()
+            reads.ranges = [range]
+            reads.rangeText = "must not be read"
+
+            XCTAssertEqual(reads.resolve(), .unavailable)
+            XCTAssertFalse(reads.calls.contains("rangeText"))
+        }
+    }
+
+    func testSelectionTextResolverStopsWhenCurrentRangeChangesOrDisappears() {
+        for current in [nil, NSRange(location: 7, length: 0),
+                        NSRange(location: 8, length: 5)] as [NSRange?] {
+            let reads = SelectionTextReadFixture()
+            reads.direct = ""
+            reads.ranges = [NSRange(location: 7, length: 5), current]
+            reads.rangeText = "stale"
+            reads.markers = [11]
+            reads.markerLength = .known(5)
+            reads.markerText = "other"
+
+            XCTAssertEqual(reads.resolve(), .unavailable)
+            XCTAssertFalse(reads.calls.contains("marker"))
+            XCTAssertEqual(reads.trace.range, .unstable)
+        }
+    }
+
+    func testSelectionTextResolverStopsWhenCurrentMarkerChangesOrDisappears() {
+        for current in [nil, 12] as [Int?] {
+            let reads = SelectionTextReadFixture()
+            reads.markers = [11, current]
+            reads.markerLength = .known(5)
+            reads.markerText = "stale"
+
+            XCTAssertEqual(reads.resolve(), .unavailable)
+            XCTAssertEqual(reads.trace.marker, .unstable)
+        }
+    }
+
+    func testSelectionTextResolverKeepsValidDirectTextAndDoesNotReadFallbacks() {
+        let reads = SelectionTextReadFixture()
+        reads.direct = " direct \n"
+        reads.rangeText = "different"
+        reads.markerText = "different"
+
+        XCTAssertEqual(reads.resolve(), .selected(.init(
+            text: " direct \n", source: .direct, range: nil, marker: nil
+        )))
+        XCTAssertEqual(reads.calls, ["direct"])
+    }
+
+    func testSelectionTextResolverRefusesPasswordBeforeAnyTextOrRangeRead() {
+        let reads = SelectionTextReadFixture()
+        reads.isPasswordField = true
+        reads.direct = "not permitted"
+
+        XCTAssertEqual(reads.resolve(), .failure(.passwordField))
+        XCTAssertTrue(reads.calls.isEmpty)
+    }
+
+    func testSelectionTextResolverNeverMasksOversizedDirectOrFallbackWithShorterText() {
+        for source in ["direct", "range", "marker"] {
+            let reads = SelectionTextReadFixture()
+            reads.maximumCharacters = 4
+            reads.direct = source == "direct" ? "large" : ""
+            reads.ranges = [NSRange(location: 0, length: 5)]
+            reads.rangeText = source == "range" ? "large" : ""
+            reads.markers = [11]
+            reads.markerLength = .known(5)
+            reads.markerText = source == "marker" ? "large" : "ok"
+
+            XCTAssertEqual(reads.resolve(), .failure(.selectionTooLarge))
+            if source == "direct" {
+                XCTAssertEqual(reads.calls, ["direct"])
+            } else if source == "range" {
+                XCTAssertFalse(reads.calls.contains("marker"))
+            }
+        }
+    }
+
+    func testSelectionTextResolverEnforcesUTF8BytesAsWellAsCharacterLimit() {
+        let reads = SelectionTextReadFixture()
+        reads.maximumUTF8Bytes = 3
+        reads.ranges = [NSRange(location: 0, length: 2)]
+        reads.rangeText = "😀"
+        reads.markers = [11]
+        reads.markerLength = .known(1)
+        reads.markerText = "x"
+
+        XCTAssertEqual(reads.resolve(), .failure(.selectionTooLarge))
+        XCTAssertFalse(reads.calls.contains("marker"))
+    }
+
+    func testSelectionTextResolverRefusesOversizedMarkerLengthBeforeFetchingText() {
+        let reads = SelectionTextReadFixture()
+        reads.maximumUTF8Bytes = 4
+        reads.markers = [11]
+        reads.markerLength = .known(5)
+        reads.markerText = "x"
+
+        XCTAssertEqual(reads.resolve(), .failure(.selectionTooLarge))
+        XCTAssertFalse(reads.calls.contains("markerText"))
+    }
+
+    func testSelectionTextResolverRefusesOversizedRangeBeforeFetchingOrTryingMarker() {
+        let reads = SelectionTextReadFixture()
+        reads.maximumUTF8Bytes = 4
+        reads.ranges = [NSRange(location: 0, length: 5)]
+        reads.rangeText = "x"
+        reads.markers = [11]
+        reads.markerLength = .known(1)
+        reads.markerText = "x"
+
+        XCTAssertEqual(reads.resolve(), .failure(.selectionTooLarge))
+        XCTAssertEqual(reads.calls, ["direct", "range"])
+    }
+
+    func testSelectionTextResolverObservesCancellationAndDeadlineAfterEveryReadStage() {
+        for failure in [SelectionAgentFailureCode.cancelled, .timedOut] {
+            for stage in ["direct", "range", "rangeText", "marker",
+                          "markerLength", "markerText"] {
+                let reads = SelectionTextReadFixture()
+                reads.direct = ""
+                reads.ranges = [NSRange(location: 0, length: 1)]
+                reads.rangeText = ""
+                reads.markers = [11]
+                reads.markerLength = .known(1)
+                reads.markerText = "x"
+                reads.interruptAfterStage = stage
+                reads.interruptWith = failure
+
+                XCTAssertEqual(reads.resolve(), .failure(failure), stage)
+                XCTAssertEqual(reads.calls.last, stage)
+            }
+        }
+    }
+
+    func testSelectionTextResolverDoesNotStartWhenAlreadyInterrupted() {
+        for failure in [SelectionAgentFailureCode.cancelled, .timedOut] {
+            let reads = SelectionTextReadFixture()
+            reads.failure = failure
+
+            XCTAssertEqual(reads.resolve(), .failure(failure))
+            XCTAssertTrue(reads.calls.isEmpty)
+        }
+    }
+
+    func testSelectionTextResolverRejectsCancellationDuringRangeAndMarkerConfirmation() {
+        for stage in ["range", "marker"] {
+            let reads = SelectionTextReadFixture()
+            reads.ranges = [NSRange(location: 0, length: 1)]
+            reads.rangeText = stage == "range" ? "x" : ""
+            reads.markers = [11]
+            reads.markerLength = .known(1)
+            reads.markerText = "x"
+            reads.interruptAfterStage = stage
+            reads.interruptAfterOccurrence = 2
+
+            XCTAssertEqual(reads.resolve(), .failure(.cancelled))
+            XCTAssertEqual(reads.calls.last, stage)
+        }
+    }
+
+    func testSelectionTextResolverDistinguishesEmptyFromUnavailableAndDoesNotCacheText() {
+        let reads = SelectionTextReadFixture()
+        reads.direct = "first"
+        XCTAssertEqual(reads.resolve(), .selected(.init(
+            text: "first", source: .direct, range: nil, marker: nil
+        )))
+        reads.direct = nil
+        XCTAssertEqual(reads.resolve(), .unavailable)
+        reads.direct = " \n"
+        XCTAssertEqual(reads.resolve(), .empty)
+    }
+
+    func testSelectionCaptureDiagnosticsAreCappedAndNeverIncludeUnrecognizedRoleData() {
+        var diagnostics = SelectionHelperCaptureDiagnostics()
+        var trace = SelectionHelperCaptureDiagnostics.Trace()
+        trace.role = .init("private document text")
+        trace.record(.direct, .empty)
+        trace.record(.range, .unavailable)
+        trace.record(.marker, .selected)
+        for _ in 0..<20 {
+            diagnostics.record(strategy: .focusedWindowDocument, trace: trace)
+        }
+
+        XCTAssertEqual(diagnostics.inspectedCandidates, 20)
+        XCTAssertEqual(diagnostics.records.count,
+                       SelectionHelperCaptureDiagnostics.maximumCandidateRecords)
+        XCTAssertEqual(diagnostics.omittedCandidates,
+                       20 - SelectionHelperCaptureDiagnostics.maximumCandidateRecords)
+        XCTAssertTrue(diagnostics.records.allSatisfy {
+            $0 == "focusedWindowDocument:other:empty/unavailable/selected"
+        })
+    }
+
+    func testNativeMarkerSnapshotChecksTypeAndComparesBothOpaqueEndpoints() throws {
+        func marker(start: [UInt8], end: [UInt8]) -> AXTextMarkerRange {
+            start.withUnsafeBufferPointer { startBytes in
+                end.withUnsafeBufferPointer { endBytes in
+                    AXTextMarkerRangeCreateWithBytes(
+                        kCFAllocatorDefault,
+                        startBytes.baseAddress!, startBytes.count,
+                        endBytes.baseAddress!, endBytes.count
+                    )
+                }
+            }
+        }
+        let first = try XCTUnwrap(SelectionHelperTextMarkerSnapshot(
+            marker(start: [1, 2], end: [3, 4])
+        ))
+        let equal = try XCTUnwrap(SelectionHelperTextMarkerSnapshot(
+            marker(start: [1, 2], end: [3, 4])
+        ))
+        let movedStart = try XCTUnwrap(SelectionHelperTextMarkerSnapshot(
+            marker(start: [1, 5], end: [3, 4])
+        ))
+        let movedEnd = try XCTUnwrap(SelectionHelperTextMarkerSnapshot(
+            marker(start: [1, 2], end: [3, 5])
+        ))
+
+        XCTAssertEqual(first, equal)
+        XCTAssertNotEqual(first, movedStart)
+        XCTAssertNotEqual(first, movedEnd)
+        XCTAssertNil(SelectionHelperTextMarkerSnapshot("not a marker" as CFString))
+        XCTAssertNil(SelectionHelperTextMarkerSnapshot(marker(
+            start: Array(repeating: 1, count: 4_097), end: [2]
+        )))
+    }
+
+    func testSelectionTargetHitTestUsesOnlyTargetApplicationAndChecksReturnedPID() {
+        var applications: [String] = []
+        let matched = SelectionHelperTargetHitTest.read(
+            targetApplication: "frozen target application", targetPID: 42,
+            isAllowed: { true },
+            hitTest: { application in
+                applications.append(application)
+                return "target child"
+            },
+            processIdentifier: { _ in 42 }
+        )
+        XCTAssertEqual(applications, ["frozen target application"])
+        XCTAssertEqual(matched.element, "target child")
+        XCTAssertEqual(matched.status, .matched)
+
+        let mismatched = SelectionHelperTargetHitTest.read(
+            targetApplication: "frozen target application", targetPID: 42,
+            isAllowed: { true }, hitTest: { _ in "foreign child" },
+            processIdentifier: { _ in 99 }
+        )
+        XCTAssertNil(mismatched.element)
+        XCTAssertEqual(mismatched.status, .pidMismatch)
+
+        let unknownPID = SelectionHelperTargetHitTest.read(
+            targetApplication: "frozen target application", targetPID: 42,
+            isAllowed: { true }, hitTest: { _ in "unidentified child" },
+            processIdentifier: { _ in nil }
+        )
+        XCTAssertNil(unknownPID.element)
+        XCTAssertEqual(unknownPID.status, .unavailable)
+    }
+
+    func testSelectionTargetHitTestDoesNotReadPIDAfterInterruption() {
+        var allowed = true
+        var pidReads = 0
+        let result = SelectionHelperTargetHitTest.read(
+            targetApplication: "target", targetPID: 42,
+            isAllowed: { allowed },
+            hitTest: { _ in allowed = false; return "child" },
+            processIdentifier: { _ in pidReads += 1; return 42 }
+        )
+        XCTAssertNil(result.element)
+        XCTAssertEqual(result.status, .interrupted)
+        XCTAssertEqual(pidReads, 0)
+    }
+
+    func testSelectionTargetHitTestSkipsAllWorkWhenAlreadyInterrupted() {
+        var calls = 0
+        let result = SelectionHelperTargetHitTest.read(
+            targetApplication: "target", targetPID: 42,
+            isAllowed: { false },
+            hitTest: { _ in calls += 1; return "child" },
+            processIdentifier: { _ in calls += 1; return 42 }
+        )
+        XCTAssertNil(result.element)
+        XCTAssertEqual(result.status, .interrupted)
+        XCTAssertEqual(calls, 0)
+    }
 
     func testHostedTestDetectionAllowsExplicitOverrideOnlyInDebug() {
         XCTAssertTrue(
@@ -929,6 +1426,74 @@ final class SelectionHelperServerTests: XCTestCase {
         assertKeychainQueries(spy.deleteQueries, identities: [tombstoneIdentity])
     }
 
+    #if !BLOCKS_LOCAL_DEVELOPMENT
+    func testOfficialResetPersistsDurableOptOutBeforeRemovingActivePairing() throws {
+        let key = Data(repeating: 0x67, count: 32)
+        let store = InMemoryKeyStore(activeKey: key)
+        let server = makeServer(store: store, pairingHandler: { _, _ in })
+        _ = try server.resetPairing("654321").get()
+        XCTAssertTrue(store.automaticAssociationDisabled)
+        XCTAssertNil(store.activeKey)
+        XCTAssertEqual(store.markerWriteCount, 1)
+        XCTAssertEqual(store.deleteCount, 1)
+    }
+
+    func testOfficialResetMarkerFailurePreservesPairingAndReportsFailure() {
+        let key = Data(repeating: 0x68, count: 32)
+        let store = InMemoryKeyStore(activeKey: key)
+        store.rejectMarkerWrites = true
+        let server = makeServer(store: store, pairingHandler: { _, _ in })
+        if case .success = server.resetPairing("654321") { XCTFail("Failed persistence must not report reset success") }
+        XCTAssertEqual(store.activeKey, key)
+        XCTAssertEqual(store.deleteCount, 0)
+    }
+
+    func testOfficialDisconnectMarkerFailurePreservesPairing() {
+        let key = Data(repeating: 0x69, count: 32)
+        let store = InMemoryKeyStore(activeKey: key)
+        store.rejectMarkerWrites = true
+        let server = makeServer(store: store, pairingHandler: { _, _ in })
+        XCTAssertFalse(server.disconnectPairedClient())
+        XCTAssertEqual(store.activeKey, key)
+        XCTAssertEqual(store.deleteCount, 0)
+    }
+
+    func testOfficialPersistedOptOutBlocksHealthAndCaptureWhenActiveDeletionFails() async throws {
+        let key = Data(repeating: 0x70, count: 32)
+        let store = InMemoryKeyStore(activeKey: key)
+        store.rejectDeletes = true
+        let server = makeServer(store: store, pairingHandler: { _, _ in })
+        if case .success = server.resetPairing("654321") { XCTFail("Active deletion failed") }
+        XCTAssertTrue(store.automaticAssociationDisabled)
+        XCTAssertEqual(store.activeKey, key)
+        let responses = LockedResponses()
+        let finished = expectation(description: "both disabled commands refused")
+        finished.expectedFulfillmentCount = 2
+        for kind in [SelectionHelperCommandKind.health, .capture] {
+            let sealed = try SelectionHelperAuthenticatedCodec.seal(SelectionHelperCommand(kind: kind),
+                requestID: UUID().uuidString, expiresAt: Date().addingTimeInterval(5), keyData: key)
+            let packet = SelectionHelperWirePacket(kind: .authenticated, payload: try JSONEncoder().encode(sealed))
+            server.submitRawAuthenticatedPacketForTesting(packet) { data in responses.append(data); finished.fulfill() }
+        }
+        await fulfillment(of: [finished], timeout: 2)
+        XCTAssertEqual(responses.values.count, 2)
+        XCTAssertTrue(responses.values.allSatisfy { $0 == nil })
+        XCTAssertEqual(store.activeKey, key)
+    }
+
+    func testOfficialHelperAssociationAbsenceAndAddOnlyPersistenceFailClosed() {
+        let absentSpy = KeychainOperationSpy()
+        XCTAssertTrue(makeKeyStore(spy: absentSpy).permitsLocalAssociation())
+        XCTAssertEqual(absentSpy.operationKinds, [.copy, .copy, .copy])
+        let presentSpy = KeychainOperationSpy(copyResult: Data())
+        XCTAssertFalse(makeKeyStore(spy: presentSpy).permitsLocalAssociation())
+        XCTAssertEqual(presentSpy.operationKinds, [.copy])
+        let duplicateSpy = KeychainOperationSpy(addStatus: errSecDuplicateItem)
+        XCTAssertFalse(makeKeyStore(spy: duplicateSpy).saveLocalAssociationIfAbsent(Data(repeating: 1, count: 32)))
+        XCTAssertEqual(duplicateSpy.operationKinds, [.add])
+    }
+    #endif
+
     private func makeServer(
         store: InMemoryKeyStore,
         now: @escaping () -> Date = Date.init,
@@ -1114,6 +1679,61 @@ final class SelectionHelperServerTests: XCTestCase {
 }
 
 #if DEBUG
+/// Calls the same closure boundary used by SelectionAgentCaptureWorker. The
+/// sequences deliberately model a selection changing during a single AX read.
+private final class SelectionTextReadFixture {
+    var isPasswordField = false
+    var maximumCharacters = 100
+    var maximumUTF8Bytes = 400
+    var direct: String?
+    var ranges: [NSRange?] = [nil]
+    var rangeText: String?
+    var markers: [Int?] = [nil]
+    var markerLength = SelectionHelperMarkerLength.unavailable
+    var markerText: String?
+    var failure: SelectionAgentFailureCode?
+    var interruptAfterStage: String?
+    var interruptAfterOccurrence = 1
+    var interruptWith = SelectionAgentFailureCode.cancelled
+    private(set) var calls: [String] = []
+    var trace = SelectionHelperCaptureDiagnostics.Trace()
+
+    func resolve() -> SelectionHelperSelectionTextResolver.Outcome<Int> {
+        SelectionHelperSelectionTextResolver.resolve(
+            isPasswordField: isPasswordField,
+            maximumCharacters: maximumCharacters,
+            maximumUTF8Bytes: maximumUTF8Bytes,
+            interruption: { self.failure },
+            directText: { self.didRead("direct"); return self.direct },
+            selectedRange: {
+                self.didRead("range")
+                return self.ranges.count > 1
+                    ? self.ranges.removeFirst() : self.ranges.first ?? nil
+            },
+            rangeText: { _ in self.didRead("rangeText"); return self.rangeText },
+            selectedMarker: {
+                self.didRead("marker")
+                return self.markers.count > 1
+                    ? self.markers.removeFirst() : self.markers.first ?? nil
+            },
+            markerLength: { _ in
+                self.didRead("markerLength")
+                return self.markerLength
+            },
+            markerText: { _ in self.didRead("markerText"); return self.markerText },
+            record: { self.trace.record($0, $1) }
+        )
+    }
+
+    private func didRead(_ stage: String) {
+        calls.append(stage)
+        if interruptAfterStage == stage,
+           calls.filter({ $0 == stage }).count == interruptAfterOccurrence {
+            failure = interruptWith
+        }
+    }
+}
+
 private struct KeychainIdentity: Equatable {
     let service: String
     let account: String
@@ -1254,6 +1874,11 @@ private final class InMemoryKeyStore: SelectionHelperKeyStoring {
     var activeKey: Data?
     let legacyKey: Data?
     private(set) var saveCount = 0
+    private(set) var deleteCount = 0
+    private(set) var markerWriteCount = 0
+    private(set) var automaticAssociationDisabled = false
+    var rejectMarkerWrites = false
+    var rejectDeletes = false
 
     init(activeKey: Data? = nil, legacyKey: Data? = nil) {
         self.activeKey = activeKey
@@ -1270,9 +1895,25 @@ private final class InMemoryKeyStore: SelectionHelperKeyStoring {
     }
 
     func delete() -> Bool {
+        deleteCount += 1
+        guard !rejectDeletes else { return false }
         activeKey = nil
         return true
     }
+
+    func persistAutomaticAssociationDisabled() -> Bool {
+        markerWriteCount += 1
+        guard !rejectMarkerWrites else { return false }
+        automaticAssociationDisabled = true
+        return true
+    }
+    func permitsExplicitAssociationIntent() -> Bool { activeKey == nil && legacyKey == nil }
+    func prepareExplicitLocalAssociation() -> Bool {
+        guard permitsExplicitAssociationIntent() else { return false }
+        automaticAssociationDisabled = false
+        return true
+    }
+    func permitsAuthenticatedUse() -> Bool { !automaticAssociationDisabled }
 
     func replaceActiveKeyWithDisconnectTombstone(expiresAt: Date) -> Bool { false }
     func loadDisconnectTombstone(now: Date) -> Data? { nil }

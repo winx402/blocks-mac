@@ -3603,6 +3603,9 @@ final class TranslationEntryBridgeTests: XCTestCase {
             key: key,
             disconnectResult: .success(true)
         )
+        #if !BLOCKS_LOCAL_DEVELOPMENT
+        connection.onOfficialConfirmedDisconnect = { keyStore.helperDelete() }
+        #endif
         let client = SelectionHelperClient(
             keyStore: keyStore,
             connection: connection,
@@ -3615,7 +3618,12 @@ final class TranslationEntryBridgeTests: XCTestCase {
             try client.disconnect(timeout: 0.01).get()
         )
         XCTAssertNil(keyStore.load())
+        #if BLOCKS_LOCAL_DEVELOPMENT
         XCTAssertEqual(keyStore.deleteCount, 1)
+        #else
+        XCTAssertEqual(keyStore.deleteCount, 0)
+        XCTAssertEqual(keyStore.helperDeleteCount, 1)
+        #endif
         XCTAssertEqual(connection.disconnectRequestCount, 1)
         XCTAssertFalse(connection.helperStillHasKey)
     }
@@ -3726,6 +3734,9 @@ final class TranslationEntryBridgeTests: XCTestCase {
             ],
             helperRemovesKeyBeforeFailedDisconnectRequests: [1]
         )
+        #if !BLOCKS_LOCAL_DEVELOPMENT
+        connection.onOfficialHelperKeyDeletion = { keyStore.helperDelete() }
+        #endif
         let client = SelectionHelperClient(
             keyStore: keyStore,
             connection: connection,
@@ -3739,28 +3750,74 @@ final class TranslationEntryBridgeTests: XCTestCase {
                 trustedHostTeamIdentifierProvider: { "TESTTEAM01" }
             )
         )
+        #if !BLOCKS_LOCAL_DEVELOPMENT
+        let disableLock = NSLock()
+        var disableRequestCount = 0
+        client.setLocalAssociationSendForTesting { request, _ in
+            guard request.kind == .disable else {
+                XCTFail("disconnect recovery must only request local disable")
+                return nil
+            }
+            return disableLock.withLock {
+                disableRequestCount += 1
+                XCTAssertNil(keyStore.load())
+                XCTAssertTrue(keyStore.automaticAssociationDisabled)
+                // The Helper has committed its durable opt-out, but the
+                // first local disable acknowledgement is lost as well.
+                guard disableRequestCount > 1 else { return nil }
+                return .init(isPaired: false, automaticAssociationDisabled: true)
+            }
+        }
+        #endif
+        let recoveryStore = SelectionHelperDisconnectRecoveryStoreStub()
         let controller = SelectionHelperSettingsController(
             client: client,
-            disconnectRecoveryStore:
-                SelectionHelperDisconnectRecoveryStoreStub()
+            disconnectRecoveryStore: recoveryStore
         )
 
         controller.disconnect()
-        await waitUntil { connection.disconnectRequestCount == 1 }
+        await waitUntil { controller.state == .connectionFailed }
+        XCTAssertEqual(connection.disconnectRequestCount, 1)
+        XCTAssertNotNil(recoveryStore.deadline)
+        #if BLOCKS_LOCAL_DEVELOPMENT
         XCTAssertTrue(client.isPaired)
+        #else
+        XCTAssertFalse(client.isPaired)
+        XCTAssertEqual(keyStore.helperDeleteCount, 1)
+        XCTAssertEqual(keyStore.deleteCount, 0)
+        #endif
         XCTAssertFalse(connection.helperStillHasKey)
         XCTAssertTrue(connection.hasDisconnectTombstone)
 
-        // The second attempt models a restarted Helper reading the same
-        // persisted acknowledgement; its reply is lost as well.
+        // Dev retains an independent App key for an authenticated tombstone
+        // retry. Official builds already observe the shared active deletion
+        // and confirm the durable opt-out through the verified local channel.
         controller.refresh()
-        await waitUntil { connection.disconnectRequestCount == 2 }
+        await waitUntil { controller.state == .connectionFailed }
+        XCTAssertNotNil(recoveryStore.deadline)
+        #if BLOCKS_LOCAL_DEVELOPMENT
+        XCTAssertEqual(connection.disconnectRequestCount, 2)
         XCTAssertTrue(client.isPaired)
+        #else
+        XCTAssertEqual(disableLock.withLock { disableRequestCount }, 1)
+        XCTAssertEqual(connection.disconnectRequestCount, 1)
+        XCTAssertFalse(client.isPaired)
+        #endif
 
         controller.refresh()
-        await waitUntil { !client.isPaired }
+        await waitUntil { controller.state == .notPaired && recoveryStore.deadline == nil }
+        #if BLOCKS_LOCAL_DEVELOPMENT
         XCTAssertEqual(connection.disconnectRequestCount, 3)
+        XCTAssertEqual(keyStore.deleteCount, 1)
+        #else
+        XCTAssertEqual(disableLock.withLock { disableRequestCount }, 2)
+        XCTAssertEqual(connection.disconnectRequestCount, 1)
+        XCTAssertEqual(keyStore.deleteCount, 0)
+        XCTAssertEqual(keyStore.helperDeleteCount, 1)
+        XCTAssertTrue(keyStore.automaticAssociationDisabled)
+        #endif
         XCTAssertNil(keyStore.load())
+        XCTAssertNil(recoveryStore.deadline)
         XCTAssertEqual(controller.state, .notPaired)
     }
 
@@ -3778,6 +3835,9 @@ final class TranslationEntryBridgeTests: XCTestCase {
             ],
             helperRemovesKeyBeforeFailedDisconnectRequests: [1]
         )
+        #if !BLOCKS_LOCAL_DEVELOPMENT
+        connection.onOfficialHelperKeyDeletion = { keyStore.helperDelete() }
+        #endif
         let client = SelectionHelperClient(
             keyStore: keyStore,
             connection: connection,
@@ -3785,23 +3845,67 @@ final class TranslationEntryBridgeTests: XCTestCase {
                 candidates: []
             )
         )
+        #if !BLOCKS_LOCAL_DEVELOPMENT
+        let disableLock = NSLock()
+        var disableRequestCount = 0
+        client.setLocalAssociationSendForTesting { request, _ in
+            guard request.kind == .disable else {
+                XCTFail("disconnect recovery must only request local disable")
+                return nil
+            }
+            disableLock.withLock { disableRequestCount += 1 }
+            XCTAssertNil(keyStore.load())
+            XCTAssertTrue(keyStore.automaticAssociationDisabled)
+            return .init(isPaired: false, automaticAssociationDisabled: true)
+        }
+        #endif
 
         switch client.disconnect(timeout: 0.01) {
         case let .failure(failure):
             XCTAssertEqual(failure, .connectionFailed)
         case .success:
-            XCTFail("Disconnect unexpectedly removed the main-App key")
+            XCTFail("A lost acknowledgement must not report confirmed disconnection")
         }
+        #if BLOCKS_LOCAL_DEVELOPMENT
         XCTAssertEqual(
             client.health(timeout: 0.01),
             .failure(.connectionFailed)
         )
+        #else
+        XCTAssertNil(keyStore.load())
+        XCTAssertEqual(client.health(timeout: 0.01), .failure(.notPaired))
+        XCTAssertTrue(connection.rejectedTombstoneCommands.isEmpty)
+        // Preserve the authenticated Helper tombstone contract without
+        // inventing an independent official App key that no longer exists.
+        let healthEnvelope = try SelectionHelperAuthenticatedCodec.seal(
+            SelectionHelperCommand(kind: .health),
+            requestID: UUID().uuidString,
+            expiresAt: Date().addingTimeInterval(1),
+            keyData: key
+        )
+        let healthPacket = SelectionHelperWirePacket(
+            kind: .authenticated,
+            payload: try JSONEncoder().encode(healthEnvelope)
+        )
+        XCTAssertEqual(connection.send(healthPacket, timeout: 0.01),
+                       .failure(.connectionFailed))
+        #endif
         XCTAssertEqual(connection.rejectedTombstoneCommands, [.health])
 
         XCTAssertNoThrow(
             try client.disconnect(timeout: 0.01).get()
         )
         XCTAssertNil(keyStore.load())
+        #if BLOCKS_LOCAL_DEVELOPMENT
+        XCTAssertEqual(connection.disconnectRequestCount, 2)
+        XCTAssertEqual(keyStore.deleteCount, 1)
+        #else
+        XCTAssertEqual(disableLock.withLock { disableRequestCount }, 1)
+        XCTAssertEqual(connection.disconnectRequestCount, 1)
+        XCTAssertEqual(keyStore.deleteCount, 0)
+        XCTAssertEqual(keyStore.helperDeleteCount, 1)
+        XCTAssertTrue(keyStore.automaticAssociationDisabled)
+        #endif
     }
 
     func testSelectionHelperDisconnectRecoverySurvivesControllerRecreation()
@@ -3836,6 +3940,9 @@ final class TranslationEntryBridgeTests: XCTestCase {
             ],
             helperRemovesKeyBeforeFailedDisconnectRequests: [1]
         )
+        #if !BLOCKS_LOCAL_DEVELOPMENT
+        connection.onOfficialHelperKeyDeletion = { keyStore.helperDelete() }
+        #endif
         let recoveryStore = SelectionHelperDisconnectRecoveryStoreStub()
         let client = SelectionHelperClient(
             keyStore: keyStore,
@@ -3850,6 +3957,20 @@ final class TranslationEntryBridgeTests: XCTestCase {
                 trustedHostTeamIdentifierProvider: { "TESTTEAM01" }
             )
         )
+        #if !BLOCKS_LOCAL_DEVELOPMENT
+        let disableLock = NSLock()
+        var disableRequestCount = 0
+        client.setLocalAssociationSendForTesting { request, _ in
+            guard request.kind == .disable else {
+                XCTFail("restarted disconnect recovery must only request local disable")
+                return nil
+            }
+            disableLock.withLock { disableRequestCount += 1 }
+            XCTAssertNil(keyStore.load())
+            XCTAssertTrue(keyStore.automaticAssociationDisabled)
+            return .init(isPaired: false, automaticAssociationDisabled: true)
+        }
+        #endif
         let firstController = SelectionHelperSettingsController(
             client: client,
             disconnectRecoveryStore: recoveryStore
@@ -3857,21 +3978,40 @@ final class TranslationEntryBridgeTests: XCTestCase {
 
         XCTAssertTrue(client.hasInstallationConflict)
         firstController.disconnect()
-        await waitUntil { connection.disconnectRequestCount == 1 }
+        await waitUntil { firstController.state == .connectionFailed }
+        XCTAssertEqual(connection.disconnectRequestCount, 1)
         XCTAssertNotNil(recoveryStore.deadline)
+        #if BLOCKS_LOCAL_DEVELOPMENT
         XCTAssertTrue(client.isPaired)
+        #else
+        XCTAssertFalse(client.isPaired)
+        XCTAssertEqual(keyStore.deleteCount, 0)
+        XCTAssertEqual(keyStore.helperDeleteCount, 1)
+        #endif
 
-        // A new controller models a main-App restart. It restores the
-        // deadline and sends the only authenticated command accepted by the
-        // Helper's persisted tombstone.
+        // A new controller restores the pending deadline, not a paired state.
+        // Dev retries the authenticated tombstone; official builds confirm the
+        // durable disable through the verified local channel with no active key.
         let restartedController = SelectionHelperSettingsController(
             client: client,
             disconnectRecoveryStore: recoveryStore
         )
         restartedController.refresh()
-        await waitUntil { !client.isPaired }
+        await waitUntil {
+            restartedController.state == .notPaired && recoveryStore.deadline == nil
+        }
 
+        #if BLOCKS_LOCAL_DEVELOPMENT
         XCTAssertEqual(connection.disconnectRequestCount, 2)
+        XCTAssertEqual(keyStore.deleteCount, 1)
+        #else
+        XCTAssertEqual(disableLock.withLock { disableRequestCount }, 1)
+        XCTAssertEqual(connection.disconnectRequestCount, 1)
+        XCTAssertEqual(keyStore.deleteCount, 0)
+        XCTAssertEqual(keyStore.helperDeleteCount, 1)
+        XCTAssertTrue(keyStore.automaticAssociationDisabled)
+        #endif
+        XCTAssertFalse(client.isPaired)
         XCTAssertNil(recoveryStore.deadline)
         XCTAssertEqual(restartedController.state, .notPaired)
     }
@@ -4127,7 +4267,7 @@ final class TranslationEntryBridgeTests: XCTestCase {
         XCTAssertEqual(
             controller.lastError,
             L10n.string(
-                "translation.selectionHelper.error.connectionFailed"
+                "translation.selectionHelper.error.associationUnavailable"
             )
         )
     }
@@ -8549,16 +8689,16 @@ final class TranslationEntryBridgeTests: XCTestCase {
         XCTAssertEqual(resolved, input)
     }
 
-    func testEmptySelectionFailuresAreSilentButRuntimeFaultsRemainVisible() {
+    func testSelectionAttemptFailuresRemainVisibleWhileNonAttemptsStaySilent() {
         let silent: [AXSelectionReadFailureReason] = [
             .noFrontmostApplication,
             .blocksIsFrontmost,
             .cancelled,
+        ]
+        let actionable: [AXSelectionReadFailureReason] = [
             .focusedElementUnavailable,
             .selectionUnavailable,
             .emptySelection,
-        ]
-        let actionable: [AXSelectionReadFailureReason] = [
             .accessibilityPermissionDenied,
             .agentUnavailable,
             .agentInstallationConflict,
@@ -8583,6 +8723,27 @@ final class TranslationEntryBridgeTests: XCTestCase {
                     .isSilentManualInput($0)
             }
         )
+    }
+
+    func testOrdinaryManualInputDoesNotAcquireSelectionFailureFeedbackState() {
+        let suiteName = "TranslationManualSelectionFeedback.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = TranslationPanelSessionModel(
+            input: TranslationInput(source: .manual, text: ""),
+            direction: TranslationLanguageDirection(
+                target: TranslationLanguageTag("zh-Hans")!
+            ),
+            translationStore: TranslationStore(defaults: defaults)
+        )
+
+        XCTAssertEqual(model.selectionReadState, .notApplicable)
+        model.updateSelection(.unavailable(AXSelectionReadFailure(
+            reason: .emptySelection, target: nil
+        )))
+        XCTAssertEqual(model.selectionReadState, .notApplicable)
+        XCTAssertEqual(model.sourceText, "")
+        model.cancel()
     }
 
     func testAppStoreSelectionShortcutFallsBackToManualInputWithoutReadingHelper()
@@ -9389,15 +9550,22 @@ final class TranslationEntryBridgeTests: XCTestCase {
             preferredSize: CGSize(width: 520, height: 345),
             visibleFrame: visible
         )
-        // AppKit aligns native window origins to device pixels. CI's 1x
-        // display can have a half-point ideal center for other visible sizes.
-        // Permit at most half a physical pixel, never a saved-origin offset.
+        // Ask an independent native panel how this OS aligns the requested
+        // frame. macOS 27 can round a half-point origin to a whole point even
+        // on a 2x display; pixel-only tolerance incorrectly rejects that.
+        let nativeReference = NSPanel(contentRect: expected, styleMask: panel.styleMask,
+            backing: .buffered, defer: false)
+        defer { nativeReference.close() }
+        nativeReference.setFrame(expected, display: false)
+        let nativeExpected = nativeReference.frame
         XCTAssertGreaterThan(panel.backingScaleFactor, 0)
         let pixelTolerance = 0.5 / panel.backingScaleFactor
-        let diagnostic = "capturedVisible=\(visible) resolvedVisible=\(String(describing: panel.screen?.visibleFrame)) actual=\(panel.frame) expected=\(expected) scale=\(panel.backingScaleFactor)"
+        let diagnostic = "capturedVisible=\(visible) resolvedVisible=\(String(describing: panel.screen?.visibleFrame)) actual=\(panel.frame) expected=\(expected) nativeExpected=\(nativeExpected) scale=\(panel.backingScaleFactor)"
+        XCTAssertEqual(nativeExpected.minX, expected.minX, accuracy: 1, diagnostic)
+        XCTAssertEqual(nativeExpected.minY, expected.minY, accuracy: 1, diagnostic)
         XCTAssertEqual(panel.frame.size, expected.size, diagnostic)
-        XCTAssertEqual(panel.frame.minX, expected.minX, accuracy: pixelTolerance, diagnostic)
-        XCTAssertEqual(panel.frame.minY, expected.minY, accuracy: pixelTolerance, diagnostic)
+        XCTAssertEqual(panel.frame.minX, nativeExpected.minX, accuracy: pixelTolerance, diagnostic)
+        XCTAssertEqual(panel.frame.minY, nativeExpected.minY, accuracy: pixelTolerance, diagnostic)
         presenter.close()
     }
 
@@ -10418,6 +10586,8 @@ private final class SelectionHelperKeyStoreStub:
     private let loadDelay: TimeInterval
     private let associationLoadFailure: SelectionAgentServiceFailure?
     private(set) var deleteCount = 0
+    private(set) var helperDeleteCount = 0
+    private(set) var automaticAssociationDisabled = false
 
     init(
         key: Data? = nil,
@@ -10449,6 +10619,21 @@ private final class SelectionHelperKeyStoreStub:
     func delete() {
         deleteCount += 1
         storedKey = nil
+    }
+    func helperDelete() {
+        helperDeleteCount += 1
+        automaticAssociationDisabled = true
+        storedKey = nil
+    }
+
+    func persistAutomaticAssociationDisabled() -> Bool {
+        automaticAssociationDisabled = true
+        return true
+    }
+
+    func prepareExplicitLocalAssociation() -> Bool {
+        guard storedKey == nil, associationLoadFailure == nil else { return false }
+        return true
     }
 }
 
@@ -10505,6 +10690,12 @@ private final class SelectionHelperAuthenticatedConnectionStub:
     SelectionHelperLoopbackConnecting
 {
     private var key: Data
+    // The official App no longer deletes the shared item after a late ack.
+    // These legacy fixtures explicitly simulate the Helper-side shared delete.
+    var onOfficialConfirmedDisconnect: (() -> Void)?
+    // Shared active deletion is observable even when the acknowledgement is
+    // lost. This callback models the Helper commit, not an App-side mutation.
+    var onOfficialHelperKeyDeletion: (() -> Void)?
     private var disconnectResults:
         [Result<Bool, SelectionAgentServiceFailure>]
     private let helperRemovesKeyBeforeFailedDisconnectRequests: Set<Int>
@@ -10655,20 +10846,26 @@ private final class SelectionHelperAuthenticatedConnectionStub:
             if helperRemovesKeyBeforeFailedDisconnectRequests.contains(
                 disconnectRequestCount
             ) {
-                helperStillHasKey = false
-                hasDisconnectTombstone = true
+                recordHelperKeyRemoval()
             }
             return .failure(failure)
         case let .success(confirmed):
             if confirmed {
-                helperStillHasKey = false
-                hasDisconnectTombstone = true
+                recordHelperKeyRemoval()
+                onOfficialConfirmedDisconnect?()
             }
             return sealedResponse(
                 SelectionHelperCommandResponse(booleanValue: confirmed),
                 requestID: envelope.requestID
             )
         }
+    }
+
+    private func recordHelperKeyRemoval() {
+        let removedActiveKey = helperStillHasKey
+        helperStillHasKey = false
+        hasDisconnectTombstone = true
+        if removedActiveKey { onOfficialHelperKeyDeletion?() }
     }
 
     private func sealedResponse(

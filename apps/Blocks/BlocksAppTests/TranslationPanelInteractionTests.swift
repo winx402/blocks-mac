@@ -88,8 +88,20 @@ final class TranslationPanelInteractionTests: XCTestCase {
             XCTAssertEqual(descriptor.level, .warning)
             XCTAssertNil(descriptor.action)
         }
+        for reason in [AXSelectionReadFailureReason.focusedElementUnavailable,
+                       .selectionUnavailable, .emptySelection] {
+            let descriptor = try XCTUnwrap(TranslationPanelSelectionFeedback.descriptor(
+                for: reason, detail: "", deduplicationKey: "selection-test",
+                openSetup: { XCTFail("an unreadable selection must not open helper setup") }
+            ))
+            XCTAssertEqual(descriptor.level, .info)
+            XCTAssertEqual(descriptor.title, L10n.string("translation.selection.unavailable"))
+            XCTAssertNil(descriptor.detail)
+            XCTAssertNil(descriptor.action)
+            XCTAssertFalse(descriptor.showsIndeterminateProgress)
+        }
         XCTAssertNil(TranslationPanelSelectionFeedback.descriptor(
-            for: .emptySelection, detail: "", deduplicationKey: "selection-test", openSetup: {}
+            for: .cancelled, detail: "", deduplicationKey: "selection-test", openSetup: {}
         ))
     }
 

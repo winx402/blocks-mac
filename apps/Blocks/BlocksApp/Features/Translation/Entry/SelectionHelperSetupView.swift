@@ -93,26 +93,13 @@ struct SelectionHelperSetupView: View {
             ProgressView().controlSize(.small)
         case .install, .update:
             Button(L10n.string("translation.selectionHelper.download")) { controller.openDownloadPage() }
-        case .open:
-            Button(L10n.string("translation.selectionHelper.open")) { controller.openHelper() }
-        case .pair:
-            Button(L10n.string("translation.selectionHelper.open")) { controller.openHelper() }
-            Text(L10n.string("translation.selectionHelper.pairingCode.detail"))
+        case .open, .pair:
+            Text(L10n.string("translation.selectionHelper.setup.associationConsent"))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 8) {
-                TextField(L10n.string("translation.selectionHelper.pairingCode"), text: $controller.pairingCode)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 120)
-                    .onChange(of: controller.pairingCode) { _, value in
-                        let normalized = String(value.filter(\.isNumber).prefix(6))
-                        if value != normalized { controller.pairingCode = normalized }
-                    }
-                    .accessibilityIdentifier("selectionHelper.setup.pairingCode")
-                Button(L10n.string("translation.selectionHelper.pair")) { controller.pair() }
-                    .disabled(controller.pairingCode.count != 6 || controller.isPairing)
-                    .accessibilityIdentifier("selectionHelper.setup.pair")
-            }
+            Button(L10n.string("translation.selectionHelper.setup.connect")) { controller.connectAfterExplicitOptIn() }
+                .disabled(controller.isPairing)
+                .accessibilityIdentifier("selectionHelper.setup.connect")
         case .permission:
             Button(L10n.string("translation.selectionHelper.requestPermission")) {
                 controller.requestAccessibilityPermission()

@@ -8,20 +8,81 @@ import Security
 /// bootstrap of the existing authenticated pairing protocol.
 public enum SelectionHelperLocalAssociation {
     public static let version = 1
+    /// Non-secret, durable opt-out. It is deliberately independent of the
+    /// expiring acknowledgement that contains the old disconnect key.
+    public static let disabledKeychainService = "\(BlocksSelectionHelperProtocol.keychainService).automatic-association-disabled"
+    public static let disabledKeychainAccount = "v1"
+    public static let disabledMarker = Data([1])
+
+    /// nil means unreadable or malformed; false alone means confirmed absent.
+    public static func disabledMarkerPresence(
+        query: [String: Any], copy: (CFDictionary, UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus
+    ) -> Bool? {
+        var read = query
+        read[kSecReturnData as String] = true
+        read[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        let status = copy(read as CFDictionary, &result)
+        if status == errSecItemNotFound { return false }
+        guard status == errSecSuccess, result as? Data == disabledMarker else { return nil }
+        return true
+    }
+
+    /// Only the non-secret opt-out item is handled here. Both stores supply
+    /// their existing no-UI, build-specific shared Keychain query and calls.
+    public static func persistDisabledMarker(
+        query: [String: Any],
+        copy: (CFDictionary, UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus,
+        add: (CFDictionary, UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus
+    ) -> Bool {
+        var item = query
+        item[kSecValueData as String] = disabledMarker
+        let status = add(item as CFDictionary, nil)
+        if status == errSecSuccess { return true }
+        guard status == errSecDuplicateItem else { return false }
+        var read = query
+        read[kSecReturnData as String] = true
+        read[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        return copy(read as CFDictionary, &result) == errSecSuccess && result as? Data == disabledMarker
+    }
+
+    public static func clearDisabledMarkerForExplicitOptIn(
+        query: [String: Any],
+        copy: (CFDictionary, UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus,
+        delete: (CFDictionary) -> OSStatus
+    ) -> Bool {
+        var read = query
+        read[kSecReturnData as String] = true
+        read[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        let status = copy(read as CFDictionary, &result)
+        if status == errSecItemNotFound { return true }
+        guard status == errSecSuccess, result as? Data == disabledMarker else { return false }
+        let removed = delete(query as CFDictionary)
+        return removed == errSecSuccess || removed == errSecItemNotFound
+    }
+    public struct Intent: Codable, Equatable, Sendable {
+        public let nonce: String
+        public let generation: UInt64
+        public let expiresAt: Date
+    }
     public struct Request: Codable, Sendable {
-        public enum Kind: String, Codable, Sendable { case status, authorize, pair }
+        public enum Kind: String, Codable, Sendable { case status, authorize, pair, disable }
         public let version: Int
         public let kind: Kind
         public let requestID: String
         public let clientPublicKey: Data?
         public let pairRequest: SelectionHelperPairRequest?
+        public let intent: Intent?
         public init(kind: Kind, requestID: String, clientPublicKey: Data? = nil,
-                    pairRequest: SelectionHelperPairRequest? = nil) {
+                    pairRequest: SelectionHelperPairRequest? = nil, intent: Intent? = nil) {
             version = SelectionHelperLocalAssociation.version
             self.kind = kind
             self.requestID = requestID
             self.clientPublicKey = clientPublicKey
             self.pairRequest = pairRequest
+            self.intent = intent
         }
     }
     public struct Authorization: Codable, Sendable {
@@ -37,23 +98,69 @@ public enum SelectionHelperLocalAssociation {
         public let isPaired: Bool
         public let authorization: Authorization?
         public let pairPacket: Data?
-        public init(isPaired: Bool, authorization: Authorization? = nil, pairPacket: Data? = nil) {
+        public let intent: Intent?
+        public let automaticAssociationDisabled: Bool?
+        public init(isPaired: Bool, authorization: Authorization? = nil, pairPacket: Data? = nil,
+                    intent: Intent? = nil, automaticAssociationDisabled: Bool? = nil) {
             version = SelectionHelperLocalAssociation.version
             self.isPaired = isPaired
             self.authorization = authorization
             self.pairPacket = pairPacket
+            self.intent = intent
+            self.automaticAssociationDisabled = automaticAssociationDisabled
         }
     }
 
-    #if BLOCKS_LOCAL_DEVELOPMENT
     /// Confined to the Helper's serial pairing queue. A bounded single grant
     /// cannot accumulate memory or authorize a different transcript. Removal
     /// precedes verification/commit: even a failed attempt spends the grant.
     public struct Authority {
         private var pending: Authorization?
+        private var pendingPeerToken: Data?
+        private struct PendingIntent {
+            let value: Intent
+            let requestID: String
+            let publicKey: Data
+            let peerToken: Data
+        }
+        private var pendingIntent: PendingIntent?
         public init() {}
+        public mutating func invalidate() {
+            pending = nil
+            pendingPeerToken = nil
+            pendingIntent = nil
+        }
+        public mutating func issueIntent(requestID: String, clientPublicKey: Data,
+                                         generation: UInt64, isPaired: Bool, now: Date,
+                                         peerToken: Data) -> Intent? {
+            guard !isPaired, UUID(uuidString: requestID) != nil,
+                  peerToken.count == MemoryLayout<audit_token_t>.size,
+                  (try? P256.KeyAgreement.PublicKey(rawRepresentation: clientPublicKey)) != nil else { return nil }
+            invalidate()
+            let value = Intent(nonce: UUID().uuidString, generation: generation, expiresAt: now.addingTimeInterval(5))
+            pendingIntent = .init(value: value, requestID: requestID, publicKey: clientPublicKey, peerToken: peerToken)
+            return value
+        }
+        /// Comparison, consumption, marker clearing and grant issue are all on
+        /// the Helper pairing queue. A reset/disable invalidates this nonce.
+        public mutating func consumeIntent(_ intent: Intent, requestID: String, clientPublicKey: Data,
+                                           generation: UInt64, isPaired: Bool, now: Date,
+                                           peerToken: Data) -> Bool {
+            let expected = pendingIntent
+            pendingIntent = nil
+            guard let expected, expected.value == intent, !isPaired,
+                  intent.generation == generation, now < intent.expiresAt,
+                  now >= intent.expiresAt.addingTimeInterval(-5),
+                  expected.requestID == requestID, expected.publicKey == clientPublicKey,
+                  expected.peerToken == peerToken else { return false }
+            return true
+        }
         public mutating func issue(requestID: String, clientPublicKey: Data,
-                                   generation: UInt64, isPaired: Bool, now: Date) -> Authorization? {
+                                   generation: UInt64, isPaired: Bool, now: Date,
+                                   peerToken: Data? = nil) -> Authorization? {
+            #if !BLOCKS_LOCAL_DEVELOPMENT
+            guard peerToken?.count == MemoryLayout<audit_token_t>.size else { return nil }
+            #endif
             guard !isPaired, UUID(uuidString: requestID) != nil,
                   (try? P256.KeyAgreement.PublicKey(rawRepresentation: clientPublicKey)) != nil else { return nil }
             var bytes = Data(count: 36)
@@ -71,13 +178,17 @@ public enum SelectionHelperLocalAssociation {
                                       code: String(format: "%06u", codeValue % 1_000_000),
                                       bootstrapKey: Data(bytes.prefix(32)))
             pending = grant
+            pendingPeerToken = peerToken
             return grant
         }
         public mutating func consume(request: SelectionHelperPairRequest,
-                                     generation: UInt64, isPaired: Bool, now: Date) -> Authorization? {
+                                     generation: UInt64, isPaired: Bool, now: Date,
+                                     peerToken: Data? = nil) -> Authorization? {
             let grant = pending
+            let expectedPeer = pendingPeerToken
             pending = nil
-            guard let grant, !isPaired, grant.generation == generation,
+            pendingPeerToken = nil
+            guard let grant, expectedPeer == peerToken, !isPaired, grant.generation == generation,
                   now < grant.expiresAt, now >= grant.expiresAt.addingTimeInterval(-5),
                   request.protocolVersion == BlocksSelectionHelperProtocol.version,
                   request.requestID == grant.requestID, request.clientPublicKey == grant.clientPublicKey,
@@ -85,10 +196,8 @@ public enum SelectionHelperLocalAssociation {
             return grant
         }
     }
-    #endif
 }
 
-#if BLOCKS_LOCAL_DEVELOPMENT
 /// Bounded blocking I/O, used only from background queues. No fallback to TCP
 /// or PID-only trust is permitted when the local peer cannot be authenticated.
 public enum SelectionHelperLocalAssociationTransport {
@@ -96,7 +205,55 @@ public enum SelectionHelperLocalAssociationTransport {
     private static let socketName = "helper.sock"
     private static var directoryPath: String? {
         guard let home = getpwuid(getuid())?.pointee.pw_dir else { return nil }
+        #if BLOCKS_LOCAL_DEVELOPMENT
         return String(cString: home) + "/Library/Application Support/Blocks Dev/Association"
+        #else
+        let library = String(cString: home) + "/Library/Containers/app.blocks.app/Data/Library"
+        if Bundle.main.bundleIdentifier == "app.blocks.app" {
+            guard FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first?.standardizedFileURL.path == library else { return nil }
+        }
+        return library + "/BlocksAssociation"
+        #endif
+    }
+
+    #if !BLOCKS_LOCAL_DEVELOPMENT
+    private static let officialTrust = SelectionHelperOfficialAssociationTrust.make()
+    #endif
+
+    public struct Peer: Sendable {
+        public let auditToken: Data
+        fileprivate let descriptor: Int32
+    }
+
+    private static func authenticatedPeer(_ descriptor: Int32, role: String) -> Peer? {
+        var token = audit_token_t()
+        var length = socklen_t(MemoryLayout<audit_token_t>.size)
+        guard getsockopt(descriptor, SOL_LOCAL, LOCAL_PEERTOKEN, &token, &length) == 0,
+              length == MemoryLayout<audit_token_t>.size,
+              token.val.1 == getuid(), token.val.3 == getuid() else { return nil }
+        let data = withUnsafeBytes(of: &token) { Data($0) }
+        #if BLOCKS_LOCAL_DEVELOPMENT
+        guard BlocksLocalBuildTrust.accepts(connectedSocket: descriptor, role: role) else { return nil }
+        #else
+        guard officialTrust?.authenticate(auditToken: data, role: role) == true else { return nil }
+        #endif
+        return .init(auditToken: data, descriptor: descriptor)
+    }
+
+    /// Handler-only context: the descriptor remains open for the synchronous
+    /// handler, and both the kernel token and pinned installation are rechecked.
+    public static func isCurrent(_ peer: Peer, role: String) -> Bool {
+        authenticatedPeer(peer.descriptor, role: role)?.auditToken == peer.auditToken
+    }
+
+    private static func responsePeerIsCurrent(_ peer: Peer) -> Bool {
+        #if BLOCKS_LOCAL_DEVELOPMENT
+        // The server may already have closed its side after writing the reply.
+        // Development retains its original pre-message registry validation.
+        return true
+        #else
+        return officialTrust?.authenticate(auditToken: peer.auditToken, role: "helper") == true
+        #endif
     }
 
     public static func send(_ request: SelectionHelperLocalAssociation.Request,
@@ -108,16 +265,17 @@ public enum SelectionHelperLocalAssociationTransport {
         defer { close(descriptor) }
         configure(descriptor, timeout: timeout)
         guard connect(descriptor, path: path + "/" + socketName, timeout: timeout),
-              BlocksLocalBuildTrust.accepts(connectedSocket: descriptor, role: "helper"),
+              let peer = authenticatedPeer(descriptor, role: "helper"),
               let data = try? JSONEncoder().encode(request), writeFrame(data, descriptor: descriptor),
               let reply = readFrame(descriptor: descriptor),
               let response = try? JSONDecoder().decode(SelectionHelperLocalAssociation.Response.self, from: reply),
-              response.version == SelectionHelperLocalAssociation.version else { return nil }
+              response.version == SelectionHelperLocalAssociation.version,
+              responsePeerIsCurrent(peer) else { return nil }
         return response
     }
 
     public final class Server: @unchecked Sendable {
-        private let queue = DispatchQueue(label: "app.blocks.dev.selection-helper.association")
+        private let queue = DispatchQueue(label: "\(BlocksRuntimeIdentity.identifierPrefix).selection-helper.association")
         private var source: DispatchSourceRead?
         private var listener: Int32 = -1
         private var directory: Int32 = -1
@@ -137,7 +295,10 @@ public enum SelectionHelperLocalAssociationTransport {
         /// Failure only disables this optional enhancement. The legacy manual
         /// pairing listener is independent and remains available.
         @discardableResult
-        public func start(handler: @escaping @Sendable (Data) -> Data?) -> Bool {
+        public func start(handler: @escaping @Sendable (Data, Peer) -> Data?) -> Bool {
+            #if !BLOCKS_LOCAL_DEVELOPMENT
+            guard officialTrust?.snapshotIsCurrent() == true else { return false }
+            #endif
             guard listener < 0, let path = directoryPath,
                   let directory = openPrivateDirectory(path: path, create: true) else { return false }
             let lock = openat(directory, "listener.lock", O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
@@ -179,8 +340,9 @@ public enum SelectionHelperLocalAssociationTransport {
                 guard peer >= 0 else { return }
                 defer { close(peer) }
                 configure(peer, timeout: 0.5)
-                guard BlocksLocalBuildTrust.accepts(connectedSocket: peer, role: "app"),
-                      let request = readFrame(descriptor: peer), let response = handler(request) else { return }
+                guard let identity = authenticatedPeer(peer, role: "app"),
+                      let request = readFrame(descriptor: peer), isCurrent(identity, role: "app"),
+                      let response = handler(request, identity) else { return }
                 _ = writeFrame(response, descriptor: peer)
             }
             self.source = source
@@ -194,7 +356,7 @@ public enum SelectionHelperLocalAssociationTransport {
     /// directory itself must be exactly 0700 and owned by the login user.
     static func openPrivateDirectory(path: String, create: Bool) -> Int32? {
         guard path.hasPrefix("/"), !path.split(separator: "/").contains("..") else { return nil }
-        var descriptor = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        var descriptor = open("/", O_SEARCH | O_CLOEXEC)
         guard descriptor >= 0 else { return nil }
         let components = path.split(separator: "/").map(String.init)
         for (index, component) in components.enumerated() {
@@ -202,7 +364,7 @@ public enum SelectionHelperLocalAssociationTransport {
             if last && create {
                 if mkdirat(descriptor, component, 0o700) != 0 && errno != EEXIST { close(descriptor); return nil }
             }
-            let next = openat(descriptor, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            let next = openat(descriptor, component, O_SEARCH | O_NOFOLLOW | O_CLOEXEC)
             close(descriptor)
             guard next >= 0 else { return nil }
             descriptor = next
@@ -285,4 +447,3 @@ public enum SelectionHelperLocalAssociationTransport {
         return nil
     }
 }
-#endif

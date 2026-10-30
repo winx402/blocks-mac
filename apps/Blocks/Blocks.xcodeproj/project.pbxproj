@@ -31,6 +31,8 @@
 		B909H0000000000000000002 /* SelectionHelperLocalAssociation.swift in Helper */ = {isa = PBXBuildFile; fileRef = F909H0000000000000000001; };
 		B909H0000000000000000003 /* BlocksLocalBuildTrust.swift in Helper */ = {isa = PBXBuildFile; fileRef = F908D0000000000000000002; };
 		B909H0000000000000000004 /* SelectionHelperLocalAssociationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F909H0000000000000000004; };
+		B067T0000000000000000001 /* SelectionHelperOfficialAssociationTrust.swift in Sources */ = {isa = PBXBuildFile; fileRef = F067T0000000000000000001; };
+		B067T0000000000000000002 /* SelectionHelperOfficialAssociationTrust.swift in Helper */ = {isa = PBXBuildFile; fileRef = F067T0000000000000000001; };
 		B909F0000000000000000001 /* FeedbackModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = F909F0000000000000000001; };
 		B909F0000000000000000002 /* FeedbackStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = F909F0000000000000000002; };
 		B909F0000000000000000003 /* FeedbackGitHubClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = F909F0000000000000000003; };
@@ -598,6 +600,7 @@
 		F909R0000000000000000001 /* ClipboardRecencyPublicationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipboardRecencyPublicationTests.swift; sourceTree = "<group>"; };
 		F909W0000000000000000001 /* SettingsWindowBackingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsWindowBackingTests.swift; sourceTree = "<group>"; };
 		F909H0000000000000000001 /* SelectionHelperLocalAssociation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionHelperLocalAssociation.swift; sourceTree = "<group>"; };
+		F067T0000000000000000001 /* SelectionHelperOfficialAssociationTrust.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionHelperOfficialAssociationTrust.swift; sourceTree = "<group>"; };
 		F909H0000000000000000004 /* SelectionHelperLocalAssociationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelectionHelperLocalAssociationTests.swift; sourceTree = "<group>"; };
 		F909F0000000000000000001 /* FeedbackModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedbackModels.swift; sourceTree = "<group>"; };
 		F909F0000000000000000002 /* FeedbackStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedbackStore.swift; sourceTree = "<group>"; };
@@ -1233,6 +1236,7 @@
 				F05700000000000000000002 /* SourceUpgradeTransport.swift */,
 				F05900000000000000000001 /* LocalActionTransport.swift */,
 				F909H0000000000000000001 /* SelectionHelperLocalAssociation.swift */,
+				F067T0000000000000000001 /* SelectionHelperOfficialAssociationTrust.swift */,
 				F908D0000000000000000003 /* BlocksKeychainNamespace.swift */,
 				F10100000000000000000001 /* ActionEnvelope.swift */,
 				F10100000000000000000002 /* ActionRegistry.swift */,
@@ -2011,6 +2015,7 @@
 				B05700000000000000000002 /* SourceUpgradeTransport.swift in Sources */,
 				B05900000000000000000001 /* LocalActionTransport.swift in Sources */,
 				B909H0000000000000000001 /* SelectionHelperLocalAssociation.swift in Sources */,
+				B067T0000000000000000001 /* SelectionHelperOfficialAssociationTrust.swift in Sources */,
 				B908D0000000000000000003 /* BlocksKeychainNamespace.swift in Sources */,
 				B00100000000000000000001 /* ActionEnvelope.swift in Sources */,
 				B00100000000000000000002 /* ActionRegistry.swift in Sources */,
@@ -2435,6 +2440,7 @@
 				B908D0000000000000000005 /* BlocksKeychainNamespace.swift in Helper */,
 				B908L0000000000000000004 /* ApplicationOperationAdmission.swift in Helper */,
 				B909H0000000000000000002 /* SelectionHelperLocalAssociation.swift in Helper */,
+				B067T0000000000000000002 /* SelectionHelperOfficialAssociationTrust.swift in Helper */,
 				B909H0000000000000000003 /* BlocksLocalBuildTrust.swift in Helper */,
 				B27X00000000000000000004 /* BlocksSelectionHelperApp.swift in Sources */,
 				B27X00000000000000000006 /* SelectionAgentXPC.swift in Sources */,

@@ -507,15 +507,333 @@ final class SelectionHelperPasteTargetInspectionService {
     }
 }
 
+/// Length and String are independently optional AX parameterized attributes.
+/// Only an explicit unsupported/no-value response permits a String-only read;
+/// malformed lengths and unrelated AX failures remain a refusal.
+enum SelectionHelperMarkerLength: Equatable {
+    case known(Int)
+    case unavailable
+    case invalid
+
+    static func decode(status: AXError, value: CFTypeRef?) -> Self {
+        switch status {
+        case .parameterizedAttributeUnsupported, .attributeUnsupported,
+             .notImplemented, .noValue:
+            return .unavailable
+        case .success:
+            guard let value else { return .unavailable }
+            guard CFGetTypeID(value) == CFNumberGetTypeID() else {
+                return .invalid
+            }
+            var length = 0
+            guard CFNumberGetValue(value as! CFNumber, .cfIndexType, &length),
+                  length >= 0 else { return .invalid }
+            return .known(length)
+        default:
+            return .invalid
+        }
+    }
+}
+
+/// The production capture path uses this resolver for one candidate only. Its
+/// closures read the current selection, never a document value or cached text.
+enum SelectionHelperSelectionTextResolver {
+    enum Source: String {
+        case direct, range, marker
+    }
+
+    enum State: String {
+        case notAttempted, unavailable, empty, selected, tooLarge, unstable
+    }
+
+    struct Selection<Marker: Equatable>: Equatable {
+        let text: String
+        let source: Source
+        let range: NSRange?
+        let marker: Marker?
+    }
+
+    enum Outcome<Marker: Equatable>: Equatable {
+        case selected(Selection<Marker>)
+        case empty
+        case unavailable
+        case failure(SelectionAgentFailureCode)
+    }
+
+    static func resolve<Marker: Equatable>(
+        isPasswordField: Bool,
+        maximumCharacters: Int,
+        maximumUTF8Bytes: Int =
+            BlocksSelectionCaptureProtocol.maximumSelectionUTF8Bytes,
+        interruption: () -> SelectionAgentFailureCode?,
+        directText: () -> String?,
+        selectedRange: () -> NSRange?,
+        rangeText: (NSRange) -> String?,
+        selectedMarker: () -> Marker?,
+        markerLength: (Marker) -> SelectionHelperMarkerLength,
+        markerText: (Marker) -> String?,
+        record: (Source, State) -> Void = { _, _ in }
+    ) -> Outcome<Marker> {
+        if let failure = interruption() { return .failure(failure) }
+        guard !isPasswordField else { return .failure(.passwordField) }
+        var sawEmpty = false
+
+        func classify(_ text: String?) -> State {
+            guard let text else { return .unavailable }
+            guard text.count <= maximumCharacters,
+                  text.utf8.count <= maximumUTF8Bytes else {
+                return .tooLarge
+            }
+            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+                .isEmpty ? .empty : .selected
+        }
+
+        let direct = directText()
+        if let failure = interruption() { return .failure(failure) }
+        let directState = classify(direct)
+        if let failure = interruption() { return .failure(failure) }
+        record(.direct, directState)
+        switch directState {
+        case .selected:
+            return .selected(Selection(
+                text: direct!, source: .direct, range: nil, marker: nil
+            ))
+        case .tooLarge:
+            return .failure(.selectionTooLarge)
+        case .empty:
+            sawEmpty = true
+        default:
+            break
+        }
+
+        if let failure = interruption() { return .failure(failure) }
+        let range = selectedRange()
+        if let failure = interruption() { return .failure(failure) }
+        if let range, range.location >= 0, range.length > 0,
+           range.location <= Int.max - range.length {
+            // AX selected ranges, like marker lengths, use UTF-16 units; a
+            // range beyond the byte ceiling cannot yield an accepted string.
+            guard range.length <= maximumUTF8Bytes else {
+                record(.range, .tooLarge)
+                return .failure(.selectionTooLarge)
+            }
+            let text = rangeText(range)
+            if let failure = interruption() { return .failure(failure) }
+            let state = classify(text)
+            if let failure = interruption() { return .failure(failure) }
+            record(.range, state)
+            // An oversized fallback is a terminal refusal, not permission to
+            // select some other, shorter text from the candidate.
+            if state == .tooLarge { return .failure(.selectionTooLarge) }
+            if let failure = interruption() { return .failure(failure) }
+            let currentRange = selectedRange()
+            if let failure = interruption() { return .failure(failure) }
+            guard currentRange == range else {
+                record(.range, .unstable)
+                return .unavailable
+            }
+            if state == .selected {
+                return .selected(Selection(
+                    text: text!, source: .range, range: range, marker: nil
+                ))
+            }
+            sawEmpty = sawEmpty || state == .empty
+        } else {
+            let state: State = range?.length == 0 ? .empty : .unavailable
+            record(.range, state)
+            sawEmpty = sawEmpty || state == .empty
+        }
+
+        if let failure = interruption() { return .failure(failure) }
+        let marker = selectedMarker()
+        if let failure = interruption() { return .failure(failure) }
+        if let marker {
+            let length = markerLength(marker)
+            if let failure = interruption() { return .failure(failure) }
+            switch length {
+            case let .known(length):
+                guard length > 0 else {
+                    let state: State = length == 0 ? .empty : .unavailable
+                    record(.marker, state)
+                    return sawEmpty || state == .empty ? .empty : .unavailable
+                }
+                guard length <= maximumUTF8Bytes else {
+                    record(.marker, .tooLarge)
+                    return .failure(.selectionTooLarge)
+                }
+            case .invalid:
+                record(.marker, .unavailable)
+                return .unavailable
+            case .unavailable:
+                // String-only providers retain the same trust boundary as a
+                // direct AXSelectedText read: allocation cannot be bounded by
+                // a preflight Length, so both text limits are enforced after
+                // the native call. The process-wide AX timeout still applies.
+                break
+            }
+            if let failure = interruption() { return .failure(failure) }
+            let text = markerText(marker)
+            if let failure = interruption() { return .failure(failure) }
+            let state = classify(text)
+            if let failure = interruption() { return .failure(failure) }
+            record(.marker, state)
+            if state == .tooLarge { return .failure(.selectionTooLarge) }
+            if let failure = interruption() { return .failure(failure) }
+            let currentMarker = selectedMarker()
+            if let failure = interruption() { return .failure(failure) }
+            guard currentMarker == marker else {
+                record(.marker, .unstable)
+                return .unavailable
+            }
+            if state == .selected {
+                return .selected(Selection(
+                    text: text!, source: .marker, range: nil, marker: marker
+                ))
+            }
+            sawEmpty = sawEmpty || state == .empty
+        } else {
+            record(.marker, .unavailable)
+        }
+        return sawEmpty ? .empty : .unavailable
+    }
+}
+
+/// Only fixed states and allowlisted roles enter capture diagnostics. The cap
+/// applies to the entire request, not independently to each candidate strategy.
+struct SelectionHelperCaptureDiagnostics {
+    static let maximumCandidateRecords = 8
+
+    enum HitTest: String {
+        case noPoint, unavailable, interrupted, pidMismatch, matched
+    }
+
+    enum Role: String {
+        case webArea = "AXWebArea"
+        case document = "AXDocument"
+        case pdfView = "AXPDFView"
+        case textArea = "AXTextArea"
+        case textField = "AXTextField"
+        case staticText = "AXStaticText"
+        case group = "AXGroup"
+        case scrollArea = "AXScrollArea"
+        case other
+
+        init(_ rawRole: String?) {
+            self = rawRole.flatMap(Self.init(rawValue:)) ?? .other
+        }
+    }
+
+    struct Trace {
+        var role = Role.other
+        var direct = SelectionHelperSelectionTextResolver.State.notAttempted
+        var range = SelectionHelperSelectionTextResolver.State.notAttempted
+        var marker = SelectionHelperSelectionTextResolver.State.notAttempted
+
+        mutating func record(
+            _ source: SelectionHelperSelectionTextResolver.Source,
+            _ state: SelectionHelperSelectionTextResolver.State
+        ) {
+            switch source {
+            case .direct: direct = state
+            case .range: range = state
+            case .marker: marker = state
+            }
+        }
+    }
+
+    var hitTest = HitTest.noPoint
+    private(set) var inspectedCandidates = 0
+    private(set) var records: [String] = []
+    var omittedCandidates: Int { inspectedCandidates - records.count }
+
+    mutating func record(strategy: SelectionAgentCaptureStrategy, trace: Trace) {
+        inspectedCandidates += 1
+        guard records.count < Self.maximumCandidateRecords else { return }
+        records.append(
+            "\(strategy.rawValue):\(trace.role.rawValue):\(trace.direct.rawValue)/\(trace.range.rawValue)/\(trace.marker.rawValue)"
+        )
+    }
+}
+
+/// The native hit-test closure receives the target application, never the
+/// system-wide element, and the returned element still has to match its PID.
+enum SelectionHelperTargetHitTest {
+    static func read<Element>(
+        targetApplication: Element,
+        targetPID: pid_t,
+        isAllowed: () -> Bool,
+        hitTest: (Element) -> Element?,
+        processIdentifier: (Element) -> pid_t?
+    ) -> (element: Element?, status: SelectionHelperCaptureDiagnostics.HitTest) {
+        guard isAllowed() else { return (nil, .interrupted) }
+        let element = hitTest(targetApplication)
+        guard isAllowed() else { return (nil, .interrupted) }
+        guard let element else { return (nil, .unavailable) }
+        let actualPID = processIdentifier(element)
+        guard isAllowed() else { return (nil, .interrupted) }
+        guard let actualPID else { return (nil, .unavailable) }
+        guard actualPID == targetPID else { return (nil, .pidMismatch) }
+        return (element, .matched)
+    }
+}
+
+/// An application element's timeout does not cover returned descendants. The
+/// system-wide handle sets the current process's default AX messaging timeout;
+/// it is used only for this bounded scope, never for candidate hit-testing.
+enum SelectionHelperAXMessagingTimeoutPolicy {
+    static let maximumTimeout: Float = 0.1
+
+    static func timeout(deadline: Date, now: Date = Date()) -> Float {
+        Float(min(max(0.05, deadline.timeIntervalSince(now)),
+                  Double(maximumTimeout)))
+    }
+
+    static func withProcessWideTimeout<Handle, Output>(
+        systemWideElement: Handle,
+        deadline: Date,
+        now: Date = Date(),
+        setTimeout: (Handle, Float) -> Void,
+        operation: () throws -> Output
+    ) rethrows -> Output {
+        setTimeout(systemWideElement, timeout(deadline: deadline, now: now))
+        defer { setTimeout(systemWideElement, 0) }
+        return try operation()
+    }
+}
+
+struct SelectionHelperTextMarkerSnapshot: Equatable {
+    let value: AXTextMarkerRange
+    let start: Data
+    let end: Data
+
+    init?(_ value: CFTypeRef) {
+        guard CFGetTypeID(value) == AXTextMarkerRangeGetTypeID() else {
+            return nil
+        }
+        let range = value as! AXTextMarkerRange
+        let startMarker = AXTextMarkerRangeCopyStartMarker(range)
+        let endMarker = AXTextMarkerRangeCopyEndMarker(range)
+        let startLength = AXTextMarkerGetLength(startMarker)
+        let endLength = AXTextMarkerGetLength(endMarker)
+        // These opaque identities are local to this candidate/read only. They
+        // are never logged, serialized, or retained across capture requests.
+        guard (1...4_096).contains(startLength),
+              (1...4_096).contains(endLength) else { return nil }
+        self.value = range
+        start = Data(bytes: AXTextMarkerGetBytePtr(startMarker), count: startLength)
+        end = Data(bytes: AXTextMarkerGetBytePtr(endMarker), count: endLength)
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.start == rhs.start && lhs.end == rhs.end
+    }
+}
+
 private struct SelectionAgentCaptureWorker {
     private static let maximumAncestorDepth = 8
     private static let maximumDocumentDepth = 8
     private static let maximumDocumentNodes = 192
     private static let maximumChildrenPerNode = 48
-    /// AX messaging timeouts apply to one AXUIElement only. Descendants
-    /// returned from the application element therefore use the process-wide
-    /// value, which must stay short enough for cancellation to be observed.
-    private static let maximumMessagingTimeout: Float = 0.1
     private static let candidateRoles: Set<String> = [
         "AXWebArea",
         "AXDocument",
@@ -602,13 +920,20 @@ private struct SelectionAgentCaptureWorker {
         if let failure = interruptionFailure(for: request) {
             return failure
         }
-        AXUIElementSetMessagingTimeout(
-            systemWideElement,
-            messagingTimeout(for: request)
+        return SelectionHelperAXMessagingTimeoutPolicy.withProcessWideTimeout(
+            systemWideElement: systemWideElement,
+            deadline: request.deadline,
+            setTimeout: { element, timeout in
+                _ = AXUIElementSetMessagingTimeout(element, timeout)
+            },
+            operation: { captureSelection(request, startedAt: startedAt) }
         )
-        defer {
-            AXUIElementSetMessagingTimeout(systemWideElement, 0)
-        }
+    }
+
+    private func captureSelection(
+        _ request: SelectionAgentCaptureRequest,
+        startedAt: CFAbsoluteTime
+    ) -> SelectionAgentCaptureResponse {
         if let failure = interruptionFailure(for: request) {
             return failure
         }
@@ -632,7 +957,6 @@ private struct SelectionAgentCaptureWorker {
         }
         let response = readSelection(
             applicationElement: applicationElement,
-            systemWideElement: systemWideElement,
             focusedElement: focusedElement,
             request: request
         )
@@ -653,13 +977,18 @@ private struct SelectionAgentCaptureWorker {
 
     private func readSelection(
         applicationElement: AXUIElement,
-        systemWideElement: AXUIElement,
         focusedElement: AXUIElement?,
         request: SelectionAgentCaptureRequest
     ) -> SelectionAgentCaptureResponse {
         var candidates: [Candidate] = []
         var seen: Set<CFHashCode> = []
         var sawEmptySelection = false
+        var diagnostics = SelectionHelperCaptureDiagnostics()
+        defer {
+            Self.logger.info(
+                "capture paths request=\(request.requestID, privacy: .public) focused=\(focusedElement != nil, privacy: .public) candidates=\(candidates.count, privacy: .public) inspected=\(diagnostics.inspectedCandidates, privacy: .public) omitted=\(diagnostics.omittedCandidates, privacy: .public) hit=\(diagnostics.hitTest.rawValue, privacy: .public) states=\(diagnostics.records.joined(separator: ";"), privacy: .public)"
+            )
+        }
 
         if let focusedElement {
             appendAncestorCandidates(
@@ -674,16 +1003,17 @@ private struct SelectionAgentCaptureWorker {
             }
         }
         if let point = request.mouseScreenPoint {
-            let hitElement = element(
+            let hit = element(
                 at: point,
-                systemWideElement: systemWideElement,
+                applicationElement: applicationElement,
                 targetPID: request.targetProcessIdentifier,
                 request: request
             )
+            diagnostics.hitTest = hit.status
             if let failure = interruptionFailure(for: request) {
                 return failure
             }
-            if let hitElement {
+            if let hitElement = hit.element {
                 appendAncestorCandidates(
                     from: hitElement,
                     strategy: .mouseHitTest,
@@ -729,10 +1059,14 @@ private struct SelectionAgentCaptureWorker {
             if let failure = interruptionFailure(for: request) {
                 return failure
             }
-            switch readSelection(
+            var trace = SelectionHelperCaptureDiagnostics.Trace()
+            let outcome = readSelection(
                 in: candidate,
-                request: request
-            ) {
+                request: request,
+                trace: &trace
+            )
+            diagnostics.record(strategy: candidate.strategy, trace: trace)
+            switch outcome {
             case let .selected(selection):
                 return .success(
                     requestID: request.requestID,
@@ -762,7 +1096,8 @@ private struct SelectionAgentCaptureWorker {
 
     private func readSelection(
         in candidate: Candidate,
-        request: SelectionAgentCaptureRequest
+        request: SelectionAgentCaptureRequest,
+        trace: inout SelectionHelperCaptureDiagnostics.Trace
     ) -> CandidateReadOutcome {
         let element = candidate.element
         let role = stringAttribute(
@@ -770,6 +1105,7 @@ private struct SelectionAgentCaptureWorker {
             from: element,
             request: request
         )
+        trace.role = .init(role)
         if let failure = interruptionFailure(for: request) {
             return .interrupted(failure)
         }
@@ -781,62 +1117,55 @@ private struct SelectionAgentCaptureWorker {
         if let failure = interruptionFailure(for: request) {
             return .interrupted(failure)
         }
-        if subrole == kAXSecureTextFieldSubrole as String {
-            return candidate.strategy == .focusedWindowDocument
-                ? .unavailable
-                : .passwordField
-        }
-
-        let range = selectedTextRange(from: element, request: request)
-        if let failure = interruptionFailure(for: request) {
-            return .interrupted(failure)
-        }
-        let markerRange = selectedTextMarkerRange(
-            from: element,
-            request: request
-        )
-        if let failure = interruptionFailure(for: request) {
-            return .interrupted(failure)
-        }
-        var selectedText = directSelectedText(
-            from: element,
-            request: request
-        )
-        if let failure = interruptionFailure(for: request) {
-            return .interrupted(failure)
-        }
-        if selectedText == nil, let range {
-            selectedText = string(for: range, in: element, request: request)
-            if let failure = interruptionFailure(for: request) {
-                return .interrupted(failure)
-            }
-        }
-        if selectedText == nil, let markerRange {
-            selectedText = string(
-                forTextMarkerRange: markerRange,
-                in: element,
-                request: request
-            )
-            if let failure = interruptionFailure(for: request) {
-                return .interrupted(failure)
-            }
-        }
-        guard let selectedText else {
+        let isPasswordField = subrole == kAXSecureTextFieldSubrole as String
+        if isPasswordField, candidate.strategy == .focusedWindowDocument {
             return .unavailable
         }
-        guard !selectedText.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        ).isEmpty else {
-            return .empty
+
+        let resolved = SelectionHelperSelectionTextResolver.resolve(
+            isPasswordField: isPasswordField,
+            maximumCharacters: request.maximumCharacters,
+            interruption: { interruptionFailure(for: request)?.failureCode },
+            directText: { directSelectedText(from: element, request: request) },
+            selectedRange: { selectedTextRange(from: element, request: request) },
+            rangeText: { string(for: $0, in: element, request: request) },
+            selectedMarker: {
+                selectedTextMarkerRange(from: element, request: request)
+                    .flatMap(SelectionHelperTextMarkerSnapshot.init)
+            },
+            markerLength: {
+                length(forTextMarkerRange: $0.value, in: element, request: request)
+            },
+            markerText: {
+                string(forTextMarkerRange: $0.value, in: element, request: request)
+            },
+            record: { trace.record($0, $1) }
+        )
+        let selection: SelectionHelperSelectionTextResolver.Selection<
+            SelectionHelperTextMarkerSnapshot
+        >
+        switch resolved {
+        case let .selected(value): selection = value
+        case .empty: return .empty
+        case .unavailable: return .unavailable
+        case .failure(.passwordField): return .passwordField
+        case let .failure(code):
+            return .interrupted(.failure(requestID: request.requestID, code: code))
         }
-        guard selectedText.count <= request.maximumCharacters,
-              selectedText.utf8.count <=
-                BlocksSelectionCaptureProtocol
-                    .maximumSelectionUTF8Bytes else {
-            return .interrupted(.failure(
-                requestID: request.requestID,
-                code: .selectionTooLarge
-            ))
+        let selectedText = selection.text
+        var range = selection.range
+        var markerRange: CFTypeRef? = selection.marker?.value
+        // Fallback metadata belongs to the exact range/marker checked by the
+        // resolver. Only the direct path needs a separate best-effort anchor.
+        if selection.source == .direct {
+            range = selectedTextRange(from: element, request: request)
+            if let failure = interruptionFailure(for: request) {
+                return .interrupted(failure)
+            }
+            markerRange = selectedTextMarkerRange(from: element, request: request)
+            if let failure = interruptionFailure(for: request) {
+                return .interrupted(failure)
+            }
         }
 
         var selectionBounds: CGRect?
@@ -1014,28 +1343,33 @@ private struct SelectionAgentCaptureWorker {
 
     private func element(
         at point: SelectionAgentPoint,
-        systemWideElement: AXUIElement,
+        applicationElement: AXUIElement,
         targetPID: pid_t,
         request: SelectionAgentCaptureRequest
-    ) -> AXUIElement? {
-        var element: AXUIElement?
-        guard canAccessAccessibility(for: request) else { return nil }
-        guard AXUIElementCopyElementAtPosition(
-            systemWideElement,
-            Float(point.x),
-            Float(point.y),
-            &element
-        ) == .success,
-              let element else {
-            return nil
-        }
-        var actualPID: pid_t = 0
-        guard canAccessAccessibility(for: request) else { return nil }
-        guard AXUIElementGetPid(element, &actualPID) == .success,
-              actualPID == targetPID else {
-            return nil
-        }
-        return element
+    ) -> (element: AXUIElement?, status: SelectionHelperCaptureDiagnostics.HitTest) {
+        SelectionHelperTargetHitTest.read(
+            targetApplication: applicationElement,
+            targetPID: targetPID,
+            isAllowed: { canAccessAccessibility(for: request) },
+            hitTest: { application in
+                // Application-scoped hit-testing cannot be redirected into a
+                // Blocks skeleton covering the frozen mouse point.
+                var element: AXUIElement?
+                guard canAccessAccessibility(for: request),
+                      AXUIElementCopyElementAtPosition(
+                        application, Float(point.x), Float(point.y), &element
+                      ) == .success else { return nil }
+                return element
+            },
+            processIdentifier: { element in
+                var actualPID: pid_t = 0
+                guard canAccessAccessibility(for: request),
+                      AXUIElementGetPid(element, &actualPID) == .success else {
+                    return nil
+                }
+                return actualPID
+            }
+        )
     }
 
     private func children(
@@ -1142,12 +1476,30 @@ private struct SelectionAgentCaptureWorker {
         guard canAccessAccessibility(for: request) else { return nil }
         guard AXUIElementCopyAttributeValue(
             element,
-            "AXSelectedTextMarkerRange" as CFString,
+            kAXSelectedTextMarkerRangeAttribute as CFString,
             &value
-        ) == .success else {
+        ) == .success,
+              let value,
+              CFGetTypeID(value) == AXTextMarkerRangeGetTypeID() else {
             return nil
         }
         return value
+    }
+
+    private func length(
+        forTextMarkerRange markerRange: CFTypeRef,
+        in element: AXUIElement,
+        request: SelectionAgentCaptureRequest
+    ) -> SelectionHelperMarkerLength {
+        var value: CFTypeRef?
+        guard canAccessAccessibility(for: request) else { return .invalid }
+        let status = AXUIElementCopyParameterizedAttributeValue(
+            element,
+            kAXLengthForTextMarkerRangeParameterizedAttribute as CFString,
+            markerRange,
+            &value
+        )
+        return SelectionHelperMarkerLength.decode(status: status, value: value)
     }
 
     private func string(
@@ -1159,7 +1511,7 @@ private struct SelectionAgentCaptureWorker {
         guard canAccessAccessibility(for: request) else { return nil }
         guard AXUIElementCopyParameterizedAttributeValue(
             element,
-            "AXStringForTextMarkerRange" as CFString,
+            kAXStringForTextMarkerRangeParameterizedAttribute as CFString,
             markerRange,
             &value
         ) == .success else {
@@ -1205,7 +1557,7 @@ private struct SelectionAgentCaptureWorker {
         guard canAccessAccessibility(for: request) else { return nil }
         guard AXUIElementCopyParameterizedAttributeValue(
             element,
-            "AXBoundsForTextMarkerRange" as CFString,
+            kAXBoundsForTextMarkerRangeParameterizedAttribute as CFString,
             markerRange,
             &value
         ) == .success else {
@@ -1367,16 +1719,7 @@ private struct SelectionAgentCaptureWorker {
     private func messagingTimeout(
         for request: SelectionAgentCaptureRequest
     ) -> Float {
-        let remaining = max(
-            0.05,
-            request.deadline.timeIntervalSinceNow
-        )
-        return Float(
-            min(
-                remaining,
-                Double(Self.maximumMessagingTimeout)
-            )
-        )
+        SelectionHelperAXMessagingTimeoutPolicy.timeout(deadline: request.deadline)
     }
 }
 
@@ -1394,6 +1737,10 @@ protocol SelectionHelperKeyStoring: AnyObject {
     func clearDisconnectTombstone() -> Bool
     func permitsLocalAssociation() -> Bool
     func saveLocalAssociationIfAbsent(_ data: Data) -> Bool
+    func persistAutomaticAssociationDisabled() -> Bool
+    func permitsExplicitAssociationIntent() -> Bool
+    func prepareExplicitLocalAssociation() -> Bool
+    func permitsAuthenticatedUse() -> Bool
 }
 
 protocol SelectionHelperBootstrapKeyLoading: AnyObject {
@@ -1403,6 +1750,10 @@ protocol SelectionHelperBootstrapKeyLoading: AnyObject {
 extension SelectionHelperKeyStoring {
     func permitsLocalAssociation() -> Bool { false }
     func saveLocalAssociationIfAbsent(_ data: Data) -> Bool { false }
+    func persistAutomaticAssociationDisabled() -> Bool { false }
+    func permitsExplicitAssociationIntent() -> Bool { false }
+    func prepareExplicitLocalAssociation() -> Bool { false }
+    func permitsAuthenticatedUse() -> Bool { false }
 }
 
 /// The Helper deliberately has no creation API for this secret. A missing
@@ -1536,10 +1887,13 @@ final class SelectionHelperKeyStore: SelectionHelperKeyStoring {
     }
 
     func permitsLocalAssociation() -> Bool {
+        var identities = [(BlocksSelectionHelperProtocol.keychainService, BlocksSelectionHelperProtocol.keychainAccount),
+                          (BlocksSelectionHelperProtocol.legacyKeychainService, BlocksSelectionHelperProtocol.legacyKeychainAccount)]
         #if BLOCKS_LOCAL_DEVELOPMENT
-        let identities = [(BlocksSelectionHelperProtocol.keychainService, BlocksSelectionHelperProtocol.keychainAccount),
-                          (BlocksSelectionHelperProtocol.legacyKeychainService, BlocksSelectionHelperProtocol.legacyKeychainAccount),
-                          (Self.disconnectTombstoneService, Self.disconnectTombstoneAccount)]
+        identities.append((Self.disconnectTombstoneService, Self.disconnectTombstoneAccount))
+        #else
+        identities.append((SelectionHelperLocalAssociation.disabledKeychainService, SelectionHelperLocalAssociation.disabledKeychainAccount))
+        #endif
         return identities.enumerated().allSatisfy { index, identity in
             let (service, account) = identity
             guard var query = keychainQuery(service: service, account: account) else { return false }
@@ -1550,21 +1904,44 @@ final class SelectionHelperKeyStore: SelectionHelperKeyStoring {
             }
             return status == errSecItemNotFound
         }
-        #else
-        return false
-        #endif
     }
 
     func saveLocalAssociationIfAbsent(_ data: Data) -> Bool {
-        #if BLOCKS_LOCAL_DEVELOPMENT
         guard data.count == 32,
               var query = keychainQuery(service: BlocksSelectionHelperProtocol.keychainService,
                                         account: BlocksSelectionHelperProtocol.keychainAccount) else { return false }
         query[kSecValueData as String] = data
         return addItem(query as CFDictionary, nil) == errSecSuccess
-        #else
-        return false
-        #endif
+    }
+
+    func persistAutomaticAssociationDisabled() -> Bool {
+        guard let query = keychainQuery(service: SelectionHelperLocalAssociation.disabledKeychainService,
+                                        account: SelectionHelperLocalAssociation.disabledKeychainAccount) else { return false }
+        return SelectionHelperLocalAssociation.persistDisabledMarker(query: query, copy: copyMatching, add: addItem)
+    }
+
+    func permitsExplicitAssociationIntent() -> Bool {
+        for (service, account) in [(BlocksSelectionHelperProtocol.keychainService, BlocksSelectionHelperProtocol.keychainAccount),
+                                   (BlocksSelectionHelperProtocol.legacyKeychainService, BlocksSelectionHelperProtocol.legacyKeychainAccount)] {
+            guard let query = keychainQuery(service: service, account: account),
+                  copyMatching(query as CFDictionary, nil) == errSecItemNotFound else { return false }
+        }
+        guard let query = keychainQuery(service: SelectionHelperLocalAssociation.disabledKeychainService,
+                                        account: SelectionHelperLocalAssociation.disabledKeychainAccount) else { return false }
+        return SelectionHelperLocalAssociation.disabledMarkerPresence(query: query, copy: copyMatching) != nil
+    }
+
+    func prepareExplicitLocalAssociation() -> Bool {
+        guard permitsExplicitAssociationIntent(),
+              let query = keychainQuery(service: SelectionHelperLocalAssociation.disabledKeychainService,
+                                        account: SelectionHelperLocalAssociation.disabledKeychainAccount) else { return false }
+        return SelectionHelperLocalAssociation.clearDisabledMarkerForExplicitOptIn(query: query, copy: copyMatching, delete: deleteItem)
+    }
+
+    func permitsAuthenticatedUse() -> Bool {
+        guard let query = keychainQuery(service: SelectionHelperLocalAssociation.disabledKeychainService,
+                                        account: SelectionHelperLocalAssociation.disabledKeychainAccount) else { return false }
+        return SelectionHelperLocalAssociation.disabledMarkerPresence(query: query, copy: copyMatching) == false
     }
 
     func delete() -> Bool {
@@ -1845,10 +2222,8 @@ final class SelectionHelperServer:
     private var failedPairAttempts: [Date] = []
     private var pairingCode: String
     private var pairingGeneration: UInt64 = 0
-    #if BLOCKS_LOCAL_DEVELOPMENT
     private let localAssociationServer = SelectionHelperLocalAssociationTransport.Server()
     private var localAssociationAuthority = SelectionHelperLocalAssociation.Authority()
-    #endif
     // One entry is intentional: this is acknowledgement recovery, not a
     // general request cache. It is process-local and expires quickly.
     private var recentSuccessfulPairReply:
@@ -1940,12 +2315,19 @@ final class SelectionHelperServer:
         return queue.sync {
             // This runs on the same serial queue as pairing and authenticated
             // commands, so an in-flight pairing cannot restore the old key.
+            #if !BLOCKS_LOCAL_DEVELOPMENT
+            localAssociationAuthority.invalidate()
+            pairingGeneration &+= 1
+            guard keyStore.persistAutomaticAssociationDisabled() else { return .failure(.keyDeletionFailed) }
+            #endif
             guard keyStore.delete() else {
                 return .failure(.keyDeletionFailed)
             }
             keyStore.clearDisconnectTombstone()
             recentSuccessfulPairReply = nil
+            #if BLOCKS_LOCAL_DEVELOPMENT
             pairingGeneration &+= 1
+            #endif
             pairingCode = code
             failedPairAttempts.removeAll()
             return .success(pairingGeneration)
@@ -1953,8 +2335,17 @@ final class SelectionHelperServer:
     }
 
     func disconnectPairedClient() -> Bool {
+        queue.sync { disconnectPairedClientOnQueue() }
+    }
+
+    private func disconnectPairedClientOnQueue() -> Bool {
         guard let operationLease = applicationUpdateGate.begin() else { return false }
         defer { operationLease.release() }
+        #if !BLOCKS_LOCAL_DEVELOPMENT
+        localAssociationAuthority.invalidate()
+        pairingGeneration &+= 1
+        guard keyStore.persistAutomaticAssociationDisabled() else { return false }
+        #endif
         guard keyStore.replaceActiveKeyWithDisconnectTombstone(
             expiresAt: Date().addingTimeInterval(
                 BlocksSelectionHelperProtocol
@@ -1989,38 +2380,59 @@ final class SelectionHelperServer:
             )
         }
     }
+
+    func submitRawAuthenticatedPacketForTesting(
+        _ packet: SelectionHelperWirePacket,
+        completion: @escaping @Sendable (Data?) -> Void
+    ) {
+        queue.async { [self] in handleAuthenticated(packet, completion: completion) }
+    }
     #endif
 
     func start() {
         queue.async { [weak self] in
             guard let self else { return }
             self.startListeners()
-            #if BLOCKS_LOCAL_DEVELOPMENT
-            self.localAssociationServer.start { [weak self] data in
+            self.localAssociationServer.start { [weak self] data, peer in
                 guard let self else { return nil }
-                return self.queue.sync { self.handleLocalAssociation(data) }
+                return self.queue.sync { self.handleLocalAssociation(data, peer: peer) }
             }
-            #endif
         }
     }
 
-    #if BLOCKS_LOCAL_DEVELOPMENT
-    private func handleLocalAssociation(_ data: Data) -> Data? {
+    private func handleLocalAssociation(_ data: Data, peer: SelectionHelperLocalAssociationTransport.Peer) -> Data? {
         guard let lease = applicationUpdateGate.begin() else { return nil }
         defer { lease.release() }
-        guard let request = try? JSONDecoder().decode(SelectionHelperLocalAssociation.Request.self, from: data),
+        guard SelectionHelperLocalAssociationTransport.isCurrent(peer, role: "app"),
+              let request = try? JSONDecoder().decode(SelectionHelperLocalAssociation.Request.self, from: data),
               request.version == SelectionHelperLocalAssociation.version,
               UUID(uuidString: request.requestID) != nil else { return nil }
         let paired = keyStore.load() != nil
         let response: SelectionHelperLocalAssociation.Response
         switch request.kind {
         case .status:
+            #if !BLOCKS_LOCAL_DEVELOPMENT
+            let intent: SelectionHelperLocalAssociation.Intent?
+            if !paired, keyStore.permitsExplicitAssociationIntent(), let publicKey = request.clientPublicKey {
+                intent = localAssociationAuthority.issueIntent(requestID: request.requestID, clientPublicKey: publicKey,
+                    generation: pairingGeneration, isPaired: paired, now: now(), peerToken: peer.auditToken)
+            } else { intent = nil }
+            response = .init(isPaired: paired, intent: intent)
+            #else
             response = .init(isPaired: paired)
+            #endif
         case .authorize:
-            guard !paired, keyStore.permitsLocalAssociation(), let publicKey = request.clientPublicKey,
+            guard !paired, let publicKey = request.clientPublicKey else { return nil }
+            #if !BLOCKS_LOCAL_DEVELOPMENT
+            guard let intent = request.intent,
+                  localAssociationAuthority.consumeIntent(intent, requestID: request.requestID, clientPublicKey: publicKey,
+                    generation: pairingGeneration, isPaired: paired, now: now(), peerToken: peer.auditToken),
+                  keyStore.prepareExplicitLocalAssociation() else { return nil }
+            #endif
+            guard keyStore.permitsLocalAssociation(),
                   let authorization = localAssociationAuthority.issue(
                     requestID: request.requestID, clientPublicKey: publicKey,
-                    generation: pairingGeneration, isPaired: paired, now: now()
+                    generation: pairingGeneration, isPaired: paired, now: now(), peerToken: peer.auditToken
                   ) else { return nil }
             response = .init(isPaired: false, authorization: authorization)
         case .pair:
@@ -2028,15 +2440,25 @@ final class SelectionHelperServer:
                   pairRequest.requestID == request.requestID,
                   let authorization = localAssociationAuthority.consume(
                     request: pairRequest, generation: pairingGeneration,
-                    isPaired: paired, now: now()
+                    isPaired: paired, now: now(), peerToken: peer.auditToken
                   ),
                   let payload = try? JSONEncoder().encode(pairRequest),
-                  let reply = handlePair(.init(kind: .pair, payload: payload), localAuthorization: authorization) else { return nil }
+                  let reply = handlePair(.init(kind: .pair, payload: payload), localAuthorization: authorization, localPeer: peer) else { return nil }
             response = .init(isPaired: keyStore.load() != nil, pairPacket: reply)
+        case .disable:
+            #if !BLOCKS_LOCAL_DEVELOPMENT
+            // Association policy only: strong peer authentication already ran
+            // above. Never remove an active key without its authenticated command.
+            localAssociationAuthority.invalidate()
+            pairingGeneration &+= 1
+            let disabled = keyStore.persistAutomaticAssociationDisabled()
+            response = .init(isPaired: !keyStore.permitsExplicitAssociationIntent(), automaticAssociationDisabled: disabled)
+            #else
+            return nil
+            #endif
         }
         return try? JSONEncoder().encode(response)
     }
-    #endif
 
     func retryIfFailed() {
         queue.async { [weak self] in
@@ -2207,7 +2629,8 @@ final class SelectionHelperServer:
 
     private func handlePair(
         _ packet: SelectionHelperWirePacket,
-        localAuthorization: SelectionHelperLocalAssociation.Authorization? = nil
+        localAuthorization: SelectionHelperLocalAssociation.Authorization? = nil,
+        localPeer: SelectionHelperLocalAssociationTransport.Peer? = nil
     ) -> Data? {
         guard let lease = applicationUpdateGate.begin() else { return nil }
         defer { lease.release() }
@@ -2292,17 +2715,14 @@ final class SelectionHelperServer:
         }
         let pairingResult: SelectionHelperPairingCommitResult
         if let localAuthorization {
-            #if BLOCKS_LOCAL_DEVELOPMENT
-            guard keyStore.permitsLocalAssociation(), pairingGeneration == localAuthorization.generation,
+            guard let localPeer, SelectionHelperLocalAssociationTransport.isCurrent(localPeer, role: "app"),
+                  keyStore.permitsLocalAssociation(), pairingGeneration == localAuthorization.generation,
                   now() < localAuthorization.expiresAt else { return nil }
             if keyStore.saveLocalAssociationIfAbsent(key) {
                 pairingGeneration &+= 1
                 pairingCode = ""
                 pairingResult = .committed(generation: pairingGeneration)
             } else { pairingResult = .keyStorageFailed }
-            #else
-            return nil
-            #endif
         } else {
             pairingResult = commitPairing(code: request.pairingCode, key: key)
         }
@@ -2352,6 +2772,14 @@ final class SelectionHelperServer:
             from: envelope,
             keyData: key
            ) {
+            #if !BLOCKS_LOCAL_DEVELOPMENT
+            // A durable opt-out is authoritative even when deletion failed.
+            // Only the authenticated deletion retry remains usable.
+            guard command.kind == .disconnect || keyStore.permitsAuthenticatedUse() else {
+                completion(nil)
+                return
+            }
+            #endif
             handle(command) { [weak self] response in
                 self?.respond(
                     response,
@@ -2535,7 +2963,7 @@ final class SelectionHelperServer:
         case .disconnect:
             completion(
                 SelectionHelperCommandResponse(
-                    booleanValue: disconnectPairedClient()
+                    booleanValue: disconnectPairedClientOnQueue()
                 )
             )
         case .prepareForApplicationUpdate, .resumeAfterCancelledApplicationUpdate, .terminateForApplicationUpdate:

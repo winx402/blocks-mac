@@ -231,6 +231,20 @@ enum TranslationPanelSelectionFeedback {
         guard !TranslationSelectionFailurePresentation.isSilentManualInput(reason) else {
             return nil
         }
+        switch reason {
+        case .focusedElementUnavailable, .selectionUnavailable, .emptySelection:
+            // A selection attempt is different from opening ordinary manual
+            // input. Keep its explanation local, informational, and actionable
+            // without suggesting that healthy pairing/permissions be reset.
+            return BlocksNotificationDescriptor(
+                level: .info,
+                title: L10n.string("translation.selection.unavailable"),
+                deduplicationKey: deduplicationKey,
+                systemImage: "text.cursor"
+            )
+        default:
+            break
+        }
         let setupTitleKey: String?
         switch reason {
         case .agentUnavailable:

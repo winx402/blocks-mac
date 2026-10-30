@@ -141,6 +141,180 @@ final class SelectionHelperSetupFlowTests: XCTestCase {
         XCTAssertEqual(fixture.connection.pairCount, 0)
     }
 
+    #if DEBUG && !BLOCKS_LOCAL_DEVELOPMENT
+    func testOfficialPassiveRefreshAndColdStartNeverRequestFirstAssociation() async throws {
+        let fixture = try SetupFixture()
+        defer { fixture.remove() }
+        let peer = AutomaticSetupAssociationPeer(connection: fixture.connection)
+        let controller = fixture.controllerWithAssociation(configureClient: { client in
+            client.setLocalAssociationSendForTesting(peer.send)
+        })
+        controller.startApplicationLaunchRecovery(runtimeServicesEnabled: true)
+        await waitUntil { controller.state == .notPaired }
+        await passiveRefresh(controller, expected: .notPaired)
+        await passiveRefresh(controller, expected: .notPaired)
+        XCTAssertTrue(peer.requestKinds.isEmpty)
+        XCTAssertEqual(fixture.store.explicitOptInCount, 0)
+        XCTAssertEqual(fixture.store.automaticSaveCount, 0)
+        XCTAssertEqual(fixture.launchCount, 0)
+    }
+
+    func testOfficialExplicitOptInUsesExistingCryptoWithoutManualCodeAndKeepsAXSeparate() async throws {
+        let fixture = try SetupFixture()
+        defer { fixture.remove() }
+        fixture.connection.accessibilityTrusted = false
+        let peer = AutomaticSetupAssociationPeer(connection: fixture.connection)
+        let controller = fixture.controllerWithAssociation(configureClient: { client in
+            client.setLocalAssociationSendForTesting(peer.send)
+        })
+        controller.connectAfterExplicitOptIn()
+        controller.refresh(allowLaunch: false)
+        await waitUntil { !controller.isPairing && controller.state == .missingAccessibilityPermission }
+        XCTAssertNil(controller.lastError)
+        XCTAssertEqual(fixture.connection.pairCount, 0)
+        XCTAssertEqual(fixture.store.explicitOptInCount, 1)
+        XCTAssertEqual(fixture.store.automaticSaveCount, 0)
+        XCTAssertEqual(fixture.store.helperCommitCount, 1)
+        XCTAssertEqual(peer.requestKinds.filter { $0 == .authorize }.count, 1)
+        XCTAssertEqual(peer.requestKinds.filter { $0 == .pair }.count, 1)
+        let originalKey = fixture.store.load()
+        let originalRequestCount = peer.requestKinds.count
+        fixture.connection.accessibilityTrusted = true
+        await passiveRefresh(controller, expected: .ready(version: "fixture"))
+        let restarted = fixture.controllerWithAssociation(configureClient: { client in client.setLocalAssociationSendForTesting(peer.send) })
+        await passiveRefresh(restarted, expected: .ready(version: "fixture"))
+        XCTAssertEqual(peer.requestKinds.count, originalRequestCount)
+        XCTAssertEqual(fixture.store.load(), originalKey)
+        XCTAssertEqual(fixture.store.deleteCount, 0)
+    }
+
+    func testOfficialExistingKeyOnlyAuthenticatesHealthEvenOnExplicitConnect() async throws {
+        let fixture = try SetupFixture()
+        defer { fixture.remove() }
+        try fixture.store.save(fixture.connection.healthKey)
+        let peer = AutomaticSetupAssociationPeer(connection: fixture.connection)
+        let controller = fixture.controllerWithAssociation(configureClient: { client in client.setLocalAssociationSendForTesting(peer.send) })
+        controller.connectAfterExplicitOptIn()
+        await waitUntil { !controller.isPairing && controller.state == .ready(version: "fixture") }
+        XCTAssertTrue(peer.requestKinds.isEmpty)
+        XCTAssertEqual(fixture.store.explicitOptInCount, 0)
+        XCTAssertEqual(fixture.store.automaticSaveCount, 0)
+        XCTAssertEqual(fixture.store.deleteCount, 0)
+    }
+
+    func testOfficialDisconnectMarkerFailurePreservesPairingAndReportsFailure() async throws {
+        let fixture = try SetupFixture()
+        defer { fixture.remove() }
+        let original = fixture.connection.healthKey
+        try fixture.store.save(original)
+        fixture.store.rejectMarkerWrites = true
+        let controller = fixture.controller()
+        controller.disconnect()
+        await waitUntil { controller.state == .connectionFailed }
+        XCTAssertNotNil(controller.lastError)
+        XCTAssertEqual(fixture.store.load(), original)
+        XCTAssertEqual(fixture.store.deleteCount, 0)
+    }
+
+    func testOfficialPersistentOptOutNeedsANewExplicitActionAfterControllerRestart() async throws {
+        let fixture = try SetupFixture()
+        defer { fixture.remove() }
+        XCTAssertTrue(fixture.store.persistAutomaticAssociationDisabled())
+        let peer = AutomaticSetupAssociationPeer(connection: fixture.connection)
+        let restarted = fixture.controllerWithAssociation(configureClient: { client in client.setLocalAssociationSendForTesting(peer.send) })
+        await passiveRefresh(restarted, expected: .notPaired)
+        XCTAssertTrue(peer.requestKinds.isEmpty)
+        XCTAssertTrue(fixture.store.isAutomaticAssociationDisabled)
+        restarted.connectAfterExplicitOptIn()
+        await waitUntil { !restarted.isPairing && restarted.state == .ready(version: "fixture") }
+        XCTAssertFalse(fixture.store.isAutomaticAssociationDisabled)
+        XCTAssertEqual(fixture.store.explicitOptInCount, 1)
+    }
+
+    func testOfficialDelayedPairReplyCannotResurrectKeyAfterHelperReset() async throws {
+        let fixture = try SetupFixture()
+        defer { fixture.remove() }
+        let peer = AutomaticSetupAssociationPeer(connection: fixture.connection)
+        peer.resetBeforePairReply = true
+        let controller = fixture.controllerWithAssociation(configureClient: { $0.setLocalAssociationSendForTesting(peer.send) })
+        controller.connectAfterExplicitOptIn()
+        await waitUntil { !controller.isPairing && controller.lastPairingFailure != nil }
+        XCTAssertEqual(controller.lastPairingFailure, .notPaired)
+        XCTAssertNil(fixture.store.load())
+        XCTAssertTrue(fixture.store.isAutomaticAssociationDisabled)
+        XCTAssertEqual(fixture.store.helperCommitCount, 1)
+        XCTAssertEqual(fixture.store.automaticSaveCount, 0)
+    }
+
+    func testOfficialResetAfterStatusRejectsOldIntentWithoutClearingMarker() async throws {
+        let fixture = try SetupFixture()
+        defer { fixture.remove() }
+        let peer = AutomaticSetupAssociationPeer(connection: fixture.connection)
+        peer.resetAfterIntentStatus = true
+        let controller = fixture.controllerWithAssociation(configureClient: { $0.setLocalAssociationSendForTesting(peer.send) })
+        controller.connectAfterExplicitOptIn()
+        await waitUntil { !controller.isPairing && controller.lastPairingFailure != nil }
+        XCTAssertEqual(controller.lastPairingFailure, .bootstrapUnavailable)
+        XCTAssertNil(fixture.store.load())
+        XCTAssertTrue(fixture.store.isAutomaticAssociationDisabled)
+        XCTAssertEqual(fixture.store.explicitOptInCount, 0)
+        XCTAssertEqual(fixture.store.helperCommitCount, 0)
+        XCTAssertFalse(peer.requestKinds.contains(.pair))
+    }
+
+    func testOfficialDisconnectDuringConnectReadinessCannotBeUndoneByOlderConnect() async throws {
+        let fixture = try SetupFixture()
+        defer { fixture.remove() }
+        let peer = AutomaticSetupAssociationPeer(connection: fixture.connection)
+        let entered = expectation(description: "connect entered read-only readiness")
+        let release = DispatchSemaphore(value: 0)
+        peer.onReadinessStatus = { entered.fulfill(); _ = release.wait(timeout: .now() + 2) }
+        var captured: SelectionHelperClient?
+        _ = fixture.controllerWithAssociation(configureClient: { client in
+            captured = client
+            client.setLocalAssociationSendForTesting(peer.send)
+        })
+        let client = try XCTUnwrap(captured)
+        let connecting = Task.detached { client.connectAfterExplicitOptIn() }
+        await fulfillment(of: [entered], timeout: 1)
+        let disconnectStarted = expectation(description: "disconnect task started")
+        let disconnectFinished = SetupThreadFlag()
+        let disconnecting = Task.detached {
+            disconnectStarted.fulfill()
+            let result = client.disconnect()
+            disconnectFinished.set()
+            return result
+        }
+        await fulfillment(of: [disconnectStarted], timeout: 1)
+        try? await Task.sleep(for: .milliseconds(50))
+        XCTAssertFalse(disconnectFinished.value)
+        release.signal()
+        _ = await connecting.value
+        let disconnectResult = await disconnecting.value
+        XCTAssertNoThrow(try disconnectResult.get())
+        XCTAssertNil(fixture.store.load())
+        XCTAssertTrue(fixture.store.isAutomaticAssociationDisabled)
+        XCTAssertEqual(fixture.store.automaticSaveCount, 0)
+    }
+
+    func testOfficialLateDisconnectAcknowledgementCannotDeleteNewHelperPairing() async throws {
+        let fixture = try SetupFixture()
+        defer { fixture.remove() }
+        try fixture.store.save(fixture.connection.healthKey)
+        let store = fixture.store
+        let replacement = Data(repeating: 0x72, count: 32)
+        fixture.connection.onDisconnectResponse = {
+            _ = store.helperPrepareExplicitAssociation()
+            _ = store.helperCommit(replacement)
+        }
+        var captured: SelectionHelperClient?
+        _ = fixture.controllerWithAssociation(configureClient: { captured = $0 })
+        XCTAssertNoThrow(try XCTUnwrap(captured).disconnect().get())
+        XCTAssertEqual(store.load(), replacement)
+        XCTAssertEqual(store.deleteCount, 0)
+    }
+    #endif
+
     private func passiveRefresh(_ controller: SelectionHelperSettingsController,
                                 expected: SelectionHelperConnectionState) async {
         var didReceiveResult = false
@@ -167,6 +341,20 @@ private final class SetupKeyStore: SelectionHelperSharedKeyStoring {
     private var key: Data?
     private var rejects = false
     private var deletes = 0
+    private var disabled = false
+    private var optedIn = false
+    private var optIns = 0
+    private var automaticSaves = 0
+    private var helperCommits = 0
+    private var markerRejects = false
+    var rejectMarkerWrites: Bool {
+        get { lock.withLock { markerRejects } }
+        set { lock.withLock { markerRejects = newValue } }
+    }
+    var explicitOptInCount: Int { lock.withLock { optIns } }
+    var automaticSaveCount: Int { lock.withLock { automaticSaves } }
+    var helperCommitCount: Int { lock.withLock { helperCommits } }
+    var isAutomaticAssociationDisabled: Bool { lock.withLock { disabled } }
     var rejectSaves: Bool {
         get { lock.withLock { rejects } }
         set { lock.withLock { rejects = newValue } }
@@ -180,6 +368,46 @@ private final class SetupKeyStore: SelectionHelperSharedKeyStoring {
         }
     }
     func delete() { lock.withLock { key = nil; deletes += 1 } }
+    func permitsLocalAssociation() -> Bool { lock.withLock { optedIn && key == nil && !disabled } }
+    func prepareExplicitLocalAssociation() -> Bool {
+        lock.withLock { key == nil }
+    }
+    func helperPrepareExplicitAssociation() -> Bool {
+        lock.withLock {
+            guard key == nil else { return false }
+            optIns += 1
+            optedIn = true
+            disabled = false
+            return true
+        }
+    }
+    func helperCommit(_ data: Data) -> Bool {
+        lock.withLock {
+            guard key == nil, !disabled, !rejects else { return false }
+            key = data
+            helperCommits += 1
+            return true
+        }
+    }
+    func helperReset() {
+        lock.withLock { disabled = true; optedIn = false; key = nil }
+    }
+    func persistAutomaticAssociationDisabled() -> Bool {
+        lock.withLock {
+            guard !markerRejects else { return false }
+            disabled = true
+            optedIn = false
+            return true
+        }
+    }
+    func saveLocalAssociationIfAbsent(_ data: Data) -> Bool {
+        lock.withLock {
+            guard !rejects, key == nil, data.count == 32 else { return false }
+            key = data
+            automaticSaves += 1
+            return true
+        }
+    }
 }
 
 private final class SetupBootstrapStore: SelectionHelperBootstrapKeyCreating {
@@ -202,6 +430,8 @@ private final class SetupConnection: SelectionHelperLoopbackConnecting {
     private var healths = 0
     private var trusted = true
     private var consumedPairingCode = false
+    weak var sharedStore: SetupKeyStore?
+    var onDisconnectResponse: (() -> Void)?
     var pairCount: Int { lock.withLock { pairs } }
     var healthCount: Int { lock.withLock { healths } }
     var healthKey: Data { lock.withLock { key } }
@@ -211,6 +441,7 @@ private final class SetupConnection: SelectionHelperLoopbackConnecting {
         set { lock.withLock { trusted = newValue } }
     }
     init(bootstrapKey: Data) { self.bootstrapKey = bootstrapKey }
+    func adoptAssociationKey(_ value: Data) { lock.withLock { key = value } }
 
     func send(_ packet: SelectionHelperWirePacket, timeout: TimeInterval) -> Result<Data, SelectionAgentServiceFailure> {
         lock.withLock {
@@ -251,11 +482,16 @@ private final class SetupConnection: SelectionHelperLoopbackConnecting {
                     let command = try SelectionHelperAuthenticatedCodec.open(
                         SelectionHelperCommand.self, from: envelope, keyData: key
                     )
-                    guard command.kind == .health else { return .failure(.invalidResponse) }
-                    healths += 1
-                    let response = SelectionHelperCommandResponse(
-                        health: .init(helperVersion: "fixture", accessibilityTrusted: trusted)
-                    )
+                    let response: SelectionHelperCommandResponse
+                    if command.kind == .disconnect, let store = sharedStore {
+                        let disabled = store.persistAutomaticAssociationDisabled()
+                        if disabled { store.helperReset(); onDisconnectResponse?() }
+                        response = .init(booleanValue: disabled)
+                    } else {
+                        guard command.kind == .health, sharedStore?.isAutomaticAssociationDisabled != true else { return .failure(.invalidResponse) }
+                        healths += 1
+                        response = .init(health: .init(helperVersion: "fixture", accessibilityTrusted: trusted))
+                    }
                     let sealed = try SelectionHelperAuthenticatedCodec.seal(
                         response, requestID: envelope.requestID,
                         expiresAt: Date().addingTimeInterval(1), keyData: key
@@ -293,6 +529,7 @@ private final class SetupFixture {
 
     init() throws {
         connection = SetupConnection(bootstrapKey: bootstrap.key)
+        connection.sharedStore = store
         let contents = helperURL.appendingPathComponent("Contents")
         try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
         let plist = try PropertyListSerialization.data(fromPropertyList: [
@@ -303,6 +540,10 @@ private final class SetupFixture {
     }
     func remove() { try? FileManager.default.removeItem(at: root) }
     func controller(permissionGuide: ((URL) -> Void)? = nil) -> SelectionHelperSettingsController {
+        controllerWithAssociation(permissionGuide: permissionGuide)
+    }
+    func controllerWithAssociation(permissionGuide: ((URL) -> Void)? = nil,
+                                   configureClient: ((SelectionHelperClient) -> Void)? = nil) -> SelectionHelperSettingsController {
         let helper = helperURL
         let client = SelectionHelperClient(
             keyStore: store, bootstrapKeyStore: bootstrap, connection: connection,
@@ -313,8 +554,84 @@ private final class SetupFixture {
                 trustedHostTeamIdentifierProvider: { "SETUPTEST" }
             )
         )
+        configureClient?(client)
         return SelectionHelperSettingsController(
             client: client, disconnectRecoveryStore: SetupRecoveryStore(), permissionGuideOverride: permissionGuide
         )
     }
 }
+
+#if DEBUG && !BLOCKS_LOCAL_DEVELOPMENT
+private final class SetupThreadFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var flag = false
+    var value: Bool { lock.withLock { flag } }
+    func set() { lock.withLock { flag = true } }
+}
+
+private final class AutomaticSetupAssociationPeer {
+    private let lock = NSLock()
+    private let connection: SetupConnection
+    private let store: SetupKeyStore
+    private var authority = SelectionHelperLocalAssociation.Authority()
+    private var kinds: [SelectionHelperLocalAssociation.Request.Kind] = []
+    private var committed = false
+    private var generation: UInt64 = 0
+    var resetBeforePairReply = false
+    var resetAfterIntentStatus = false
+    var onReadinessStatus: (() -> Void)?
+    private let token = Data(repeating: 0x11, count: 32)
+    var requestKinds: [SelectionHelperLocalAssociation.Request.Kind] { lock.withLock { kinds } }
+    init(connection: SetupConnection) { self.connection = connection; store = connection.sharedStore! }
+    private func resetOnHelperQueue() {
+        authority.invalidate()
+        generation &+= 1
+        store.helperReset()
+        committed = false
+    }
+    func send(_ request: SelectionHelperLocalAssociation.Request, _ timeout: TimeInterval) -> SelectionHelperLocalAssociation.Response? {
+        if request.kind == .status, request.clientPublicKey == nil { onReadinessStatus?() }
+        return lock.withLock {
+            kinds.append(request.kind)
+            switch request.kind {
+            case .status:
+                guard let publicKey = request.clientPublicKey else { return .init(isPaired: committed) }
+                let intent = authority.issueIntent(requestID: request.requestID, clientPublicKey: publicKey,
+                    generation: generation, isPaired: committed, now: Date(), peerToken: token)
+                if resetAfterIntentStatus { resetOnHelperQueue() }
+                return .init(isPaired: false, intent: intent)
+            case .authorize:
+                guard let publicKey = request.clientPublicKey, let intent = request.intent,
+                      authority.consumeIntent(intent, requestID: request.requestID, clientPublicKey: publicKey,
+                        generation: generation, isPaired: committed, now: Date(), peerToken: token),
+                      store.helperPrepareExplicitAssociation(),
+                      let grant = authority.issue(requestID: request.requestID, clientPublicKey: publicKey,
+                        generation: generation, isPaired: committed, now: Date(), peerToken: token) else { return nil }
+                return .init(isPaired: false, authorization: grant)
+            case .pair:
+                guard let pair = request.pairRequest,
+                      let grant = authority.consume(request: pair, generation: generation, isPaired: committed, now: Date(), peerToken: token),
+                      SelectionHelperPairingAuthentication.verifiesClientProof(pair.clientProof, bootstrapKey: grant.bootstrapKey, request: pair) else { return nil }
+                let helper = P256.KeyAgreement.PrivateKey()
+                guard let key = try? SelectionHelperAuthenticatedCodec.deriveSharedKey(privateKey: helper,
+                    peerPublicKeyData: pair.clientPublicKey, requestID: pair.requestID),
+                    let proof = SelectionHelperPairingAuthentication.helperProof(bootstrapKey: grant.bootstrapKey,
+                        request: pair, helperPublicKey: helper.publicKey.rawRepresentation),
+                    let payload = try? JSONEncoder().encode(SelectionHelperPairResponse(requestID: pair.requestID,
+                        helperPublicKey: helper.publicKey.rawRepresentation, helperProof: proof, failureCode: nil)),
+                    let packet = try? JSONEncoder().encode(SelectionHelperWirePacket(kind: .pair, payload: payload)) else { return nil }
+                guard store.helperCommit(key) else { return nil }
+                committed = true
+                connection.adoptAssociationKey(key)
+                if resetBeforePairReply { resetOnHelperQueue() }
+                return .init(isPaired: true, pairPacket: packet)
+            case .disable:
+                authority.invalidate()
+                generation &+= 1
+                let disabled = store.persistAutomaticAssociationDisabled()
+                return .init(isPaired: store.load() != nil, automaticAssociationDisabled: disabled)
+            }
+        }
+    }
+}
+#endif
