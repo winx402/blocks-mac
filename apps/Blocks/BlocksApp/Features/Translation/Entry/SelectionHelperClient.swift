@@ -8,7 +8,7 @@ import Network
 import OSLog
 import Security
 
-enum SelectionAgentServiceFailure: Error, Equatable {
+enum SelectionAgentServiceFailure: Error, Equatable, Sendable {
     case helperNotInstalled
     case helperNotRunning
     case helperInstallationConflict
@@ -44,29 +44,42 @@ protocol SelectionHelperBundleIdentityVerifying: Sendable {
 struct SelectionHelperBundleIdentityVerifier:
     SelectionHelperBundleIdentityVerifying
 {
+    private enum Stage: String {
+        case createStatic = "create_static"
+        case validity
+        case signingInformation = "signing_information"
+    }
+    private static let logger = Logger(subsystem: "app.blocks.app", category: "HelperSigning")
+
+    /// Capture the execution thread at the API boundary, not on the queue that
+    /// eventually emits a Security runtime diagnostic. Never log identity data.
+    private static func measure(_ stage: Stage, _ operation: () -> OSStatus) -> OSStatus {
+        let mainThread = Thread.isMainThread
+        let started = DispatchTime.now().uptimeNanoseconds
+        let status = operation()
+        let duration = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
+        let outcome = status == errSecSuccess ? "success" : "failure"
+        logger.info("subject=bundle stage=\(stage.rawValue, privacy: .public) mainThread=\(mainThread, privacy: .public) duration_ms=\(duration, privacy: .public) outcome=\(outcome, privacy: .public) osstatus=\(status, privacy: .public)")
+        return status
+    }
+
     func verifiedIdentity(
         for applicationURL: URL
     ) -> SelectionHelperBundleIdentity? {
         var staticCode: SecStaticCode?
-        guard SecStaticCodeCreateWithPath(
-            applicationURL as CFURL,
-            [],
-            &staticCode
-        ) == errSecSuccess,
+        guard Self.measure(.createStatic, {
+            SecStaticCodeCreateWithPath(applicationURL as CFURL, [], &staticCode)
+        }) == errSecSuccess,
               let staticCode,
-              SecStaticCodeCheckValidity(
-                staticCode,
-                SecCSFlags(rawValue: kSecCSStrictValidate),
-                nil
-              ) == errSecSuccess else {
+              Self.measure(.validity, {
+                  SecStaticCodeCheckValidity(staticCode, SecCSFlags(rawValue: kSecCSStrictValidate), nil)
+              }) == errSecSuccess else {
             return nil
         }
         var information: CFDictionary?
-        guard SecCodeCopySigningInformation(
-            staticCode,
-            SecCSFlags(rawValue: kSecCSSigningInformation),
-            &information
-        ) == errSecSuccess,
+        guard Self.measure(.signingInformation, {
+            SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &information)
+        }) == errSecSuccess,
               let values = information as? [CFString: Any],
               let teamID = values[kSecCodeInfoTeamIdentifier] as? String,
               !teamID.isEmpty,
@@ -1416,7 +1429,8 @@ final class SelectionHelperClient: @unchecked Sendable {
                 #else
                 self.health(timeout: budget)
                 #endif
-            }
+            },
+            operationAllowed: { !Task.isCancelled }
         )
     }
 
@@ -2008,6 +2022,20 @@ final class SelectionHelperDisconnectRecoveryStore:
     }
 }
 
+/// Only immutable values cross back from locator/signing/health work. The
+/// controller keeps recovery intent and its persistent deadline on MainActor.
+private enum SelectionHelperSettingsRefreshSnapshot: Sendable {
+    case cancelled
+    case notInstalled
+    case disconnectRecovery
+    case health(Result<SelectionHelperHealth, SelectionAgentServiceFailure>)
+}
+
+private enum SelectionHelperDisconnectSnapshot: Sendable {
+    case success(isInstalled: Bool)
+    case failure(SelectionAgentServiceFailure)
+}
+
 @MainActor
 final class SelectionHelperSettingsController:
     ObservableObject
@@ -2049,7 +2077,9 @@ final class SelectionHelperSettingsController:
     private var permissionMonitorTask: Task<Void, Never>?
     private var permissionHealthCheckInFlight = false
     private var lifecycleObservations = Set<AnyCancellable>()
-    private var refreshInFlight = false
+    private var refreshInFlightGeneration: UInt64?
+    private var refreshInFlight: Bool { refreshInFlightGeneration != nil }
+    private var refreshTask: Task<SelectionHelperSettingsRefreshSnapshot, Never>?
     private var refreshAgainWithoutLaunch = false
     private var didStartApplicationLaunchRecovery = false
     init(
@@ -2132,19 +2162,16 @@ final class SelectionHelperSettingsController:
         generation &+= 1
         let currentGeneration = generation
         state = .checking
-        refreshInFlight = true
+        refreshInFlightGeneration = currentGeneration
         let client = client
-        Task.detached(priority: .utility) {
-            client.recoverPairedHealthAfterApplicationLaunch()
-        }.valueTask(holding: lease) { [weak self] result in
-            guard let self else { return }
-            refreshInFlight = false
-            guard generation == currentGeneration else { return }
-            applyHealthResult(result)
-            if refreshAgainWithoutLaunch {
-                refreshAgainWithoutLaunch = false
-                refresh(allowLaunch: false)
-            }
+        let task = Task.detached(priority: .utility) {
+            guard !Task.isCancelled else { return SelectionHelperSettingsRefreshSnapshot.cancelled }
+            let result = client.recoverPairedHealthAfterApplicationLaunch()
+            return Task.isCancelled ? .cancelled : .health(result)
+        }
+        refreshTask = task
+        task.valueTask(holding: lease) { [weak self] snapshot in
+            self?.applyRefreshSnapshot(snapshot, generation: currentGeneration)
         }
     }
 
@@ -2161,10 +2188,49 @@ final class SelectionHelperSettingsController:
         generation &+= 1
         let currentGeneration = generation
         if allowLaunch { lastError = nil }
-        guard client.isInstalled else {
-            state = .notInstalled
+        if allowLaunch { state = .checking }
+        refreshInFlightGeneration = currentGeneration
+        let needsDisconnectRecovery = pendingDisconnectRecovery || disconnectRecoveryExpired
+        let client = client
+        let task = Task.detached(priority: .userInitiated) {
+            guard !Task.isCancelled else { return SelectionHelperSettingsRefreshSnapshot.cancelled }
+            let installed = client.isInstalled
+            guard !Task.isCancelled else { return .cancelled }
+            guard installed else { return .notInstalled }
+            // Recovery authenticates only the existing disconnect. Do not let
+            // an installation conflict turn it into ordinary launch/health.
+            if needsDisconnectRecovery { return .disconnectRecovery }
+            let conflicting = client.hasInstallationConflict
+            guard !Task.isCancelled else { return .cancelled }
+            guard !conflicting else { return .health(.failure(.helperInstallationConflict)) }
+            let result = client.recoverHealth(allowLaunch: allowLaunch)
+            return Task.isCancelled ? .cancelled : .health(result)
+        }
+        refreshTask = task
+        task.valueTask(holding: lease) { [weak self] snapshot in
+            self?.applyRefreshSnapshot(snapshot, generation: currentGeneration)
+        }
+    }
+
+    private func applyRefreshSnapshot(_ snapshot: SelectionHelperSettingsRefreshSnapshot, generation currentGeneration: UInt64) {
+        guard refreshInFlightGeneration == currentGeneration else { return }
+        guard generation == currentGeneration else {
+            finishRefresh(generation: currentGeneration)
             return
         }
+        switch snapshot {
+        case .cancelled: break
+        case .notInstalled: state = .notInstalled
+        case let .health(result): applyHealthResult(result)
+        case .disconnectRecovery:
+            if continueDisconnectRecovery(generation: currentGeneration) { return }
+        }
+        finishRefresh(generation: currentGeneration)
+    }
+
+    /// Return true only when the authenticated worker now owns this refresh's
+    /// completion. Notifications remain coalesced until that worker returns.
+    private func continueDisconnectRecovery(generation currentGeneration: UInt64) -> Bool {
         if pendingDisconnectRecovery {
             guard let disconnectRecoveryDeadline,
                   Date() < disconnectRecoveryDeadline else {
@@ -2175,14 +2241,15 @@ final class SelectionHelperSettingsController:
                 lastError = L10n.string(
                     "translation.selectionHelper.error.disconnectRepairRequired"
                 )
-                return
+                return false
             }
             state = .checking
             performDisconnect(
                 currentGeneration: currentGeneration,
-                isRecoveryAttempt: true
+                isRecoveryAttempt: true,
+                refreshGeneration: currentGeneration
             )
-            return
+            return true
         }
         if disconnectRecoveryExpired {
             disconnectRecoveryExpired = false
@@ -2190,31 +2257,18 @@ final class SelectionHelperSettingsController:
             lastError = L10n.string(
                 "translation.selectionHelper.error.disconnectRepairRequired"
             )
-            return
+            return false
         }
-        // A pending disconnect above is authenticated with the existing key
-        // and is the only command a Helper's short-lived tombstone accepts.
-        // Surface an installation conflict only after those recovery paths,
-        // for ordinary health, pairing, and launch work.
-        guard !client.hasInstallationConflict else {
-            state = .installationConflict
-            lastError = helperFailureMessage(.helperInstallationConflict)
-            return
-        }
-        if allowLaunch { state = .checking }
-        refreshInFlight = true
-        let client = client
-        Task.detached(priority: .userInitiated) {
-            client.recoverHealth(allowLaunch: allowLaunch)
-        }.valueTask(holding: lease) { [weak self] result in
-            guard let self else { return }
-            refreshInFlight = false
-            guard generation == currentGeneration else { return }
-            applyHealthResult(result)
-            if refreshAgainWithoutLaunch {
-                refreshAgainWithoutLaunch = false
-                refresh(allowLaunch: false)
-            }
+        return false
+    }
+
+    private func finishRefresh(generation completedGeneration: UInt64) {
+        guard refreshInFlightGeneration == completedGeneration else { return }
+        refreshInFlightGeneration = nil
+        refreshTask = nil
+        if refreshAgainWithoutLaunch, !isPairing {
+            refreshAgainWithoutLaunch = false
+            refresh(allowLaunch: false)
         }
     }
 
@@ -2261,6 +2315,7 @@ final class SelectionHelperSettingsController:
             )
             return
         }
+        refreshTask?.cancel()
         generation &+= 1
         let currentGeneration = generation
         isPairing = true
@@ -2295,6 +2350,7 @@ final class SelectionHelperSettingsController:
             return
         }
         guard let lease = client.beginApplicationOperation() else { return }
+        refreshTask?.cancel()
         generation &+= 1
         let currentGeneration = generation
         isPairing = true
@@ -2379,11 +2435,15 @@ final class SelectionHelperSettingsController:
         }
     }
 
-    deinit { permissionMonitorTask?.cancel() }
+    deinit {
+        permissionMonitorTask?.cancel()
+        refreshTask?.cancel()
+    }
 
     func disconnect() {
         guard let lease = client.beginApplicationOperation() else { return }
         defer { lease.release() }
+        refreshTask?.cancel()
         generation &+= 1
         let currentGeneration = generation
         pendingDisconnectRecovery = true
@@ -2404,23 +2464,31 @@ final class SelectionHelperSettingsController:
 
     private func performDisconnect(
         currentGeneration: UInt64,
-        isRecoveryAttempt: Bool
+        isRecoveryAttempt: Bool,
+        refreshGeneration: UInt64? = nil
     ) {
-        guard let lease = client.beginApplicationOperation() else { return }
+        guard let lease = client.beginApplicationOperation() else {
+            if let refreshGeneration { finishRefresh(generation: refreshGeneration) }
+            return
+        }
         let client = client
         Task.detached(priority: .utility) {
-            client.disconnect()
-        }.valueTask(holding: lease) { [weak self] result in
-            guard let self,
-                  generation == currentGeneration else {
-                return
+            switch client.disconnect() {
+            case .success: return SelectionHelperDisconnectSnapshot.success(isInstalled: client.isInstalled)
+            case let .failure(failure): return .failure(failure)
             }
-            switch result {
-            case .success:
+        }.valueTask(holding: lease) { [weak self] snapshot in
+            guard let self else { return }
+            defer {
+                if let refreshGeneration { finishRefresh(generation: refreshGeneration) }
+            }
+            guard generation == currentGeneration else { return }
+            switch snapshot {
+            case let .success(installed):
                 pendingDisconnectRecovery = false
                 disconnectRecoveryDeadline = nil
                 disconnectRecoveryStore.clear()
-                state = client.isInstalled ? .notPaired : .notInstalled
+                state = installed ? .notPaired : .notInstalled
                 pairingCode = ""
                 lastError = nil
             case .failure(let failure):

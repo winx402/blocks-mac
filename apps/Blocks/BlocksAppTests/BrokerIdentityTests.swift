@@ -162,6 +162,199 @@ final class BrokerIdentityTests: XCTestCase {
         XCTAssertTrue(limiter.shouldLog(failure))
     }
 
+    func testAppRequirementSnapshotRetainsStrictAppleRoleAndTeamPolicy() throws {
+        let probe = BrokerIdentitySecurityProbe()
+        probe.ownIdentity = .init(teamID: probe.team, identifier: BlocksActionBrokerXPC.appBundleIdentifier)
+        let requirement = try Validator.hostConnectionRequirement(operations: probe.operations).get()
+        XCTAssertEqual(requirement,
+            "anchor apple generic and identifier \"\(Validator.expectedBrokerIdentifier)\" and certificate leaf[subject.OU] = \"\(probe.team)\"")
+        XCTAssertEqual(probe.validations.first?.requirement,
+            "anchor apple generic and identifier \"\(BlocksActionBrokerXPC.appBundleIdentifier)\"")
+        XCTAssertEqual(probe.validations.first?.flags.rawValue, kSecCSStrictValidate)
+        probe.ownIdentity = .init(teamID: probe.team, identifier: "blocks")
+        assertFailure(Validator.hostConnectionRequirement(operations: probe.operations),
+            subject: .own, stage: .identifier, reason: .identifierNotAllowed)
+        probe.ownIdentity = .init(teamID: "", identifier: BlocksActionBrokerXPC.appBundleIdentifier)
+        assertFailure(Validator.hostConnectionRequirement(operations: probe.operations),
+            subject: .own, stage: .team, reason: .missingTeam)
+    }
+
+    func testIdentityWorkerSnapshotsOnceAndChecksEveryPeerOffMainThread() async {
+        let probe = BrokerIdentitySecurityProbe()
+        let worker = ActionBrokerIdentityWorker(operations: probe.operations)
+        let completed = expectation(description: "utility identity results")
+        completed.expectedFulfillmentCount = 4
+        for _ in 0..<2 {
+            worker.prepare { result in
+                if case .failure = result { XCTFail("unexpected own rejection") }
+                XCTAssertFalse(Thread.isMainThread)
+                completed.fulfill()
+            }
+        }
+        for _ in 0..<2 {
+            worker.authorizeCandidate(processID: 99, effectiveUserID: 501, currentUserID: 501) { result in
+                XCTAssertEqual(try? result.get().role, .appHost)
+                XCTAssertFalse(Thread.isMainThread)
+                completed.fulfill()
+            }
+        }
+        await fulfillment(of: [completed], timeout: 2)
+        XCTAssertEqual(probe.selfReadCount, 1)
+        XCTAssertEqual(probe.peerReadCount, 2)
+        XCTAssertTrue(probe.workWasOnMain.allSatisfy { !$0 })
+    }
+
+    func testIdentityWorkerCachesOwnFailureAndNeverFallsBackToPeer() async {
+        let probe = BrokerIdentitySecurityProbe()
+        probe.failureCode = 1
+        probe.failureStage = .validity
+        let worker = ActionBrokerIdentityWorker(operations: probe.operations)
+        let completed = expectation(description: "cached worker failure")
+        completed.expectedFulfillmentCount = 3
+        worker.prepare { result in
+            guard case let .failure(failure) = result else { XCTFail("unexpected startup trust"); completed.fulfill(); return }
+            XCTAssertEqual(failure.stage, .validity)
+            completed.fulfill()
+        }
+        for _ in 0..<2 {
+            worker.authorizeCandidate(processID: 99, effectiveUserID: 501, currentUserID: 501) { result in
+                guard case let .failure(failure) = result else { XCTFail("unexpected peer trust"); completed.fulfill(); return }
+                XCTAssertEqual(failure.subject, .own)
+                XCTAssertEqual(failure.stage, .validity)
+                completed.fulfill()
+            }
+        }
+        await fulfillment(of: [completed], timeout: 2)
+        XCTAssertEqual(probe.selfReadCount, 1)
+        XCTAssertEqual(probe.peerReadCount, 0)
+        XCTAssertTrue(probe.workWasOnMain.allSatisfy { !$0 })
+    }
+
+    func testRequirementWorkerCachesBothSuccessAndFailureOffMainThread() async {
+        let failure = ActionBrokerIdentityFailure(subject: .own, stage: .validity, reason: .securityError, osStatus: -50)
+        for result in [Result<String, ActionBrokerIdentityFailure>.success("fixed-role-requirement"), .failure(failure)] {
+            let probe = BrokerRequirementWorkerProbe(result: result)
+            let worker = ActionBrokerRequirementWorker(resolve: probe.resolve)
+            let completed = expectation(description: "cached requirement")
+            completed.expectedFulfillmentCount = 3
+            for _ in 0..<3 {
+                worker.load { value in
+                    XCTAssertEqual(value, result)
+                    XCTAssertFalse(Thread.isMainThread)
+                    completed.fulfill()
+                }
+            }
+            await fulfillment(of: [completed], timeout: 2)
+            XCTAssertEqual(probe.count, 1)
+            XCTAssertFalse(probe.ranOnMain)
+        }
+    }
+
+    func testReverseEndpointTimeoutAndInterruptionCannotClearNewRegistration() {
+        var lifecycle = ActionBrokerEndpointLifecycle()
+        let firstOwner = UUID()
+        let first = lifecycle.register(ownerID: firstOwner)
+        XCTAssertTrue(lifecycle.isCurrent(first))
+        let replacement = lifecycle.register(ownerID: UUID())
+        XCTAssertFalse(lifecycle.isCurrent(first))
+        XCTAssertFalse(lifecycle.clear(first), "old interruption or timeout cannot remove the replacement")
+        XCTAssertTrue(lifecycle.isCurrent(replacement))
+        XCTAssertTrue(lifecycle.clear(replacement))
+        XCTAssertFalse(lifecycle.clear(replacement), "loss is consumed once")
+        XCTAssertNil(lifecycle.current)
+        let sameOwnerReplacement = lifecycle.register(ownerID: firstOwner)
+        XCTAssertNotEqual(sameOwnerReplacement, first, "PID/owner reuse does not resurrect an old endpoint")
+        XCTAssertFalse(lifecycle.clear(first))
+    }
+
+    func testSecurityAdmissionCancellationKeepsCapacityUntilWorkerActuallyFinishes() throws {
+        let admission = ActionBrokerSecurityWorkAdmission(capacity: 2)
+        let first = try XCTUnwrap(admission.reserve())
+        let second = try XCTUnwrap(admission.reserve())
+        XCTAssertNil(admission.reserve())
+        XCTAssertTrue(first.cancel())
+        XCTAssertEqual(admission.inFlightCount, 2, "timeout is not native completion")
+        XCTAssertNil(admission.reserve(), "cancelled native work must still occupy capacity")
+        XCTAssertFalse(first.claimResult(), "a late native result cannot authorize")
+        first.finish()
+        first.finish()
+        XCTAssertEqual(admission.inFlightCount, 1)
+        let replacement = try XCTUnwrap(admission.reserve())
+        XCTAssertTrue(second.claimResult())
+        XCTAssertFalse(second.cancel(), "publication and timeout have one winner")
+        XCTAssertFalse(second.claimResult())
+        second.finish()
+        replacement.finish()
+        XCTAssertEqual(admission.inFlightCount, 0)
+    }
+
+    func testCancelledQueuedSecurityWorkIsSkippedAndNativeWorkHoldsItsPermit() async throws {
+        let probe = BrokerIdentitySecurityProbe()
+        let base = probe.operations
+        let entered = expectation(description: "native snapshot entered")
+        let release = DispatchSemaphore(value: 0)
+        let operations = ActionBrokerSigningOperations<Int, Int>(copySelf: {
+            entered.fulfill()
+            _ = release.wait(timeout: .now() + 3)
+            return base.copySelf()
+        }, copyGuest: base.copyGuest, checkValidity: base.checkValidity,
+            copyStatic: base.copyStatic, signingInformation: base.signingInformation)
+        let worker = ActionBrokerIdentityWorker(operations: operations, authorizationCapacity: 2)
+        let first = try XCTUnwrap(worker.reserveAuthorization())
+        let completed = expectation(description: "cancelled work completed")
+        completed.expectedFulfillmentCount = 2
+        let callback: @Sendable (Result<ActionBrokerPeerAuthorization, ActionBrokerIdentityFailure>) -> Void = { result in
+            guard case let .failure(failure) = result else { XCTFail("late work authorized"); completed.fulfill(); return }
+            XCTAssertEqual(failure.reason, .cancelled)
+            completed.fulfill()
+        }
+        worker.authorizeCandidate(processID: 99, effectiveUserID: 501, currentUserID: 501,
+            reservation: first, completion: callback)
+        await fulfillment(of: [entered], timeout: 1)
+        let queued = try XCTUnwrap(worker.reserveAuthorization())
+        worker.authorizeCandidate(processID: 99, effectiveUserID: 501, currentUserID: 501,
+            reservation: queued, completion: callback)
+        first.cancel()
+        queued.cancel()
+        XCTAssertEqual(worker.pendingAuthorizationCount, 2)
+        XCTAssertNil(worker.reserveAuthorization())
+        let rejected = expectation(description: "over-cap work fails closed")
+        worker.authorizeCandidate(processID: 99, effectiveUserID: 501, currentUserID: 501) { result in
+            guard case let .failure(failure) = result else { XCTFail("over-cap work authorized"); rejected.fulfill(); return }
+            XCTAssertEqual(failure.reason, .capacityExceeded)
+            rejected.fulfill()
+        }
+        let drained = expectation(description: "worker passed cancelled queue entries")
+        worker.prepare { _ in drained.fulfill() }
+        release.signal()
+        await fulfillment(of: [completed, rejected, drained], timeout: 2)
+        XCTAssertEqual(probe.selfReadCount, 1)
+        XCTAssertEqual(probe.peerReadCount, 0, "cancelled queued work must not execute any guest Security call")
+        XCTAssertEqual(worker.pendingAuthorizationCount, 0)
+        XCTAssertFalse(first.claimResult())
+        XCTAssertFalse(queued.claimResult())
+    }
+
+    func testRetiringReverseRoutePreservesEveryAdmittedReplyUntilLastOnceRelease() throws {
+        var old = ActionBrokerRouteLeaseLifecycle()
+        let request = try XCTUnwrap(old.acquire())
+        let listing = try XCTUnwrap(old.acquire())
+        old.retire()
+        XCTAssertNil(old.acquire())
+        XCTAssertFalse(old.mayInvalidate, "health timeout must not disconnect pending business replies")
+        XCTAssertTrue(old.release(request))
+        XCTAssertFalse(old.release(request), "duplicate terminal callbacks cannot release a second lease")
+        XCTAssertEqual(old.activeCount, 1)
+        XCTAssertFalse(old.mayInvalidate)
+        var replacement = ActionBrokerRouteLeaseLifecycle()
+        let replacementRequest = try XCTUnwrap(replacement.acquire())
+        XCTAssertTrue(old.release(listing))
+        XCTAssertTrue(old.mayInvalidate)
+        XCTAssertFalse(replacement.isRetired, "old timeout/reply cleanup must not retire the replacement")
+        XCTAssertEqual(replacement.activeCount, 1)
+        replacement.release(replacementRequest)
+    }
+
     private func authorize(_ validator: Validator) -> Result<ActionBrokerPeerAuthorization, ActionBrokerIdentityFailure> {
         validator.authorizeCandidate(processID: 99, effectiveUserID: 501, currentUserID: 501)
     }
@@ -191,6 +384,7 @@ private final class BrokerIdentitySecurityProbe {
     var selfReadCount = 0
     var peerReadCount = 0
     var validations: [(code: Int, flags: SecCSFlags, requirement: String?)] = []
+    var workWasOnMain: [Bool] = []
 
     var operations: ActionBrokerSigningOperations<Int, Int> {
         .init(copySelf: {
@@ -200,6 +394,7 @@ private final class BrokerIdentitySecurityProbe {
             self.peerReadCount += 1
             return self.copy(code: 2, stage: .copyGuest)
         }, checkValidity: { code, flags, requirement in
+            self.workWasOnMain.append(Thread.isMainThread)
             self.validations.append((code, flags, requirement))
             if self.fails(code: code, stage: .requirement) {
                 return .requirementFailure(self.missingOutput ? errSecSuccess : self.failureStatus)
@@ -207,6 +402,7 @@ private final class BrokerIdentitySecurityProbe {
             if self.fails(code: code, stage: .validity) { return .invalid(self.failureStatus) }
             return .valid
         }, copyStatic: { self.copy(code: $0, stage: .copyStatic) }, signingInformation: { code in
+            self.workWasOnMain.append(Thread.isMainThread)
             if self.fails(code: code, stage: .signingInformation) {
                 return (self.missingOutput ? errSecSuccess : self.failureStatus, nil)
             }
@@ -219,6 +415,20 @@ private final class BrokerIdentitySecurityProbe {
     }
 
     private func copy(code: Int, stage: ActionBrokerIdentityFailure.Stage) -> (OSStatus, Int?) {
-        fails(code: code, stage: stage) ? (missingOutput ? errSecSuccess : failureStatus, nil) : (errSecSuccess, code)
+        workWasOnMain.append(Thread.isMainThread)
+        return fails(code: code, stage: stage) ? (missingOutput ? errSecSuccess : failureStatus, nil) : (errSecSuccess, code)
+    }
+}
+
+private final class BrokerRequirementWorkerProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private let result: Result<String, ActionBrokerIdentityFailure>
+    private var calls = 0
+    private var mainThread = false
+    init(result: Result<String, ActionBrokerIdentityFailure>) { self.result = result }
+    var count: Int { lock.withLock { calls } }
+    var ranOnMain: Bool { lock.withLock { mainThread } }
+    func resolve() -> Result<String, ActionBrokerIdentityFailure> {
+        lock.withLock { calls += 1; mainThread = Thread.isMainThread; return result }
     }
 }

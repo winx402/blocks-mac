@@ -4017,7 +4017,7 @@ final class TranslationEntryBridgeTests: XCTestCase {
     }
 
     func testSelectionHelperExpiredDisconnectRecoveryRequiresRepair()
-        throws
+        async throws
     {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(
@@ -4064,6 +4064,7 @@ final class TranslationEntryBridgeTests: XCTestCase {
 
         XCTAssertTrue(client.hasInstallationConflict)
         controller.refresh()
+        await waitUntil { controller.state == .notPaired }
 
         XCTAssertEqual(controller.state, .notPaired)
         XCTAssertEqual(
@@ -4938,7 +4939,7 @@ final class TranslationEntryBridgeTests: XCTestCase {
 
     @MainActor
     func testSelectionHelperConflictUsesDedicatedCaptureAndSettingsStates()
-        throws
+        async throws
     {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(
@@ -4986,6 +4987,7 @@ final class TranslationEntryBridgeTests: XCTestCase {
                 SelectionHelperDisconnectRecoveryStoreStub()
         )
         controller.refresh()
+        await waitUntil { controller.state == .installationConflict }
         XCTAssertEqual(controller.state, .installationConflict)
         XCTAssertEqual(
             controller.lastError,

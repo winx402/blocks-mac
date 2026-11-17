@@ -1212,7 +1212,29 @@ final class ActionBrokerUpdateSafetyTests: XCTestCase {
         guard case .failed = manager.state else { return XCTFail("busy must remain visible") }
     }
 
+    func testOfficialBusyWorkPreventsDisableWithoutStoppingHost() async {
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.host.drainError = ActionBrokerUpdateError.busy
+        let manager = fixture.makeManager()
+        manager.setEnabled(false)
+        await manager.serviceChangeTask?.value
+        XCTAssertTrue(manager.isEnabled)
+        XCTAssertEqual(fixture.unregisterCount, 0)
+        XCTAssertEqual(fixture.host.startCount, 1)
+        XCTAssertEqual(fixture.host.stopCount, 0)
+        XCTAssertGreaterThan(fixture.host.probeCount, 0)
+        guard case .failed = manager.state else { return XCTFail("busy must remain visible") }
+    }
+
     func testAppOwnedBusyDisablePreservesActualInFlightHostServiceRequest() async throws {
+        try await assertBusyDisablePreservesActualInFlightHostServiceRequest(appOwned: true)
+    }
+
+    func testOfficialBusyDisablePreservesActualInFlightHostServiceRequest() async throws {
+        try await assertBusyDisablePreservesActualInFlightHostServiceRequest(appOwned: false)
+    }
+
+    private func assertBusyDisablePreservesActualInFlightHostServiceRequest(appOwned: Bool) async throws {
         let suite = "AppOwnedBusyHostService.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -1237,12 +1259,17 @@ final class ActionBrokerUpdateSafetyTests: XCTestCase {
             cancelHandler: { _ in suspension.recordCancellation(); return true }
         )
         let host = AppOwnedHostServiceAdapter(service: service)
+        var unregisterCount = 0
+        let control: ActionBrokerServiceControl = appOwned
+            ? .appOwned(defaults: defaults, inheritedIntent: true)
+            : .init(status: { .enabled }, register: {}, unregister: { unregisterCount += 1 },
+                    unregisterAndWait: { unregisterCount += 1 })
         let manager = ActionBrokerServiceManager(
-            service: .appOwned(defaults: defaults, inheritedIntent: true),
+            service: control,
             host: host,
             retryScheduler: { _, _ in AnyCancellable {} },
             updateRecoveryJournal: .init(),
-            usesAppOwnedService: true
+            usesAppOwnedService: appOwned
         )
         let request = ActionBrokerRequest(
             requestID: ActionRequestID.make(),
@@ -1261,9 +1288,10 @@ final class ActionBrokerUpdateSafetyTests: XCTestCase {
         await manager.serviceChangeTask?.value
 
         XCTAssertTrue(manager.isEnabled)
-        XCTAssertEqual(host.stopCount, 0, "a busy app-owned disable must not stop the actual host")
+        XCTAssertEqual(host.stopCount, 0, "a busy disable must not stop the actual host on either transport")
         XCTAssertEqual(host.integrationDisableCount, 0, "stop is the only adapter path that revokes requests")
         XCTAssertEqual(suspension.cancellationCount, 0)
+        XCTAssertEqual(unregisterCount, 0)
 
         suspension.release()
         let terminal = try JSONDecoder().decode(
@@ -1846,6 +1874,11 @@ private final class BrokerLegacyMigrationSession: ActionBrokerLegacyMigrationSes
 
 @MainActor
 private final class BrokerServiceUpdateHost: ActionBrokerHosting {
+    var probeCount = 0
+    func probeReadiness(completion: @escaping (Result<Void, Error>) -> Void) {
+        probeCount += 1
+        completion(startError.map { .failure($0) } ?? .success(()))
+    }
     var startCount = 0
     var stopCount = 0
     var drainCount = 0
@@ -1955,6 +1988,10 @@ private final class AppOwnedHostServiceAdapter: ActionBrokerHosting {
 
     init(service: ScreenshotActionHostService) {
         self.service = service
+    }
+
+    func probeReadiness(completion: @escaping (Result<Void, Error>) -> Void) {
+        completion(service.isReady ? .success(()) : .failure(ActionBrokerReadinessError.unavailable))
     }
 
     func start(

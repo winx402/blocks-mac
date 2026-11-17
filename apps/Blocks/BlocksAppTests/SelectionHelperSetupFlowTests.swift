@@ -141,6 +141,141 @@ final class SelectionHelperSetupFlowTests: XCTestCase {
         XCTAssertEqual(fixture.connection.pairCount, 0)
     }
 
+    #if !BLOCKS_LOCAL_DEVELOPMENT
+    func testPassiveRefreshMovesSigningOffMainAndCoalescesLifecycleRechecks() async throws {
+        let fixture = try SetupFixture()
+        defer { fixture.remove() }
+        let verifier = SetupBlockingIdentityVerifier()
+        defer { verifier.releaseFirstVerification() }
+        let controller = fixture.controllerWithAssociation(
+            identityVerifier: verifier,
+            runningApplicationURLsProvider: { [] }
+        )
+        var results = 0
+        let observation = controller.$state.dropFirst().sink { state in
+            if state == .notPaired { results += 1 }
+        }
+        controller.refresh(allowLaunch: false)
+        await waitUntil { verifier.firstVerificationIsBlocked }
+        // This is the passive entry used by Helper launch/terminate notices.
+        // A burst must request one follow-up, not enqueue one worker per notice.
+        for _ in 0..<20 { controller.refresh(allowLaunch: false) }
+        XCTAssertEqual(verifier.verificationCount, 1)
+        XCTAssertEqual(controller.state, .checking)
+        verifier.releaseFirstVerification()
+        await waitUntil { results == 2 }
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(results, 2)
+        XCTAssertFalse(verifier.observedMainThread)
+        XCTAssertEqual(fixture.launchCount, 0)
+        XCTAssertEqual(fixture.connection.pairCount, 0)
+        XCTAssertEqual(fixture.store.explicitOptInCount, 0)
+        XCTAssertEqual(fixture.store.automaticSaveCount, 0)
+        withExtendedLifetime(observation) {}
+    }
+
+    func testCancelledSuspendedRefreshCannotPublishOrContinueHealthAfterNewPair() async throws {
+        let fixture = try SetupFixture()
+        defer { fixture.remove() }
+        try fixture.store.save(fixture.connection.healthKey)
+        fixture.bootstrap.available = false
+        let verifier = SetupBlockingIdentityVerifier()
+        defer { verifier.releaseFirstVerification() }
+        let controller = fixture.controllerWithAssociation(identityVerifier: verifier)
+        controller.refresh()
+        await waitUntil { verifier.firstVerificationIsBlocked }
+        controller.pairingCode = "123456"
+        controller.pair()
+        await waitUntil { !controller.isPairing && controller.lastPairingFailure == .bootstrapUnavailable }
+        // The new manual attempt owns this explicit failure state. The older
+        // refresh must preserve it, not turn an unreadable bootstrap into an
+        // unpaired state or overwrite it with authenticated health success.
+        XCTAssertEqual(controller.state, .connectionFailed)
+        let expectedError = controller.lastError
+        XCTAssertNotNil(expectedError)
+        let staleReady = expectation(description: "old refresh must not publish ready")
+        staleReady.isInverted = true
+        let observation = controller.$state.dropFirst().sink { state in
+            if case .ready = state { staleReady.fulfill() }
+        }
+        verifier.releaseFirstVerification()
+        await waitUntil { verifier.firstVerificationReturned }
+        await fulfillment(of: [staleReady], timeout: 0.1)
+        XCTAssertEqual(controller.state, .connectionFailed)
+        XCTAssertEqual(controller.lastPairingFailure, .bootstrapUnavailable)
+        XCTAssertEqual(controller.lastError, expectedError)
+        XCTAssertEqual(fixture.connection.healthCount, 0, "cancelled locator work must not proceed to health or launch")
+        XCTAssertEqual(fixture.launchCount, 0)
+        XCTAssertFalse(verifier.observedMainThread)
+        withExtendedLifetime(observation) {}
+    }
+
+    func testSuspendedSigningRetainsUpdateLeaseUntilWorkerActuallyReturns() async throws {
+        let fixture = try SetupFixture()
+        defer { fixture.remove() }
+        let verifier = SetupBlockingIdentityVerifier()
+        defer { verifier.releaseFirstVerification() }
+        var client: SelectionHelperClient?
+        let controller = fixture.controllerWithAssociation(
+            configureClient: { client = $0 }, identityVerifier: verifier,
+            runningApplicationURLsProvider: { [] }
+        )
+        controller.refresh(allowLaunch: false)
+        await waitUntil { verifier.firstVerificationIsBlocked }
+        do {
+            try await XCTUnwrap(client).prepareForApplicationUpdate()
+            XCTFail("a blocked signing worker still owns the update admission lease")
+        } catch {
+            XCTAssertTrue(error is ApplicationOperationAdmissionGate.AdmissionError)
+        }
+        verifier.releaseFirstVerification()
+        await waitUntil { controller.state == .notPaired }
+        XCTAssertFalse(verifier.observedMainThread)
+        XCTAssertEqual(fixture.launchCount, 0)
+    }
+
+    func testPassiveRecheckOfQuitPairedHelperDoesNotRelaunchIt() async throws {
+        let fixture = try SetupFixture()
+        defer { fixture.remove() }
+        try fixture.store.save(fixture.connection.healthKey)
+        fixture.connection.healthFailure = .connectionFailed
+        let verifier = SetupBlockingIdentityVerifier(blockFirst: false)
+        let controller = fixture.controllerWithAssociation(
+            identityVerifier: verifier, runningApplicationURLsProvider: { [] }
+        )
+        await passiveRefresh(controller, expected: .notRunning)
+        XCTAssertFalse(verifier.observedMainThread)
+        XCTAssertEqual(fixture.launchCount, 0)
+        XCTAssertEqual(fixture.connection.pairCount, 0)
+        XCTAssertNotNil(fixture.store.load())
+    }
+
+    func testColdStartDisconnectRecoverySignsOnlyOnWorkerAndKeepsOptOut() async throws {
+        let fixture = try SetupFixture()
+        defer { fixture.remove() }
+        try fixture.store.save(fixture.connection.healthKey)
+        let verifier = SetupBlockingIdentityVerifier()
+        defer { verifier.releaseFirstVerification() }
+        let recovery = SetupRecoveryStore(deadline: Date().addingTimeInterval(5))
+        let controller = fixture.controllerWithAssociation(
+            identityVerifier: verifier, disconnectRecoveryStore: recovery
+        )
+        controller.startApplicationLaunchRecovery(runtimeServicesEnabled: true)
+        await waitUntil { verifier.firstVerificationIsBlocked }
+        for _ in 0..<10 { controller.refresh(allowLaunch: false) }
+        verifier.releaseFirstVerification()
+        await waitUntil { controller.state == .notPaired && recovery.deadline == nil }
+        XCTAssertFalse(verifier.observedMainThread)
+        XCTAssertNil(fixture.store.load())
+        XCTAssertTrue(fixture.store.isAutomaticAssociationDisabled)
+        XCTAssertEqual(fixture.launchCount, 0)
+        XCTAssertEqual(fixture.connection.pairCount, 0)
+        XCTAssertEqual(fixture.store.explicitOptInCount, 0)
+        XCTAssertEqual(fixture.store.automaticSaveCount, 0)
+        XCTAssertEqual(recovery.clearCount, 1)
+    }
+    #endif
+
     #if DEBUG && !BLOCKS_LOCAL_DEVELOPMENT
     func testOfficialPassiveRefreshAndColdStartNeverRequestFirstAssociation() async throws {
         let fixture = try SetupFixture()
@@ -429,6 +564,7 @@ private final class SetupConnection: SelectionHelperLoopbackConnecting {
     private var pairs = 0
     private var healths = 0
     private var trusted = true
+    private var failedHealth: SelectionAgentServiceFailure?
     private var consumedPairingCode = false
     weak var sharedStore: SetupKeyStore?
     var onDisconnectResponse: (() -> Void)?
@@ -439,6 +575,10 @@ private final class SetupConnection: SelectionHelperLoopbackConnecting {
     var accessibilityTrusted: Bool {
         get { lock.withLock { trusted } }
         set { lock.withLock { trusted = newValue } }
+    }
+    var healthFailure: SelectionAgentServiceFailure? {
+        get { lock.withLock { failedHealth } }
+        set { lock.withLock { failedHealth = newValue } }
     }
     init(bootstrapKey: Data) { self.bootstrapKey = bootstrapKey }
     func adoptAssociationKey(_ value: Data) { lock.withLock { key = value } }
@@ -489,6 +629,7 @@ private final class SetupConnection: SelectionHelperLoopbackConnecting {
                         response = .init(booleanValue: disabled)
                     } else {
                         guard command.kind == .health, sharedStore?.isAutomaticAssociationDisabled != true else { return .failure(.invalidResponse) }
+                        if let failedHealth { return .failure(failedHealth) }
                         healths += 1
                         response = .init(health: .init(helperVersion: "fixture", accessibilityTrusted: trusted))
                     }
@@ -510,10 +651,47 @@ private struct SetupIdentityVerifier: SelectionHelperBundleIdentityVerifying {
     }
 }
 
+private final class SetupBlockingIdentityVerifier: SelectionHelperBundleIdentityVerifying, @unchecked Sendable {
+    private let lock = NSLock()
+    private let release = DispatchSemaphore(value: 0)
+    private let blockFirst: Bool
+    private var calls = 0
+    private var mainThread = false
+    private var firstBlocked = false
+    private var firstReturned = false
+
+    init(blockFirst: Bool = true) { self.blockFirst = blockFirst }
+    var verificationCount: Int { lock.withLock { calls } }
+    var observedMainThread: Bool { lock.withLock { mainThread } }
+    var firstVerificationIsBlocked: Bool { lock.withLock { firstBlocked } }
+    var firstVerificationReturned: Bool { lock.withLock { firstReturned } }
+    func releaseFirstVerification() { release.signal() }
+
+    func verifiedIdentity(for applicationURL: URL) -> SelectionHelperBundleIdentity? {
+        let shouldBlock = lock.withLock {
+            calls += 1
+            mainThread = mainThread || Thread.isMainThread
+            let shouldBlock = blockFirst && calls == 1
+            if shouldBlock { firstBlocked = true }
+            return shouldBlock
+        }
+        if shouldBlock {
+            // A regression must fail promptly, not deadlock the test's actor.
+            if Thread.isMainThread { XCTFail("signing must run off MainActor") }
+            else { _ = release.wait(timeout: .now() + 3) }
+            lock.withLock { firstReturned = true }
+        }
+        return .init(teamID: "SETUPTEST", signingIdentifier: BlocksSelectionHelperProtocol.bundleIdentifier)
+    }
+}
+
 private final class SetupRecoveryStore: SelectionHelperDisconnectRecoveryStoring {
-    func loadDeadline() -> Date? { nil }
-    func save(deadline: Date) {}
-    func clear() {}
+    var deadline: Date?
+    private(set) var clearCount = 0
+    init(deadline: Date? = nil) { self.deadline = deadline }
+    func loadDeadline() -> Date? { deadline }
+    func save(deadline: Date) { self.deadline = deadline }
+    func clear() { deadline = nil; clearCount += 1 }
 }
 
 @MainActor
@@ -543,20 +721,23 @@ private final class SetupFixture {
         controllerWithAssociation(permissionGuide: permissionGuide)
     }
     func controllerWithAssociation(permissionGuide: ((URL) -> Void)? = nil,
-                                   configureClient: ((SelectionHelperClient) -> Void)? = nil) -> SelectionHelperSettingsController {
+                                   configureClient: ((SelectionHelperClient) -> Void)? = nil,
+                                   identityVerifier: any SelectionHelperBundleIdentityVerifying = SetupIdentityVerifier(),
+                                   runningApplicationURLsProvider: (() -> [URL])? = nil,
+                                   disconnectRecoveryStore: any SelectionHelperDisconnectRecoveryStoring = SetupRecoveryStore()) -> SelectionHelperSettingsController {
         let helper = helperURL
         let client = SelectionHelperClient(
             keyStore: store, bootstrapKeyStore: bootstrap, connection: connection,
             applicationLocator: SelectionHelperApplicationLocator(
-                candidateURLsProvider: { [helper] }, runningApplicationURLsProvider: { [helper] },
+                candidateURLsProvider: { [helper] }, runningApplicationURLsProvider: runningApplicationURLsProvider ?? { [helper] },
                 openApplication: { [weak self] _, _ in self?.launchLock.withLock { self?.launches += 1 } },
-                allowedApplicationURLsProvider: { [helper] }, identityVerifier: SetupIdentityVerifier(),
+                allowedApplicationURLsProvider: { [helper] }, identityVerifier: identityVerifier,
                 trustedHostTeamIdentifierProvider: { "SETUPTEST" }
             )
         )
         configureClient?(client)
         return SelectionHelperSettingsController(
-            client: client, disconnectRecoveryStore: SetupRecoveryStore(), permissionGuideOverride: permissionGuide
+            client: client, disconnectRecoveryStore: disconnectRecoveryStore, permissionGuideOverride: permissionGuide
         )
     }
 }

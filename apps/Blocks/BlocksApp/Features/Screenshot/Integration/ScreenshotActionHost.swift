@@ -1,5 +1,6 @@
 import BlocksCore
 import Foundation
+import OSLog
 import Security
 
 private struct ActionBrokerRequestHeader: Decodable, Sendable {
@@ -46,6 +47,8 @@ protocol ActionBrokerHosting: AnyObject {
         onInvalidated: @escaping () -> Void
     )
     func stop()
+    func probeReadiness(completion: @escaping (Result<Void, Error>) -> Void)
+    func fencePendingStartupForApplicationQuit()
     func pauseAndDrainForApplicationUpdate() async throws
     func resumeAfterCancelledApplicationUpdate()
     func prepareBrokerForApplicationUpdate(token: String) async throws -> Int32
@@ -53,6 +56,10 @@ protocol ActionBrokerHosting: AnyObject {
 }
 
 extension ActionBrokerHosting {
+    func probeReadiness(completion: @escaping (Result<Void, Error>) -> Void) {
+        completion(.failure(ActionBrokerReadinessError.unsupportedPeer))
+    }
+    func fencePendingStartupForApplicationQuit() {}
     func revokeModule(_ module: CLIModule) {}
     func pauseAndDrainForApplicationUpdate() async throws {
         throw ApplicationOperationAdmissionGate.AdmissionError.paused("Action Broker lifecycle adapter is unavailable")
@@ -62,22 +69,35 @@ extension ActionBrokerHosting {
     func resumeBrokerAfterCancelledApplicationUpdate(token: String) async throws { throw ActionBrokerUpdateError.unsupportedPeer }
 }
 
-private func actionBrokerConnectionRequirement() -> String? {
+private func actionBrokerConnectionRequirement() -> Result<String, ActionBrokerIdentityFailure> {
     #if BLOCKS_LOCAL_DEVELOPMENT
-    return BlocksLocalBuildTrust.connectionRequirement(role: "broker")
+    guard let requirement = BlocksLocalBuildTrust.connectionRequirement(role: "broker") else {
+        return .failure(.init(subject: .own, stage: .requirement, reason: .missingValue))
+    }
+    return .success(requirement)
     #else
-    var code: SecCode?
-    var staticCode: SecStaticCode?
-    var information: CFDictionary?
-    guard SecCodeCopySelf([], &code) == errSecSuccess, let code,
-          SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode,
-          SecCodeCopySigningInformation(staticCode, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess,
-          let values = information as? [CFString: Any],
-          let team = values[kSecCodeInfoTeamIdentifier] as? String,
-          team.range(of: "^[A-Z0-9]{10}$", options: .regularExpression) != nil else { return nil }
-    return "anchor apple generic and identifier \"app.blocks.action-broker\" and certificate leaf[subject.OU] = \"\(team)\""
+    return ActionBrokerIdentityValidator<SecCode, SecStaticCode>.hostConnectionRequirement(operations: .system)
     #endif
 }
+
+/// Listener callbacks only read this immutable running-process snapshot. The
+/// first Security lookup (including a failure) is cached on a utility worker.
+private final class ActionBrokerHostTrust: @unchecked Sendable {
+    private let worker = ActionBrokerRequirementWorker(resolve: actionBrokerConnectionRequirement)
+    private let lock = NSLock()
+    private var snapshot: String?
+    var requirement: String? { lock.withLock { snapshot } }
+    func load() async throws -> String {
+        try await withCheckedThrowingContinuation { continuation in
+            worker.load { [self] result in
+                if case let .success(requirement) = result { lock.withLock { snapshot = requirement } }
+                continuation.resume(with: result.mapError { $0 as Error })
+            }
+        }
+    }
+}
+
+private let actionBrokerHostTrust = ActionBrokerHostTrust()
 
 private final class ActionBrokerLifecycleReply<Value: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
@@ -86,6 +106,69 @@ private final class ActionBrokerLifecycleReply<Value: Sendable>: @unchecked Send
     func finish(_ result: Result<Value, Error>) {
         let continuation = lock.withLock { defer { self.continuation = nil }; return self.continuation }
         continuation?.resume(with: result)
+    }
+}
+
+/// The production startup fence, kept injectable without constructing a Store,
+/// resuming an XPC listener, or contacting a real Mach service in tests.
+@MainActor
+final class ActionBrokerHostStartupPreparation {
+    typealias RequirementProvider = @MainActor () async throws -> String
+    private var generation = 0
+    private var active = false
+    private var deadline: ContinuousClock.Instant?
+    private var preparationTask: Task<Void, Never>?
+    private var deadlineTask: Task<Void, Never>?
+    private var failure: ((Error) -> Void)?
+
+    func begin(timeout: Duration, requirementProvider: @escaping RequirementProvider,
+        onRequirement: @escaping (String) -> Void, onFailure: @escaping (Error) -> Void) {
+        cancel()
+        generation &+= 1
+        let candidate = generation
+        active = true
+        deadline = ContinuousClock.now.advanced(by: timeout)
+        failure = onFailure
+        deadlineTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: timeout) } catch { return }
+            self?.fail(candidate: candidate, error: ActionBrokerReadinessError.timedOut)
+        }
+        preparationTask = Task { @MainActor [weak self] in
+            do {
+                let requirement = try await requirementProvider()
+                try Task.checkCancellation()
+                guard let self, self.active, self.generation == candidate else { return }
+                guard let deadline = self.deadline, ContinuousClock.now < deadline else {
+                    self.fail(candidate: candidate, error: ActionBrokerReadinessError.timedOut); return
+                }
+                onRequirement(requirement)
+            } catch {
+                self?.fail(candidate: candidate, error: error)
+            }
+        }
+    }
+
+    /// Called only after full Broker -> Host readiness has completed.
+    func finish() { cancel(notifyFailure: false) }
+
+    func cancel(notifyFailure: Bool = true) {
+        let callback = active && notifyFailure ? failure : nil
+        active = false
+        generation &+= 1
+        deadline = nil
+        failure = nil
+        preparationTask?.cancel()
+        preparationTask = nil
+        deadlineTask?.cancel()
+        deadlineTask = nil
+        callback?(CancellationError())
+    }
+
+    private func fail(candidate: Int, error: Error) {
+        guard active, generation == candidate else { return }
+        let callback = failure
+        cancel(notifyFailure: false)
+        callback?(error)
     }
 }
 
@@ -98,14 +181,25 @@ final class ActionBrokerHostConnectionLifecycle {
     private var completedGeneration: Int?
     private var registeredGeneration: Int?
     private var serviceResumeRequested = false
+    private var attemptIsActive = false
 
-    func beginConnection() -> (generation: Int, shouldResumeListener: Bool) {
-        let shouldResumeListener = !isListenerResumed
+    func beginPreparation() -> Int {
         generation &+= 1
         completedGeneration = nil
         registeredGeneration = nil
+        attemptIsActive = true
+        return generation
+    }
+
+    func activateListener(for candidate: Int) -> Bool {
+        guard isCurrent(candidate), !isListenerResumed else { return false }
         isListenerResumed = true
-        return (generation, shouldResumeListener)
+        return true
+    }
+
+    func beginConnection() -> (generation: Int, shouldResumeListener: Bool) {
+        let candidate = beginPreparation()
+        return (candidate, activateListener(for: candidate))
     }
 
     func stop() -> Bool {
@@ -114,11 +208,24 @@ final class ActionBrokerHostConnectionLifecycle {
         completedGeneration = nil
         isListenerResumed = false
         registeredGeneration = nil
+        attemptIsActive = false
+        serviceResumeRequested = false
         return shouldSuspendListener
     }
 
     func isCurrent(_ candidate: Int) -> Bool {
-        candidate == generation && isListenerResumed
+        candidate == generation && attemptIsActive
+    }
+
+    func claimLoss(for candidate: Int) -> Bool {
+        guard isCurrent(candidate) else { return false }
+        attemptIsActive = false
+        registeredGeneration = nil
+        return true
+    }
+
+    func isRegistered(_ candidate: Int) -> Bool {
+        isCurrent(candidate) && registeredGeneration == candidate
     }
 
     func claimCompletion(for candidate: Int) -> Bool {
@@ -138,8 +245,15 @@ final class ActionBrokerHostConnectionLifecycle {
         return false
     }
 
+    func revokeServiceResume() { serviceResumeRequested = false }
+
     func didRegisterTrustedHost(for candidate: Int) -> Bool {
         guard isCurrent(candidate), completedGeneration == candidate else { return false }
+        return acknowledgeTrustedHost(for: candidate)
+    }
+
+    func acknowledgeTrustedHost(for candidate: Int) -> Bool {
+        guard isCurrent(candidate) else { return false }
         registeredGeneration = candidate
         defer { serviceResumeRequested = false }
         return serviceResumeRequested
@@ -170,8 +284,17 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
         moduleAccess: moduleAccess
     )
     private var brokerConnection: NSXPCConnection?
+    @MainActor private let startupPreparation = ActionBrokerHostStartupPreparation()
+    private let requirementProvider: ActionBrokerHostStartupPreparation.RequirementProvider
+    private let startupTimeout: Duration
+    @MainActor private var startupDeadline: ContinuousClock.Instant?
+    @MainActor private var startCompletion: ((Result<Void, Error>) -> Void)?
+    @MainActor private var connectionInvalidated: (() -> Void)?
+    @MainActor private var isQuitting = false
+    private static let connectionLogger = Logger(subsystem: "app.blocks", category: "ActionHost")
     #if BLOCKS_LOCAL_DEVELOPMENT
     private let localActionServer = LocalActionTransport.Server()
+    @MainActor private var localActionServerStarted = false
     #endif
     private var activeRequestID: ActionRequestID?
     private let connectionLifecycle: ActionBrokerHostConnectionLifecycle
@@ -184,6 +307,8 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
 
     @MainActor func pauseAndDrainForApplicationUpdate() async throws {
         try exportedService.pauseForApplicationUpdate()
+        connectionLifecycle.revokeServiceResume()
+        cancelPendingStartup()
     }
 
     @MainActor func resumeAfterCancelledApplicationUpdate() {
@@ -212,7 +337,11 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
     }
 
     @MainActor private func authenticatedLifecycleConnection() async throws -> NSXPCConnection {
-        guard let requirement = actionBrokerConnectionRequirement() else { throw ActionBrokerUpdateError.untrustedPeer }
+        let requirement: String
+        do { requirement = try await actionBrokerHostTrust.load() }
+        catch { throw ActionBrokerUpdateError.untrustedPeer }
+        try Task.checkCancellation()
+        guard !isQuitting, !AppTerminationCoordinator.shared.isQuitting else { throw CancellationError() }
         let connection = NSXPCConnection(machServiceName: BlocksActionBrokerXPC.machServiceName)
         connection.setCodeSigningRequirement(requirement)
         connection.remoteObjectInterface = NSXPCInterface(with: BlocksActionBrokerHostXPCProtocol.self)
@@ -242,6 +371,8 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
                     reply.finish(.failure(ActionBrokerUpdateError.timedOut))
                 }
             }
+            try Task.checkCancellation()
+            guard !isQuitting, !AppTerminationCoordinator.shared.isQuitting else { throw CancellationError() }
             return connection
         } catch { connection.invalidate(); throw error }
     }
@@ -276,7 +407,9 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
         pluginDevelopmentService: PluginDevelopmentService,
         clipboardStore: ClipboardStore? = nil,
         moduleAccess: CLIModuleAccessPolicy? = nil,
-        connectionLifecycle: ActionBrokerHostConnectionLifecycle = .init()
+        connectionLifecycle: ActionBrokerHostConnectionLifecycle = .init(),
+        requirementProvider: ActionBrokerHostStartupPreparation.RequirementProvider? = nil,
+        startupTimeout: Duration = .seconds(6)
     ) {
         self.screenshotStore = screenshotStore
         self.historyService = historyService
@@ -285,6 +418,8 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
         self.clipboardStore = clipboardStore
         self.moduleAccess = moduleAccess ?? CLIModuleAccessPolicy()
         self.connectionLifecycle = connectionLifecycle
+        self.requirementProvider = requirementProvider ?? { try await actionBrokerHostTrust.load() }
+        self.startupTimeout = startupTimeout
         super.init()
         listener.delegate = self
         #if BLOCKS_LOCAL_DEVELOPMENT
@@ -296,7 +431,7 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
     #if BLOCKS_LOCAL_DEVELOPMENT
     @MainActor private func startLocalActionServer() -> Bool {
         let service = exportedService
-        return localActionServer.start { operation, data, outputFile, reply in
+        let started = localActionServer.start { operation, data, outputFile, reply in
             switch operation {
             case .probe: reply(Data("ready".utf8))
             case .list: service.listActions(withReply: reply)
@@ -310,6 +445,8 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
                 }
             }
         }
+        localActionServerStarted = started
+        return started
     }
     #endif
 
@@ -329,12 +466,15 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
         completion: @escaping (Result<Void, Error>) -> Void,
         onInvalidated: @escaping () -> Void
     ) {
+        guard !isQuitting, !AppTerminationCoordinator.shared.isQuitting else {
+            completion(.failure(CancellationError())); return
+        }
         #if BLOCKS_LOCAL_DEVELOPMENT
         exportedService.setIntegrationEnabled(true)
         let started = startLocalActionServer()
         if started {
             exportedService.resumeAfterCancelledApplicationUpdate()
-            completion(.success(()))
+            completion(exportedService.isReady ? .success(()) : .failure(ActionBrokerReadinessError.unavailable))
         } else {
             exportedService.setIntegrationEnabled(false)
             completion(.failure(ScreenshotActionHostError.brokerProxyUnavailable))
@@ -343,54 +483,61 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
         #else
         exportedService.setIntegrationEnabled(true)
         let previousConnection = brokerConnection
-        let connectionStart = connectionLifecycle.beginConnection()
-        let generation = connectionStart.generation
-        if connectionStart.shouldResumeListener {
-            listener.resume()
-        }
+        let previousCompletion = startCompletion
+        let generation = connectionLifecycle.beginPreparation()
+        startCompletion = completion
+        connectionInvalidated = onInvalidated
+        brokerConnection = nil
         previousConnection?.invalidate()
+        startupPreparation.cancel(notifyFailure: false)
+        previousCompletion?(.failure(CancellationError()))
+        let started = ContinuousClock.now
+        startupDeadline = started.advanced(by: startupTimeout)
+        // This total deadline includes the uncancellable worker-side Security
+        // lookup. A late result is fenced, never allowed to publish a listener.
+        startupPreparation.begin(timeout: startupTimeout, requirementProvider: requirementProvider,
+            onRequirement: { [weak self] requirement in
+                guard let self, self.mayPublish(generation) else { return }
+                self.connect(requirement: requirement, generation: generation, started: started)
+            }, onFailure: { [weak self] error in
+                self?.loseConnection(generation: generation, error: error)
+            })
+        #endif
+    }
+
+    @MainActor private func mayPublish(_ generation: Int) -> Bool {
+        !isQuitting && !AppTerminationCoordinator.shared.isQuitting && connectionLifecycle.isCurrent(generation)
+            && (startupDeadline.map { ContinuousClock.now < $0 } ?? true)
+    }
+
+    @MainActor private func connect(requirement: String, generation: Int, started: ContinuousClock.Instant) {
+        guard mayPublish(generation) else { return }
+        if connectionLifecycle.activateListener(for: generation) { listener.resume() }
         let connection = NSXPCConnection(machServiceName: BlocksActionBrokerXPC.machServiceName)
-        guard let requirement = actionBrokerConnectionRequirement() else {
-            completion(.failure(ActionBrokerUpdateError.untrustedPeer))
-            return
-        }
         connection.setCodeSigningRequirement(requirement)
         connection.remoteObjectInterface = NSXPCInterface(with: BlocksActionBrokerHostXPCProtocol.self)
         connection.invalidationHandler = { [weak self] in
             Task { @MainActor [weak self] in
-                guard let self,
-                      self.connectionLifecycle.isCurrent(generation) else {
-                    return
-                }
-                self.brokerConnection = nil
-                if self.connectionLifecycle.claimCompletion(for: generation) {
-                    completion(.failure(ScreenshotActionHostError.connectionInvalidated))
-                }
-                onInvalidated()
+                self?.loseConnection(generation: generation, error: ScreenshotActionHostError.connectionInvalidated)
+            }
+        }
+        connection.interruptionHandler = { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.loseConnection(generation: generation, error: ScreenshotActionHostError.connectionInvalidated)
             }
         }
         connection.resume()
         brokerConnection = connection
-        let proxy = connection.remoteObjectProxyWithErrorHandler { error in
+        let proxy = connection.remoteObjectProxyWithErrorHandler { [weak self] error in
             Task { @MainActor [weak self] in
-                guard let self,
-                      self.connectionLifecycle.isCurrent(generation) else {
-                    return
-                }
-                if self.connectionLifecycle.claimCompletion(for: generation) {
-                    completion(.failure(error))
-                } else {
-                    self.brokerConnection = nil
-                    onInvalidated()
-                }
+                self?.loseConnection(generation: generation, error: error)
             }
         } as? BlocksActionBrokerHostXPCProtocol
         guard let proxy else {
-            guard connectionLifecycle.claimCompletion(for: generation) else { return }
-            completion(.failure(ScreenshotActionHostError.brokerProxyUnavailable))
+            loseConnection(generation: generation, error: ScreenshotActionHostError.brokerProxyUnavailable)
             return
         }
-        proxy.registerHost(listener.endpoint) { accepted, message in
+        proxy.registerHost(listener.endpoint) { [weak self] accepted, message in
             #if BLOCKS_LOCAL_DEVELOPMENT
             let trustedBroker = BlocksLocalBuildTrust.accepts(
                 processIdentifier: connection.processIdentifier,
@@ -401,23 +548,120 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
             let trustedBroker = connection.processIdentifier > 0 && connection.effectiveUserIdentifier == getuid()
             #endif
             Task { @MainActor [weak self] in
-                guard let self,
-                      self.connectionLifecycle.claimCompletion(for: generation) else {
+                guard let self, self.mayPublish(generation), self.brokerConnection === connection else { return }
+                guard accepted && trustedBroker else {
+                    self.loseConnection(generation: generation, error: ScreenshotActionHostError.registrationRejected(message))
                     return
                 }
-                if accepted && trustedBroker,
-                   self.connectionLifecycle.didRegisterTrustedHost(for: generation) {
+                // The trusted registration acknowledgement permits recovery of
+                // this Host's paused admission. Only the subsequent round trip
+                // can establish readiness; requiring it before this is circular.
+                if self.connectionLifecycle.acknowledgeTrustedHost(for: generation) {
                     self.exportedService.resumeAfterCancelledApplicationUpdate()
                 }
-                (accepted && trustedBroker)
-                    ? completion(.success(()))
-                    : completion(.failure(ScreenshotActionHostError.registrationRejected(message)))
+                do {
+                    try await self.checkReadiness(connection: connection)
+                    guard self.mayPublish(generation), self.brokerConnection === connection,
+                          self.connectionLifecycle.claimCompletion(for: generation) else { return }
+                    self.startupPreparation.finish()
+                    self.startupDeadline = nil
+                    let completion = self.startCompletion
+                    self.startCompletion = nil
+                    let elapsed = started.duration(to: .now).components
+                    let milliseconds = elapsed.seconds * 1_000 + elapsed.attoseconds / 1_000_000_000_000_000
+                    Self.connectionLogger.info("Host phase=ready generation=\(generation, privacy: .public) mainThread=\(Thread.isMainThread, privacy: .public) elapsedMS=\(milliseconds, privacy: .public) outcome=accepted")
+                    completion?(.success(()))
+                } catch {
+                    self.loseConnection(generation: generation, error: error)
+                }
+            }
+        }
+    }
+
+    @MainActor private func loseConnection(generation: Int, error: Error, notify: Bool = true) {
+        guard connectionLifecycle.claimLoss(for: generation) else { return }
+        startupPreparation.cancel(notifyFailure: false)
+        startupDeadline = nil
+        let connection = brokerConnection
+        brokerConnection = nil
+        connection?.invalidate()
+        let completion = startCompletion
+        startCompletion = nil
+        Self.connectionLogger.info("Host phase=connection_lost generation=\(generation, privacy: .public) mainThread=\(Thread.isMainThread, privacy: .public) outcome=unavailable")
+        if let completion { completion(.failure(error)) }
+        else if notify { connectionInvalidated?() }
+    }
+
+    @MainActor private func checkReadiness(connection: NSXPCConnection) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let reply = ActionBrokerLifecycleReply(continuation)
+            let proxy = connection.remoteObjectProxyWithErrorHandler { _ in
+                reply.finish(.failure(ActionBrokerReadinessError.unavailable))
+            } as? BlocksActionBrokerHostXPCProtocol
+            guard let proxy else { reply.finish(.failure(ActionBrokerReadinessError.unavailable)); return }
+            let invoked: Void? = proxy.probeRegisteredHostReadiness?(withReply: { ready in
+                guard connection.processIdentifier > 0, connection.effectiveUserIdentifier == getuid() else {
+                    reply.finish(.failure(ActionBrokerReadinessError.untrustedPeer)); return
+                }
+                reply.finish(ready ? .success(()) : .failure(ActionBrokerReadinessError.unavailable))
+            })
+            if invoked == nil { reply.finish(.failure(ActionBrokerReadinessError.unsupportedPeer)) }
+            Task {
+                try? await Task.sleep(for: .seconds(2))
+                reply.finish(.failure(ActionBrokerReadinessError.timedOut))
+            }
+        }
+    }
+
+    @MainActor func probeReadiness(completion: @escaping (Result<Void, Error>) -> Void) {
+        #if BLOCKS_LOCAL_DEVELOPMENT
+        completion(!isQuitting && localActionServerStarted && exportedService.isReady
+            ? .success(()) : .failure(ActionBrokerReadinessError.unavailable))
+        #else
+        let generation = connectionLifecycle.generation
+        guard mayPublish(generation), connectionLifecycle.isRegistered(generation), let connection = brokerConnection else {
+            completion(.failure(ActionBrokerReadinessError.unavailable)); return
+        }
+        Task { @MainActor [weak self] in
+            guard let self else { completion(.failure(ActionBrokerReadinessError.unavailable)); return }
+            do {
+                try await self.checkReadiness(connection: connection)
+                guard self.mayPublish(generation), self.brokerConnection === connection else {
+                    completion(.failure(ActionBrokerReadinessError.unavailable)); return
+                }
+                completion(.success(()))
+            } catch {
+                self.loseConnection(generation: generation, error: error, notify: false)
+                completion(.failure(error))
             }
         }
         #endif
     }
 
+    @MainActor func fencePendingStartupForApplicationQuit() {
+        isQuitting = true
+        cancelPendingStartup()
+    }
+
+    @MainActor private func cancelPendingStartup() {
+        if startCompletion != nil {
+            _ = connectionLifecycle.claimLoss(for: connectionLifecycle.generation)
+            let completion = startCompletion
+            startCompletion = nil
+            startupPreparation.cancel(notifyFailure: false)
+            startupDeadline = nil
+            brokerConnection?.invalidate()
+            brokerConnection = nil
+            completion?(.failure(CancellationError()))
+        }
+    }
+
     @MainActor func stop() {
+        let completion = startCompletion
+        startCompletion = nil
+        startupPreparation.cancel(notifyFailure: false)
+        startupDeadline = nil
+        connectionInvalidated = nil
         for module in CLIModule.allCases { revokeModule(module) }
         exportedService.setIntegrationEnabled(false)
         // The private development endpoint remains bound while disabled, so
@@ -428,6 +672,7 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
         if shouldSuspendListener {
             listener.suspend()
         }
+        completion?(.failure(CancellationError()))
     }
 
     func listener(
@@ -435,7 +680,7 @@ final class ScreenshotActionHost: NSObject, NSXPCListenerDelegate, ActionBrokerH
         shouldAcceptNewConnection newConnection: NSXPCConnection
     ) -> Bool {
         guard newConnection.effectiveUserIdentifier == getuid() else { return false }
-        guard let requirement = actionBrokerConnectionRequirement() else { return false }
+        guard let requirement = actionBrokerHostTrust.requirement else { return false }
         newConnection.setCodeSigningRequirement(requirement)
         #if BLOCKS_LOCAL_DEVELOPMENT
         guard BlocksLocalBuildTrust.accepts(
@@ -892,8 +1137,15 @@ final class ScreenshotActionHostService: NSObject, BlocksActionHostXPCProtocol {
     private let cancelHandler: CancelHandler
     private let moduleAccess: CLIModuleAccessPolicy?
     @MainActor private var integrationEnabled = true
+    @MainActor var isReady: Bool { integrationEnabled && applicationUpdateGate.isAcceptingOperations }
     private let lock = NSLock()
     private var executions: [String: Execution] = [:]
+
+    func probeReadiness(withReply reply: @escaping (Bool) -> Void) {
+        // No admission lease or business work: a health check must not keep an
+        // otherwise-idle update busy. The main-actor hop also checks liveness.
+        Task { @MainActor [weak self] in reply(self?.isReady ?? false) }
+    }
 
     init(
         executeHandler: @escaping Handler,

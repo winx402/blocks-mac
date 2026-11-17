@@ -2970,6 +2970,8 @@ enum ActionBrokerSettingsStatePresentation {
             L10n.string("settings.agentCLI.actionBroker.recovering")
         case .recoveryRequired:
             L10n.string("settings.agentCLI.actionBroker.recoveryRequired")
+        case .paused:
+            L10n.string("settings.agentCLI.actionBroker.paused")
         case .enabled:
             L10n.string("settings.agentCLI.actionBroker.enabled")
         case .unavailable:
@@ -2989,7 +2991,7 @@ enum ActionBrokerSettingsStatePresentation {
             .warning
         case .failed, .unavailable, .recoveryRequired:
             .error
-        case .disabled:
+        case .disabled, .paused:
             .information
         }
     }

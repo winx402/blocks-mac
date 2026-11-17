@@ -1,3 +1,4 @@
+import AppKit
 import BlocksCore
 import Combine
 import Foundation
@@ -391,6 +392,7 @@ final class ActionBrokerServiceManager: ObservableObject {
         case reconnecting
         case recovering
         case recoveryRequired
+        case paused
         case enabled
         case unavailable
         case failed(String)
@@ -429,11 +431,24 @@ final class ActionBrokerServiceManager: ObservableObject {
     private let embeddedServiceAvailable: Bool
     private let retryPolicy: ActionBrokerRetryPolicy
     private let retryScheduler: ActionBrokerRetryScheduler
+    private let healthScheduler: ActionBrokerRetryScheduler?
+    private let healthProbeTimeout: Duration
     private var hostAttempt = 0
+    private var completedHostAttempt: Int?
     private var successfulHostAttempt: Int?
     private var hostIsActive = false
     private var retryAttempt = 0
     private var reconnectTask: AnyCancellable?
+    private var healthCheckTask: AnyCancellable?
+    private var healthProbeDeadline: AnyCancellable?
+    private var healthProbeEpoch = 0
+    private var healthProbeIsActive = false
+    private var wakeObservation: AnyCancellable?
+    private var lastVerifiedAt: ContinuousClock.Instant?
+    private static let readinessLogger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "app.blocks.app",
+        category: "ActionHostReadiness"
+    )
     private var applicationUpdatePaused = false
     private let applicationManagementGate = ApplicationOperationAdmissionGate(name: "Action Broker management")
     private let updateRecoveryJournal: ActionBrokerUpdateRecoveryJournal
@@ -458,9 +473,12 @@ final class ActionBrokerServiceManager: ObservableObject {
         legacyMigrationSession?.invalidate()
         legacyMigrationSession = nil
         applicationUpdatePaused = true
+        cancelHealthChecks()
+        state = .paused
         reconnectTask?.cancel()
         reconnectTask = nil
         hostAttempt &+= 1
+        host.fencePendingStartupForApplicationQuit()
     }
 
     func prepareForApplicationUpdate(stopService: Bool = true) async throws {
@@ -474,6 +492,15 @@ final class ActionBrokerServiceManager: ObservableObject {
         if stopService, updateRecoveryTask != nil { throw ActionBrokerUpdateError.invalidRecoveryState }
         try applicationManagementGate.pauseIfIdle()
         applicationUpdatePaused = true
+        cancelHealthChecks()
+        // A pending start must not remain an apparently active host after a
+        // cancelled preparation. Do not stop/revoke an already running job.
+        if hostIsActive, successfulHostAttempt != hostAttempt {
+            hostAttempt &+= 1
+            hostIsActive = false
+            completedHostAttempt = nil
+        }
+        state = .paused
         try await host.pauseAndDrainForApplicationUpdate()
         guard stopService else { return }
         if usesAppOwnedService {
@@ -556,6 +583,8 @@ final class ActionBrokerServiceManager: ObservableObject {
         )
         retryPolicy = .default
         retryScheduler = Self.liveRetryScheduler
+        healthScheduler = Self.liveRetryScheduler
+        healthProbeTimeout = .seconds(3)
         let storage = try? StorageEnvironment.appSupport()
         updateRecoveryStorageAvailable = storage != nil
         updateRecoveryJournal = ActionBrokerUpdateRecoveryJournal(url: storage?.rootDirectory
@@ -571,6 +600,7 @@ final class ActionBrokerServiceManager: ObservableObject {
         )
         runningBrokerProcessIDs = { try Self.currentBrokerProcessIDs(policy: processScanPolicy) }
         processHasExited = { kill($0, 0) != 0 && errno == ESRCH }
+        observeWakeNotifications()
         if !beginStartupUpdateRecoveryIfNeeded() { refresh() }
     }
 
@@ -582,6 +612,8 @@ final class ActionBrokerServiceManager: ObservableObject {
         embeddedServiceAvailable: Bool = true,
         retryPolicy: ActionBrokerRetryPolicy = .default,
         retryScheduler: @escaping ActionBrokerRetryScheduler,
+        healthScheduler: ActionBrokerRetryScheduler? = nil,
+        healthProbeTimeout: Duration = .seconds(3),
         updateRecoveryJournal: ActionBrokerUpdateRecoveryJournal = .init(),
         runningBrokerProcessIDs: @escaping () throws -> [Int32] = { [] },
         processHasExited: @escaping (Int32) -> Bool = { _ in true },
@@ -613,6 +645,8 @@ final class ActionBrokerServiceManager: ObservableObject {
         self.embeddedServiceAvailable = embeddedServiceAvailable
         self.retryPolicy = retryPolicy
         self.retryScheduler = retryScheduler
+        self.healthScheduler = healthScheduler
+        self.healthProbeTimeout = healthProbeTimeout
         self.updateRecoveryJournal = updateRecoveryJournal
         self.updateRecoveryStorageAvailable = true
         self.runningBrokerProcessIDs = runningBrokerProcessIDs
@@ -622,6 +656,9 @@ final class ActionBrokerServiceManager: ObservableObject {
 
     deinit {
         reconnectTask?.cancel()
+        healthCheckTask?.cancel()
+        healthProbeDeadline?.cancel()
+        wakeObservation?.cancel()
     }
 
     /// Temporary update unregistration must not turn the user's enabled
@@ -719,7 +756,9 @@ final class ActionBrokerServiceManager: ObservableObject {
             updateRecoveryFailureMessage = nil
             applicationUpdatePaused = false
             applicationManagementGate.resume()
-            cancelReconnectAndStopHost()
+            // A refused drain has not stopped the Host. Preserve its active
+            // requests; refresh probes it, or starts only if preparation did
+            // actually stop it or a connection loss made it inactive.
             host.resumeAfterCancelledApplicationUpdate()
             refresh()
         } catch {
@@ -727,7 +766,6 @@ final class ActionBrokerServiceManager: ObservableObject {
             updateRecoveryFailureMessage = error.localizedDescription
             applicationUpdatePaused = false
             applicationManagementGate.resume()
-            cancelReconnectAndStopHost()
             host.resumeAfterCancelledApplicationUpdate()
             isServiceRegistered = service.status() == .enabled
             // A failed update must not needlessly disable the old, still
@@ -1220,7 +1258,8 @@ final class ActionBrokerServiceManager: ObservableObject {
     }
 
     func refresh() {
-        guard !applicationUpdatePaused else { return }
+        guard !isQuitting, !applicationUpdatePaused,
+              applicationManagementGate.isAcceptingOperations else { return }
         guard embeddedServiceAvailable else {
             cancelReconnectAndStopHost()
             isServiceRegistered = false
@@ -1231,10 +1270,14 @@ final class ActionBrokerServiceManager: ObservableObject {
         switch service.status() {
         case .enabled:
             isServiceRegistered = true
-            startHost(
-                isReconnect: state == .reconnecting || state == .recovering || state == .recoveryRequired || retryAttempt > 0,
-                isHealthCheck: state == .recoveryRequired
-            )
+            if hostIsActive, successfulHostAttempt == hostAttempt {
+                probeCurrentHost()
+            } else {
+                startHost(
+                    isReconnect: state == .reconnecting || state == .recovering || state == .recoveryRequired || retryAttempt > 0,
+                    isHealthCheck: state == .recoveryRequired
+                )
+            }
         case .requiresApproval:
             cancelReconnectAndStopHost()
             isServiceRegistered = false
@@ -1260,7 +1303,10 @@ final class ActionBrokerServiceManager: ObservableObject {
             refresh()
             return
         }
-        guard !hostIsActive else { return }
+        if hostIsActive {
+            if successfulHostAttempt == hostAttempt { probeCurrentHost() }
+            return
+        }
         reconnectTask?.cancel()
         reconnectTask = nil
         retryAttempt = 0
@@ -1283,35 +1329,46 @@ final class ActionBrokerServiceManager: ObservableObject {
     }
 
     private func startHost(isReconnect: Bool, isHealthCheck: Bool = false) {
-        guard !applicationUpdatePaused, applicationManagementGate.isAcceptingOperations else { return }
+        guard !isQuitting, !applicationUpdatePaused, applicationManagementGate.isAcceptingOperations else { return }
         guard isServiceRegistered, reconnectTask == nil, !hostIsActive else { return }
+        cancelHealthChecks()
         hostAttempt &+= 1
         let attempt = hostAttempt
+        completedHostAttempt = nil
+        successfulHostAttempt = nil
         hostIsActive = true
+        Self.readinessLogger.info("stage=register-start attempt=\(attempt, privacy: .public)")
         state = isHealthCheck ? .recoveryRequired : (isReconnect ? .reconnecting : .connecting)
         host.start(
             completion: { [weak self] result in
-                guard let self, self.isCurrentHostAttempt(attempt) else { return }
+                guard let self, self.isCurrentHostAttempt(attempt),
+                      self.completedHostAttempt != attempt else { return }
+                self.completedHostAttempt = attempt
                 switch result {
                 case .success:
                     self.retryAttempt = 0
                     self.successfulHostAttempt = attempt
+                    self.lastVerifiedAt = .now
                     self.state = self.updateRecoveryFailureMessage.map(State.failed) ?? .enabled
+                    Self.readinessLogger.info("stage=register-ready attempt=\(attempt, privacy: .public)")
+                    self.scheduleHealthCheck()
                 case let .failure(error):
-                    self.hostIsActive = false
-                    self.scheduleReconnect(after: error)
+                    self.loseHost(attempt: attempt, error: error, reason: "registration-failed")
                 }
             },
             onInvalidated: { [weak self] in
-                guard let self, self.isCurrentHostAttempt(attempt) else { return }
-                self.hostIsActive = false
-                self.scheduleReconnect(after: ScreenshotActionBrokerConnectionError.invalidated)
+                self?.loseHost(attempt: attempt,
+                    error: ScreenshotActionBrokerConnectionError.invalidated,
+                    reason: "transport-invalidated")
             }
         )
     }
 
     private func scheduleReconnect(after error: Error) {
-        guard !applicationUpdatePaused, isServiceRegistered, reconnectTask == nil else { return }
+        guard !isQuitting, !applicationUpdatePaused,
+              applicationManagementGate.isAcceptingOperations,
+              isServiceRegistered, reconnectTask == nil else { return }
+        let scheduledAttempt = hostAttempt
         let isHealthCheck = retryAttempt >= retryPolicy.delays.count
         let delay: Duration
         if isHealthCheck {
@@ -1323,7 +1380,9 @@ final class ActionBrokerServiceManager: ObservableObject {
             state = .reconnecting
         }
         reconnectTask = retryScheduler(delay) { [weak self] in
-            guard let self else { return }
+            guard let self, self.hostAttempt == scheduledAttempt,
+                  !self.isQuitting, !self.applicationUpdatePaused,
+                  self.applicationManagementGate.isAcceptingOperations else { return }
             self.reconnectTask = nil
             guard self.service.status() == .enabled else {
                 self.refresh()
@@ -1335,14 +1394,108 @@ final class ActionBrokerServiceManager: ObservableObject {
     }
 
     private func isCurrentHostAttempt(_ attempt: Int) -> Bool {
-        !applicationUpdatePaused && isServiceRegistered && attempt == hostAttempt
+        !isQuitting && !applicationUpdatePaused
+            && applicationManagementGate.isAcceptingOperations
+            && isServiceRegistered && attempt == hostAttempt
+    }
+
+    private func loseHost(attempt: Int, error: Error, reason: String) {
+        guard isCurrentHostAttempt(attempt), hostIsActive else { return }
+        hostIsActive = false
+        successfulHostAttempt = nil
+        hostAttempt &+= 1 // Fence late callbacks before scheduling recovery.
+        cancelHealthChecks()
+        let age = lastVerifiedAt.map { instant -> Double in
+            let duration = instant.duration(to: .now).components
+            return max(0, Double(duration.seconds) * 1_000 + Double(duration.attoseconds) / 1e15)
+        } ?? -1
+        Self.readinessLogger.notice("stage=host-lost attempt=\(attempt, privacy: .public) reason=\(reason, privacy: .public) lastVerifiedAge_ms=\(age, privacy: .public)")
+        scheduleReconnect(after: error)
+    }
+
+    /// An ordinary health check never registers a replacement endpoint and
+    /// never revokes a module or cancels an in-flight business request.
+    private func probeCurrentHost() {
+        guard isCurrentHostAttempt(hostAttempt), hostIsActive,
+              successfulHostAttempt == hostAttempt, !healthProbeIsActive else { return }
+        // Maintenance has ended, but readiness still needs a fresh round trip.
+        // Do not keep displaying a paused/update message or claim ready early.
+        if state == .paused { state = .connecting }
+        healthCheckTask?.cancel()
+        healthCheckTask = nil
+        healthProbeIsActive = true
+        healthProbeEpoch &+= 1
+        let epoch = healthProbeEpoch
+        let attempt = hostAttempt
+        if let healthScheduler {
+            healthProbeDeadline = healthScheduler(healthProbeTimeout) { [weak self] in
+                self?.finishHealthProbe(.failure(ActionBrokerReadinessError.timedOut),
+                    attempt: attempt, epoch: epoch)
+            }
+        }
+        Self.readinessLogger.info("stage=probe-start attempt=\(attempt, privacy: .public) probe=\(epoch, privacy: .public)")
+        host.probeReadiness { [weak self] result in
+            self?.finishHealthProbe(result, attempt: attempt, epoch: epoch)
+        }
+    }
+
+    private func finishHealthProbe(_ result: Result<Void, Error>, attempt: Int, epoch: Int) {
+        guard healthProbeIsActive, epoch == healthProbeEpoch else { return }
+        healthProbeDeadline?.cancel()
+        healthProbeDeadline = nil
+        healthProbeIsActive = false
+        guard isCurrentHostAttempt(attempt) else { return }
+        switch result {
+        case .success:
+            lastVerifiedAt = .now
+            state = updateRecoveryFailureMessage.map(State.failed) ?? .enabled
+            Self.readinessLogger.info("stage=probe-ready attempt=\(attempt, privacy: .public) probe=\(epoch, privacy: .public)")
+            scheduleHealthCheck()
+        case let .failure(error):
+            loseHost(attempt: attempt, error: error, reason: "readiness-failed")
+        }
+    }
+
+    private func scheduleHealthCheck() {
+        guard let healthScheduler, isCurrentHostAttempt(hostAttempt), hostIsActive,
+              successfulHostAttempt == hostAttempt else { return }
+        healthCheckTask?.cancel()
+        let attempt = hostAttempt
+        healthCheckTask = healthScheduler(retryPolicy.healthCheckDelay) { [weak self] in
+            guard let self, self.isCurrentHostAttempt(attempt) else { return }
+            self.healthCheckTask = nil
+            guard self.service.status() == .enabled else { self.refresh(); return }
+            self.probeCurrentHost()
+        }
+    }
+
+    private func cancelHealthChecks() {
+        healthCheckTask?.cancel()
+        healthCheckTask = nil
+        healthProbeDeadline?.cancel()
+        healthProbeDeadline = nil
+        healthProbeEpoch &+= 1
+        healthProbeIsActive = false
+    }
+
+    private func observeWakeNotifications() {
+        wakeObservation = NSWorkspace.shared.notificationCenter
+            .publisher(for: NSWorkspace.didWakeNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in self?.recheckConnection() }
+            }
     }
 
     private func cancelReconnectAndStopHost() {
+        cancelHealthChecks()
         reconnectTask?.cancel()
         reconnectTask = nil
         hostAttempt &+= 1
         hostIsActive = false
+        completedHostAttempt = nil
+        successfulHostAttempt = nil
+        lastVerifiedAt = nil
         retryAttempt = 0
         host.stop()
     }

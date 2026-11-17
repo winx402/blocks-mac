@@ -10472,6 +10472,246 @@ final class ScreenshotAppStateTests: XCTestCase {
         XCTAssertTrue(fixture.manager.isServiceRegistered)
     }
 
+    func testActionBrokerHealthyRefreshAndExplicitRecheckProbeWithoutReplacingEndpoint() {
+        let fixture = makeActionBrokerManagerFixture()
+        fixture.host.completeLatest(.success(()))
+        fixture.manager.refresh()
+        fixture.manager.recheckConnection()
+        XCTAssertEqual(fixture.host.probeCount, 2)
+        XCTAssertEqual(fixture.host.startCount, 1)
+        XCTAssertEqual(fixture.host.stopCount, 0)
+        XCTAssertEqual(fixture.service.registerCount, 0)
+        XCTAssertEqual(fixture.service.unregisterCount, 0)
+        XCTAssertEqual(fixture.manager.state, .enabled)
+    }
+
+    func testActionBrokerPeriodicReadinessFailureUsesSingleRecoveryWithoutStoppingBusiness() {
+        let fixture = makeActionBrokerManagerFixture(healthChecks: true)
+        fixture.host.completeLatest(.success(()))
+        fixture.host.probeResult = .failure(TestFailure.expected)
+        XCTAssertEqual(fixture.healthScheduler.pendingCount, 1)
+        fixture.healthScheduler.fireNext()
+        XCTAssertEqual(fixture.host.probeCount, 1)
+        XCTAssertEqual(fixture.manager.state, .reconnecting)
+        XCTAssertEqual(fixture.scheduler.pendingCount, 1)
+        XCTAssertEqual(fixture.healthScheduler.pendingCount, 0)
+        fixture.host.invalidateLatest()
+        XCTAssertEqual(fixture.scheduler.pendingCount, 1)
+        XCTAssertEqual(fixture.host.stopCount, 0)
+        XCTAssertEqual(fixture.service.registerCount, 0)
+        XCTAssertEqual(fixture.service.unregisterCount, 0)
+        fixture.scheduler.fireNext()
+        fixture.host.completeLatest(.success(()))
+        XCTAssertEqual(fixture.manager.state, .enabled)
+        XCTAssertEqual(fixture.host.startCount, 2)
+    }
+
+    func testActionBrokerReadinessDeadlineRejectsLateSuccessAndOldRegistration() {
+        let fixture = makeActionBrokerManagerFixture(healthChecks: true)
+        fixture.host.completeLatest(.success(()))
+        fixture.host.probeResult = nil
+        fixture.healthScheduler.fireNext()
+        XCTAssertEqual(fixture.healthScheduler.pendingCount, 1)
+        fixture.healthScheduler.fireNext()
+        XCTAssertEqual(fixture.manager.state, .reconnecting)
+        fixture.host.completeProbe(at: 0, result: .success(()))
+        fixture.host.complete(at: 0, result: .success(()))
+        XCTAssertEqual(fixture.manager.state, .reconnecting)
+        XCTAssertEqual(fixture.scheduler.pendingCount, 1)
+        fixture.scheduler.fireNext()
+        fixture.host.completeLatest(.success(()))
+        fixture.host.completeProbe(at: 0, result: .failure(TestFailure.expected))
+        XCTAssertEqual(fixture.manager.state, .enabled)
+        XCTAssertEqual(fixture.host.stopCount, 0)
+    }
+
+    func testActionBrokerReadinessChecksCoalesceAndOldFailureCannotClearReplacement() {
+        let fixture = makeActionBrokerManagerFixture(healthChecks: true)
+        fixture.host.completeLatest(.success(()))
+        fixture.host.probeResult = nil
+        fixture.manager.recheckConnection()
+        fixture.manager.refresh()
+        fixture.manager.recheckConnection()
+        XCTAssertEqual(fixture.host.probeCount, 1)
+        fixture.host.invalidateLatest()
+        fixture.scheduler.fireNext()
+        fixture.host.completeLatest(.success(()))
+        fixture.host.completeProbe(at: 0, result: .failure(TestFailure.expected))
+        XCTAssertEqual(fixture.manager.state, .enabled)
+        XCTAssertEqual(fixture.host.startCount, 2)
+        XCTAssertEqual(fixture.scheduler.pendingCount, 0)
+    }
+
+    func testActionBrokerReadinessCannotResurrectAfterQuitAndDoesNotRevokeBusiness() {
+        let fixture = makeActionBrokerManagerFixture(healthChecks: true)
+        fixture.host.completeLatest(.success(()))
+        fixture.host.probeResult = nil
+        fixture.manager.recheckConnection()
+        fixture.manager.beginApplicationQuit()
+        fixture.host.completeProbe(at: 0, result: .success(()))
+        fixture.host.complete(at: 0, result: .success(()))
+        fixture.healthScheduler.fireNext()
+        fixture.scheduler.fireNext()
+        fixture.manager.refresh()
+        XCTAssertEqual(fixture.manager.state, .paused)
+        XCTAssertEqual(fixture.host.quitFenceCount, 1)
+        XCTAssertEqual(fixture.host.startCount, 1)
+        XCTAssertEqual(fixture.host.stopCount, 0)
+        XCTAssertEqual(fixture.service.unregisterCount, 0)
+    }
+
+    func testActionBrokerMaintenanceDoesNotPublishLateProbeAsReady() async throws {
+        let fixture = makeActionBrokerManagerFixture(healthChecks: true)
+        fixture.host.completeLatest(.success(()))
+        fixture.host.probeResult = nil
+        fixture.manager.recheckConnection()
+        try await fixture.manager.prepareForApplicationUpdate(stopService: false)
+        XCTAssertEqual(fixture.manager.state, .paused)
+        fixture.host.completeProbe(at: 0, result: .success(()))
+        fixture.manager.recheckConnection()
+        XCTAssertEqual(fixture.manager.state, .paused)
+        XCTAssertEqual(fixture.host.probeCount, 1)
+        XCTAssertEqual(fixture.service.unregisterCount, 0)
+        await fixture.manager.resumeAfterCancelledApplicationUpdate()
+        XCTAssertEqual(fixture.manager.state, .connecting)
+        fixture.host.completeProbe(at: 0, result: .success(()))
+        XCTAssertEqual(fixture.manager.state, .connecting)
+        fixture.host.completeProbe(at: 1, result: .success(()))
+        XCTAssertEqual(fixture.manager.state, .enabled)
+    }
+
+    func testActionBrokerPendingStartIsFencedByMaintenanceAndCanRestartAfterCancel() async throws {
+        let fixture = makeActionBrokerManagerFixture()
+        try await fixture.manager.prepareForApplicationUpdate(stopService: false)
+        fixture.host.complete(at: 0, result: .success(()))
+        XCTAssertEqual(fixture.manager.state, .paused)
+        await fixture.manager.resumeAfterCancelledApplicationUpdate()
+        fixture.host.complete(at: 0, result: .failure(TestFailure.expected))
+        fixture.host.completeLatest(.success(()))
+        XCTAssertEqual(fixture.manager.state, .enabled)
+        XCTAssertEqual(fixture.host.startCount, 2)
+        XCTAssertEqual(fixture.service.registerCount, 0)
+        XCTAssertEqual(fixture.service.unregisterCount, 0)
+    }
+
+    func testActionBrokerPeriodicCheckObservesRemovedRegistrationWithoutReregistering() {
+        let fixture = makeActionBrokerManagerFixture(healthChecks: true)
+        fixture.host.completeLatest(.success(()))
+        fixture.service.status = .notRegistered
+        fixture.healthScheduler.fireNext()
+        XCTAssertEqual(fixture.manager.state, .disabled)
+        XCTAssertFalse(fixture.manager.isEnabled)
+        XCTAssertEqual(fixture.host.probeCount, 0)
+        XCTAssertEqual(fixture.service.registerCount, 0)
+        XCTAssertEqual(fixture.healthScheduler.pendingCount, 0)
+    }
+
+    func testActionBrokerPreparationDoesNotSuspendAnUnresumedListener() {
+        let lifecycle = ActionBrokerHostConnectionLifecycle()
+        let pending = lifecycle.beginPreparation()
+        XCTAssertFalse(lifecycle.isListenerResumed)
+        XCTAssertFalse(lifecycle.stop())
+        XCTAssertFalse(lifecycle.activateListener(for: pending))
+        let current = lifecycle.beginPreparation()
+        XCTAssertTrue(lifecycle.activateListener(for: current))
+        XCTAssertTrue(lifecycle.isListenerResumed)
+        XCTAssertFalse(lifecycle.activateListener(for: current))
+        XCTAssertTrue(lifecycle.stop())
+        XCTAssertFalse(lifecycle.stop())
+    }
+
+    func testActionBrokerStartupCancellationRejectsLateRequirementExactlyOnce() async throws {
+        let preparation = ActionBrokerHostStartupPreparation()
+        let started = expectation(description: "requirement worker started")
+        var pending: CheckedContinuation<String, Error>?
+        var delivered = 0
+        var failures: [Error] = []
+        preparation.begin(timeout: .seconds(1), requirementProvider: {
+            try await withCheckedThrowingContinuation { continuation in
+                pending = continuation
+                started.fulfill()
+            }
+        }, onRequirement: { _ in delivered += 1 }, onFailure: { failures.append($0) })
+        await fulfillment(of: [started], timeout: 1)
+        preparation.cancel()
+        preparation.cancel()
+        pending?.resume(returning: "synthetic-requirement")
+        pending = nil
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(delivered, 0)
+        XCTAssertEqual(failures.count, 1)
+        XCTAssertTrue(failures.first is CancellationError)
+    }
+
+    func testActionBrokerStartupDeadlineRejectsSuspendedAndLateRequirement() async throws {
+        let preparation = ActionBrokerHostStartupPreparation()
+        let expired = expectation(description: "startup expired")
+        var pending: CheckedContinuation<String, Error>?
+        var delivered = 0
+        var failures: [Error] = []
+        preparation.begin(timeout: .milliseconds(40), requirementProvider: {
+            try await withCheckedThrowingContinuation { pending = $0 }
+        }, onRequirement: { _ in delivered += 1 }, onFailure: {
+            failures.append($0)
+            expired.fulfill()
+        })
+        await fulfillment(of: [expired], timeout: 1)
+        pending?.resume(returning: "late-synthetic-requirement")
+        pending = nil
+        try await Task.sleep(for: .milliseconds(20))
+        XCTAssertEqual(delivered, 0)
+        XCTAssertEqual(failures.count, 1)
+        XCTAssertEqual(failures.first as? ActionBrokerReadinessError, .timedOut)
+    }
+
+    func testActionBrokerStartupDeadlineIncludesRegistrationAfterRequirementPreparation() async {
+        let preparation = ActionBrokerHostStartupPreparation()
+        let delivered = expectation(description: "requirement delivered")
+        let expired = expectation(description: "registration still bounded")
+        var failures: [Error] = []
+        preparation.begin(timeout: .milliseconds(40), requirementProvider: {
+            "synthetic-requirement"
+        }, onRequirement: { _ in delivered.fulfill() }, onFailure: {
+            failures.append($0)
+            expired.fulfill()
+        })
+        await fulfillment(of: [delivered, expired], timeout: 1)
+        XCTAssertEqual(failures.count, 1)
+        XCTAssertEqual(failures.first as? ActionBrokerReadinessError, .timedOut)
+    }
+
+    func testActionBrokerStartupReplacementAndFinishFenceOldCallbacks() async throws {
+        let preparation = ActionBrokerHostStartupPreparation()
+        let started = expectation(description: "old preparation started")
+        let current = expectation(description: "replacement delivered")
+        var pending: CheckedContinuation<String, Error>?
+        var oldDelivered = 0
+        var oldFailures: [Error] = []
+        var newFailures: [Error] = []
+        preparation.begin(timeout: .seconds(1), requirementProvider: {
+            try await withCheckedThrowingContinuation { continuation in
+                pending = continuation
+                started.fulfill()
+            }
+        }, onRequirement: { _ in oldDelivered += 1 }, onFailure: { oldFailures.append($0) })
+        await fulfillment(of: [started], timeout: 1)
+        preparation.begin(timeout: .milliseconds(40), requirementProvider: {
+            "replacement-synthetic-requirement"
+        }, onRequirement: { _ in
+            preparation.finish()
+            current.fulfill()
+        }, onFailure: { newFailures.append($0) })
+        await fulfillment(of: [current], timeout: 1)
+        pending?.resume(returning: "obsolete-synthetic-requirement")
+        pending = nil
+        try await Task.sleep(for: .milliseconds(60))
+        preparation.cancel()
+        XCTAssertEqual(oldDelivered, 0)
+        XCTAssertEqual(oldFailures.count, 1)
+        XCTAssertTrue(oldFailures.first is CancellationError)
+        XCTAssertTrue(newFailures.isEmpty)
+    }
+
     func testActionBrokerReconnectsAfterInvalidationAndIgnoresOldCompletion() {
         let fixture = makeActionBrokerManagerFixture()
         fixture.host.completeLatest(.success(()))
@@ -10560,8 +10800,9 @@ final class ScreenshotAppStateTests: XCTestCase {
         await fixture.manager.serviceChangeTask?.value
 
         XCTAssertTrue(fixture.manager.isEnabled)
-        XCTAssertGreaterThan(fixture.host.stopCount, stopCountBeforeDisable)
-        XCTAssertEqual(fixture.host.startCount, 2)
+        XCTAssertEqual(fixture.host.stopCount, stopCountBeforeDisable)
+        XCTAssertEqual(fixture.host.startCount, 1)
+        XCTAssertGreaterThan(fixture.host.probeCount, 0)
         XCTAssertEqual(
             fixture.manager.state,
             .failed(TestFailure.expected.localizedDescription)
@@ -10650,6 +10891,11 @@ final class ScreenshotAppStateTests: XCTestCase {
             ActionBrokerSettingsStatePresentation.detail(for: .failed("offline")),
             L10n.format("settings.agentCLI.actionBroker.failed", "offline")
         )
+        XCTAssertEqual(ActionBrokerSettingsStatePresentation.detail(for: .paused),
+            L10n.string("settings.agentCLI.actionBroker.paused"))
+        XCTAssertEqual(ActionBrokerSettingsStatePresentation.feedbackKind(for: .paused), .information)
+        XCTAssertNotEqual(ActionBrokerSettingsStatePresentation.detail(for: .paused),
+            ActionBrokerSettingsStatePresentation.detail(for: .enabled))
     }
 
     func testCLIInstallerDoesNotOverwriteAnUnknownDestination() throws {
@@ -12527,12 +12773,17 @@ final class ScreenshotAppStateTests: XCTestCase {
 
     private func makeActionBrokerManagerFixture(
         initialServiceStatus: SMAppService.Status = .enabled,
-        retryPolicy: ActionBrokerRetryPolicy = .default
+        retryPolicy: ActionBrokerRetryPolicy = .default,
+        healthChecks: Bool = false
     ) -> ActionBrokerManagerFixture {
         let service = ActionBrokerServiceTestDouble()
         service.status = initialServiceStatus
         let host = ActionBrokerHostTestDouble()
         let scheduler = ActionBrokerRetrySchedulerTestDouble()
+        let healthScheduler = ActionBrokerRetrySchedulerTestDouble()
+        let healthScheduling: ActionBrokerRetryScheduler? = healthChecks
+            ? { delay, action in healthScheduler.schedule(after: delay, action: action) }
+            : nil
         let manager = ActionBrokerServiceManager(
             service: ActionBrokerServiceControl(
                 status: { service.status },
@@ -12543,13 +12794,15 @@ final class ScreenshotAppStateTests: XCTestCase {
             retryPolicy: retryPolicy,
             retryScheduler: { delay, action in
                 scheduler.schedule(after: delay, action: action)
-            }
+            },
+            healthScheduler: healthScheduling
         )
         return ActionBrokerManagerFixture(
             manager: manager,
             service: service,
             host: host,
-            scheduler: scheduler
+            scheduler: scheduler,
+            healthScheduler: healthScheduler
         )
     }
 
@@ -26966,6 +27219,7 @@ private struct ActionBrokerManagerFixture {
     let service: ActionBrokerServiceTestDouble
     let host: ActionBrokerHostTestDouble
     let scheduler: ActionBrokerRetrySchedulerTestDouble
+    let healthScheduler: ActionBrokerRetrySchedulerTestDouble
 }
 
 @MainActor
@@ -26974,14 +27228,18 @@ private final class ActionBrokerServiceTestDouble {
     var registerError: Error?
     var registersBeforeThrowing = false
     var unregisterError: Error?
+    private(set) var registerCount = 0
+    private(set) var unregisterCount = 0
 
     func register() throws {
+        registerCount += 1
         if registersBeforeThrowing { status = .enabled }
         if let registerError { throw registerError }
         status = .enabled
     }
 
     func unregister() throws {
+        unregisterCount += 1
         if let unregisterError { throw unregisterError }
         status = .notRegistered
     }
@@ -26999,7 +27257,11 @@ private final class ActionBrokerHostTestDouble: ActionBrokerHosting {
     }
 
     private var attempts: [Attempt] = []
+    private var probes: [(Result<Void, Error>) -> Void] = []
     private(set) var stopCount = 0
+    private(set) var quitFenceCount = 0
+    var probeResult: Result<Void, Error>? = .success(())
+    var probeCount: Int { probes.count }
 
     var startCount: Int { attempts.count }
 
@@ -27013,6 +27275,15 @@ private final class ActionBrokerHostTestDouble: ActionBrokerHosting {
     func stop() {
         stopCount += 1
     }
+
+    func fencePendingStartupForApplicationQuit() { quitFenceCount += 1 }
+
+    func probeReadiness(completion: @escaping (Result<Void, Error>) -> Void) {
+        probes.append(completion)
+        if let probeResult { completion(probeResult) }
+    }
+
+    func completeProbe(at index: Int, result: Result<Void, Error>) { probes[index](result) }
 
     func completeLatest(_ result: Result<Void, Error>) {
         attempts.last?.completion(result)
@@ -27029,6 +27300,7 @@ private final class ActionBrokerHostTestDouble: ActionBrokerHosting {
 
 @MainActor
 private final class ActionBrokerSynchronousSuccessHostTestDouble: ActionBrokerHosting {
+    func probeReadiness(completion: @escaping (Result<Void, Error>) -> Void) { completion(.success(())) }
     func pauseAndDrainForApplicationUpdate() async throws {}
     func resumeAfterCancelledApplicationUpdate() {}
     func prepareBrokerForApplicationUpdate(token: String) async throws -> Int32 { 77 }

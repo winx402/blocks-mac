@@ -11,7 +11,52 @@ public enum BlocksActionBrokerXPC {
         BlocksRuntimeIdentity.applicationBundleIdentifier
 }
 
+/// Pure identity seam for reverse-endpoint callbacks. A timeout or interruption
+/// from a superseded endpoint cannot remove or certify its replacement.
+public struct ActionBrokerEndpointLifecycle: Sendable {
+    public struct Token: Hashable, Sendable {
+        public let generation: Int
+        public let ownerID: UUID
+    }
+    private var generation = 0
+    public private(set) var current: Token?
+    public init() {}
+    public mutating func register(ownerID: UUID) -> Token {
+        generation &+= 1
+        let token = Token(generation: generation, ownerID: ownerID)
+        current = token
+        return token
+    }
+    public func isCurrent(_ token: Token) -> Bool { current == token }
+    @discardableResult public mutating func clear(_ token: Token) -> Bool {
+        guard isCurrent(token) else { return false }
+        current = nil
+        return true
+    }
+}
+
+/// A retired reverse route remains alive until every already-admitted reply
+/// terminates. Health failures may stop new routing, never cancel old replies.
+public struct ActionBrokerRouteLeaseLifecycle: Sendable {
+    private var leases: Set<UUID> = []
+    public private(set) var isRetired = false
+    public init() {}
+    public var activeCount: Int { leases.count }
+    public var mayInvalidate: Bool { isRetired && leases.isEmpty }
+    public mutating func acquire() -> UUID? {
+        guard !isRetired else { return nil }
+        let lease = UUID()
+        leases.insert(lease)
+        return lease
+    }
+    public mutating func retire() { isRetired = true }
+    @discardableResult public mutating func release(_ lease: UUID) -> Bool { leases.remove(lease) != nil }
+}
+
 @objc public protocol BlocksActionBrokerHostXPCProtocol {
+    /// A non-sensitive, end-to-end check of the endpoint registered by this
+    /// authenticated Host connection. Registration alone is not readiness.
+    @objc optional func probeRegisteredHostReadiness(withReply reply: @escaping (Bool) -> Void)
     /// Optional so older running Brokers fail closed without an unchecked
     /// shutdown message. No request data is sent until the peer is verified.
     @objc optional func probeUpdateLifecycle(withReply reply: @escaping () -> Void)
@@ -79,6 +124,7 @@ public final class ActionBrokerUpdateAdmission: @unchecked Sendable {
 
     public init() {}
     public func begin() -> ApplicationOperationAdmissionGate.Lease? { lock.withLock { operations.begin() } }
+    public var isAcceptingOperations: Bool { lock.withLock { operations.isAcceptingOperations } }
 
     public func prepare(token: String) throws {
         try lock.withLock {
@@ -185,6 +231,7 @@ public final class ActionBrokerUpdateRecoveryJournal {
 }
 
 @objc public protocol BlocksActionHostXPCProtocol {
+    @objc optional func probeReadiness(withReply reply: @escaping (Bool) -> Void)
     @objc optional func listActions(withReply reply: @escaping (Data) -> Void)
     func execute(
         _ requestData: Data,
@@ -196,4 +243,17 @@ public final class ActionBrokerUpdateRecoveryJournal {
         _ requestID: String,
         withReply reply: @escaping (Bool) -> Void
     )
+}
+
+public enum ActionBrokerReadinessError: String, Error, LocalizedError, Sendable {
+    case unsupportedPeer, unavailable, timedOut, untrustedPeer
+
+    public var errorDescription: String? {
+        switch self {
+        case .unsupportedPeer: return "The running Action Broker does not support a verified Host readiness check. Restart or upgrade Blocks."
+        case .unavailable: return "The Blocks action host is not ready."
+        case .timedOut: return "The Blocks action host readiness check timed out."
+        case .untrustedPeer: return "The Action Broker peer could not be authenticated."
+        }
+    }
 }
