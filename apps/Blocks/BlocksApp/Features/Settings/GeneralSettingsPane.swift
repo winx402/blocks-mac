@@ -62,7 +62,6 @@ struct GeneralSettingsPane: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
-                .accessibilityLabel(L10n.string("settings.appearance.picker"))
             }
 
             SettingsRowDivider()

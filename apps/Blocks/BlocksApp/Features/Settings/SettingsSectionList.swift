@@ -248,12 +248,19 @@ struct SettingsRowShell<Trailing: View>: View {
                 .foregroundStyle(.primary)
                 .settingsGeometryProbe("row.\(title)")
             if let detail, !detail.isEmpty {
-                Text(detail)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
-                    .accessibilityLabel(detailAccessibilityLabel ?? detail)
+                Group {
+                    if let detailAccessibilityLabel {
+                        // Shortcut glyphs need a different spoken label. Do not
+                        // combine that override with the selectable AppKit text host.
+                        Text(detail).accessibilityLabel(detailAccessibilityLabel)
+                    } else {
+                        // The selectable text already exposes its own content to AX.
+                        Text(detail).textSelection(.enabled)
+                    }
+                }
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             }
             if reservesStatusSpace {
                 Group {
@@ -261,7 +268,6 @@ struct SettingsRowShell<Trailing: View>: View {
                         Label(status.message, systemImage: status.kind.systemImage)
                             .foregroundStyle(status.kind == .information ? Color.secondary : status.kind.color)
                             .help(status.message)
-                            .accessibilityLabel(status.message)
                     } else {
                         Color.clear
                             .accessibilityHidden(true)

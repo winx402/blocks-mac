@@ -134,7 +134,6 @@ struct BlocksBooleanSwitch: View {
         Toggle(title, isOn: $isOn)
             .labelsHidden()
             .toggleStyle(.switch)
-            .accessibilityLabel(title)
     }
 }
 
