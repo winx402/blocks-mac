@@ -185,19 +185,29 @@ public final class ApplicationOperationAdmissionGate: @unchecked Sendable {
     /// named gate is grouped into "other", never logged as arbitrary text.
     public static var diagnosticSnapshot: DiagnosticSnapshot {
         admissionLock.withLock {
-            var counts: [String: Int] = [:]
-            for gate in gates.compactMap(\.value) {
-                let count = gate.activeOperationCount
-                guard count > 0 else { continue }
-                counts[diagnosticID(for: gate.name), default: 0] += count
-            }
-            return DiagnosticSnapshot(
-                globallyPaused: globallyPaused,
-                activeGates: counts.keys.sorted().map {
-                    .init(gateID: $0, activeCount: counts[$0]!)
-                }
-            )
+            makeDiagnosticSnapshot(for: gates.compactMap(\.value))
         }
+    }
+
+    /// Restricts the activity list without changing the process-wide pause state.
+    static func diagnosticSnapshot(for gates: [ApplicationOperationAdmissionGate]) -> DiagnosticSnapshot {
+        admissionLock.withLock { makeDiagnosticSnapshot(for: gates) }
+    }
+
+    /// Called only with admissionLock held so the counts and pause state agree.
+    private static func makeDiagnosticSnapshot(for gates: [ApplicationOperationAdmissionGate]) -> DiagnosticSnapshot {
+        var counts: [String: Int] = [:]
+        for gate in gates {
+            let count = gate.activeOperationCount
+            guard count > 0 else { continue }
+            counts[diagnosticID(for: gate.name), default: 0] += count
+        }
+        return DiagnosticSnapshot(
+            globallyPaused: globallyPaused,
+            activeGates: counts.keys.sorted().map {
+                .init(gateID: $0, activeCount: counts[$0]!)
+            }
+        )
     }
 
     public static func ensureAllIdle() throws {

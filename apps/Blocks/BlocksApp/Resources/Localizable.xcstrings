@@ -12230,6 +12230,20 @@
         }
       }
     },
+    "settings.menuBar.showIcon": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Show menu bar icon" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "メニューバーにアイコンを表示" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "显示菜单栏图标" } }
+      }
+    },
+    "settings.menuBar.showIcon.detail": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Blocks and its shortcuts keep running when the icon is hidden." } },
+        "ja": { "stringUnit": { "state": "translated", "value": "アイコンを非表示にしても、Blocks とショートカットは引き続き使えます。" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "隐藏图标后，积木工具和快捷键仍可使用。" } }
+      }
+    },
     "settings.navigation.accessibilityLabel": {
       "localizations": {
         "en": {

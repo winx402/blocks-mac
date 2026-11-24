@@ -7,6 +7,7 @@ struct GeneralSettingsPane: View {
     @AppStorage("app.language") private var selectedLanguageRawValue = AppLanguagePreference.system.rawValue
     @State private var glassDiagnosticsExpanded = false
     @ObservedObject private var appUpdates = AppUpdateCoordinator.shared
+    @ObservedObject private var menuBar = AppDelegate.menuBarController
 
     private var selectedLanguage: Binding<AppLanguagePreference> {
         Binding {
@@ -79,6 +80,15 @@ struct GeneralSettingsPane: View {
                 .labelsHidden()
                 .pickerStyle(.menu)
             }
+
+            SettingsRowDivider()
+
+            SettingsToggleRow(
+                title: L10n.string("settings.menuBar.showIcon"),
+                detail: L10n.string("settings.menuBar.showIcon.detail"),
+                isOn: Binding(get: { menuBar.isVisible }, set: { menuBar.setVisible($0) })
+            )
+            .accessibilityIdentifier("settings.menuBar.showIcon")
         }
     }
 

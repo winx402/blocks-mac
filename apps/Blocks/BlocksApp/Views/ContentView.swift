@@ -15,7 +15,7 @@ struct ContentView: View {
         SettingsNavigationShell(initialSection: initialSection)
             .onAppear {
                 appModel.configureMainWindowOpener {
-                    openWindow(id: "main")
+                    openWindow(id: "main", value: MainWindowIdentity.singleton)
                 }
                 appModel.refreshPermissionState()
             }

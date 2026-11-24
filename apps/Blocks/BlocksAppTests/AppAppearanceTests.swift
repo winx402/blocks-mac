@@ -1,5 +1,6 @@
 import AppKit
 import BlocksCore
+import Combine
 import QuartzCore
 import SwiftUI
 import XCTest
@@ -22,6 +23,33 @@ final class AppAppearanceTests: XCTestCase {
         defaults = nil
         suiteName = nil
         try await super.tearDown()
+    }
+
+    func testMenuBarStatusItemCanBeRemovedAndRestoredWithoutQuitting() async throws {
+        let controller = MenuBarController()
+        controller.install(autosaveName: nil)
+        defer { controller.uninstall() }
+        let item = try XCTUnwrap(controller.statusItem)
+        controller.install(autosaveName: nil)
+        XCTAssertTrue(controller.statusItem === item)
+        XCTAssertTrue(item.behavior.contains(.removalAllowed))
+        XCTAssertFalse(item.behavior.contains(.terminationOnRemoval))
+        let hidden = expectation(description: "AppKit visibility reaches the settings toggle")
+        let observation = controller.$isVisible.dropFirst().filter { !$0 }.prefix(1).sink { _ in
+            hidden.fulfill()
+        }
+        defer { observation.cancel() }
+
+        item.isVisible = false
+        await fulfillment(of: [hidden], timeout: 2)
+        XCTAssertFalse(controller.isVisible)
+        XCTAssertFalse(AppDelegate().applicationShouldTerminateAfterLastWindowClosed(NSApplication.shared))
+        XCTAssertFalse(AppTerminationCoordinator.shared.isQuitting)
+
+        controller.setVisible(true)
+        XCTAssertTrue(item.isVisible)
+        XCTAssertTrue(controller.isVisible)
+        XCTAssertTrue(controller.statusItem === item)
     }
 
     func testMissingPreferenceDefaultsToFollowingSystem() {

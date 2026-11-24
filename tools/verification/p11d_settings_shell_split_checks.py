@@ -56,7 +56,7 @@ def rel(path: Path) -> str:
 
 
 def window_scene_count(source: str) -> int:
-    return len(re.findall(r"^\s*Window\s*\(", swift_code_only(source), re.MULTILINE))
+    return len(re.findall(r"^\s*Window(?:Group)?\s*\(", swift_code_only(source), re.MULTILINE))
 
 
 def route_contract(shell: str) -> dict[str, bool]:

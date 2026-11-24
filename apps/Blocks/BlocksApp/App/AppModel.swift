@@ -280,6 +280,7 @@ final class AppModel: ObservableObject {
             // Attach only after actions, module availability and update lifecycle
             // are configured. The delegate never constructs another AppModel.
             AppDelegate.attachShortcutStoreForApplicationLaunch(resolvedShortcutStore)
+            AppDelegate.menuBarController.appModel = self
             if resolvedPermissionStore.pendingPermissionRecoveryKind != nil {
                 selectedSection = .permissions
                 resolvedPermissionStore.resumePendingPermissionRecovery()

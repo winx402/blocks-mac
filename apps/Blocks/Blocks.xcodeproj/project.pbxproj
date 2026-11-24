@@ -243,7 +243,7 @@
 		B8D900000000000000000002 /* ScreenshotColorSampleCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8D900000000000000000002 /* ScreenshotColorSampleCoordinator.swift */; };
 		B8D900000000000000000003 /* ClipboardFeatureCoordinator+CapturePersistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8D900000000000000000003 /* ClipboardFeatureCoordinator+CapturePersistence.swift */; };
 		B00300000000000000000006 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F30100000000000000000006 /* ContentView.swift */; };
-		B00300000000000000000007 /* MenuBarCommandsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F30100000000000000000007 /* MenuBarCommandsView.swift */; };
+		B00300000000000000000007 /* MenuBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F30100000000000000000007 /* MenuBarController.swift */; };
 		B0030000000000000000000A /* ScreenCaptureKitAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3010000000000000000000A /* ScreenCaptureKitAdapter.swift */; };
 		B26C00000000000000000001 /* ScreenshotCaptureArbiter.swift in Sources */ = {isa = PBXBuildFile; fileRef = F26C00000000000000000001 /* ScreenshotCaptureArbiter.swift */; };
 		B16M00000000000000000001 /* ScreenshotWindowVisibility.swift in Sources */ = {isa = PBXBuildFile; fileRef = F16M00000000000000000001 /* ScreenshotWindowVisibility.swift */; };
@@ -837,7 +837,7 @@
 		F8D900000000000000000002 /* ScreenshotColorSampleCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Plugins/ScreenshotColorSampleCoordinator.swift; sourceTree = "<group>"; };
 		F8D900000000000000000003 /* ClipboardFeatureCoordinator+CapturePersistence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Features/Clipboard/ClipboardFeatureCoordinator+CapturePersistence.swift"; sourceTree = "<group>"; };
 		F30100000000000000000006 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/ContentView.swift; sourceTree = "<group>"; };
-		F30100000000000000000007 /* MenuBarCommandsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/MenuBarCommandsView.swift; sourceTree = "<group>"; };
+		F30100000000000000000007 /* MenuBarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/MenuBarController.swift; sourceTree = "<group>"; };
 		F3010000000000000000000A /* ScreenCaptureKitAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Screenshot/Capture/ScreenCaptureKitAdapter.swift; sourceTree = "<group>"; };
 		F26C00000000000000000001 /* ScreenshotCaptureArbiter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Screenshot/Capture/ScreenshotCaptureArbiter.swift; sourceTree = "<group>"; };
 		F16M00000000000000000001 /* ScreenshotWindowVisibility.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Features/Screenshot/Capture/ScreenshotWindowVisibility.swift; sourceTree = "<group>"; };
@@ -1505,7 +1505,7 @@
 				F30100000000000000000029 /* TranslationFloatingPanelView.swift */,
 				F30100000000000000000018 /* PlaceholderDetailView.swift */,
 				F30100000000000000000019 /* ProviderAuditEvent.swift */,
-				F30100000000000000000007 /* MenuBarCommandsView.swift */,
+				F30100000000000000000007 /* MenuBarController.swift */,
 				F3010000000000000000000A /* ScreenCaptureKitAdapter.swift */,
 				F26C00000000000000000001 /* ScreenshotCaptureArbiter.swift */,
 				F16M00000000000000000001 /* ScreenshotWindowVisibility.swift */,
@@ -2180,7 +2180,7 @@
 					B00300000000000000000056 /* AppIconProvider.swift in Sources */,
 					B0030000000000000000004E /* Step5OneShotMigration.swift in Sources */,
 					B00300000000000000000006 /* ContentView.swift in Sources */,
-				B00300000000000000000007 /* MenuBarCommandsView.swift in Sources */,
+					B00300000000000000000007 /* MenuBarController.swift in Sources */,
 				B0030000000000000000000A /* ScreenCaptureKitAdapter.swift in Sources */,
 				B26C00000000000000000001 /* ScreenshotCaptureArbiter.swift in Sources */,
 				B16M00000000000000000001 /* ScreenshotWindowVisibility.swift in Sources */,

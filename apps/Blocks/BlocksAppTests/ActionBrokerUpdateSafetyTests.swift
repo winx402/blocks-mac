@@ -1,8 +1,8 @@
-import BlocksCore
 import Combine
 import ServiceManagement
 import XCTest
 @testable import Blocks
+@testable import BlocksCore
 
 @MainActor
 final class ActionBrokerUpdateSafetyTests: XCTestCase {
@@ -359,7 +359,8 @@ final class ActionBrokerUpdateSafetyTests: XCTestCase {
         let plugin = ApplicationOperationAdmissionGate(name: "plugin:private-customer-id")
         let leases = try [known.requireLease(), known.requireLease(), unknown.requireLease(), plugin.requireLease()]
         defer { leases.forEach { $0.release() } }
-        let snapshot = ApplicationOperationAdmissionGate.diagnosticSnapshot
+        let fixtureGates = [known, unknown, plugin]
+        let snapshot = ApplicationOperationAdmissionGate.diagnosticSnapshot(for: fixtureGates)
         XCTAssertFalse(snapshot.globallyPaused)
         XCTAssertEqual(snapshot.activeGates.map(\.gateID), ["clipboard_capture", "other"])
         XCTAssertEqual(snapshot.activeGates.map(\.activeCount), [2, 2])
@@ -367,8 +368,17 @@ final class ActionBrokerUpdateSafetyTests: XCTestCase {
         XCTAssertFalse(rendered.contains("customer"))
         XCTAssertFalse(rendered.contains("secret.txt"))
         XCTAssertFalse(rendered.contains("private-customer-id"))
+
+        // The process-wide registry can include unrelated background leases.
+        let globalSnapshot = ApplicationOperationAdmissionGate.diagnosticSnapshot
+        for activity in snapshot.activeGates {
+            let count = globalSnapshot.activeGates.first { $0.gateID == activity.gateID }?.activeCount ?? 0
+            XCTAssertGreaterThanOrEqual(count, activity.activeCount, activity.gateID)
+        }
+
         ApplicationOperationAdmissionGate.closeAdmissionForQuit()
         XCTAssertTrue(ApplicationOperationAdmissionGate.diagnosticSnapshot.globallyPaused)
+        XCTAssertTrue(ApplicationOperationAdmissionGate.diagnosticSnapshot(for: fixtureGates).globallyPaused)
     }
 
     func testLocalCancellationUsesTheActionRequestIdentifierContract() {

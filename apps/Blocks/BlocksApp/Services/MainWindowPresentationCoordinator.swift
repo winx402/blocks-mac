@@ -108,7 +108,7 @@ final class MainWindowPresentationCoordinator {
     }
 }
 
-/// Observes the actual `NSWindow` that hosts the singleton `Window(id: "main")`
+/// Observes the actual `NSWindow` that hosts the single main-window value
 /// scene without creating another window or participating in layout.
 @MainActor
 struct MainWindowAttachmentObserver: NSViewRepresentable {

@@ -38,6 +38,7 @@ final class ShortcutApplicationLaunchCoordinator {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let shortcutLaunchCoordinator = ShortcutApplicationLaunchCoordinator()
+    static let menuBarController = MenuBarController()
     private static let shortcutLogger = Logger(
         subsystem: Bundle.main.bundleIdentifier ?? "com.blocks.app",
         category: "global-shortcut"
@@ -69,7 +70,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Self.shortcutLaunchCoordinator.applicationDidFinishLaunching()
         NSApp.setActivationPolicy(.regular)
         mainWindowPresentationCoordinator.applicationDidFinishLaunching()
-        guard BlocksRuntimeEnvironment.isUnitTestHost else { return }
+        guard BlocksRuntimeEnvironment.isUnitTestHost else {
+            Self.menuBarController.install()
+            return
+        }
         NSApp.windows
             .filter {
                 $0.isVisible
@@ -105,6 +109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         Self.shortcutLaunchCoordinator.cancelInitialization()
+        Self.menuBarController.uninstall()
         if let restorationObserver {
             NotificationCenter.default.removeObserver(restorationObserver)
             self.restorationObserver = nil
@@ -115,5 +120,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         AppTerminationCoordinator.shared.requestTermination()
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
     }
 }

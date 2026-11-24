@@ -72,16 +72,17 @@ def main() -> int:
         "openTranslationSettings(from:",
         "openMainWindow(.translationSettings, from:",
         "await Task.yield()",
-        'Window(L10n.string("app.name"), id: "main")',
+        'WindowGroup(L10n.string("app.name"), id: "main", for: MainWindowIdentity.self)',
+        'openWindow(id: "main", value: MainWindowIdentity.singleton)',
         "CommandGroup(replacing: .appSettings)",
     ]
     missing = [item for item in required if item not in combined]
     if missing:
         failures.append({"code": "missing_new_settings_routes", "detail": ", ".join(missing)})
-    if "Settings {" in blocks_app or "WindowGroup" in blocks_app:
+    if "Settings {" in blocks_app or blocks_app.count("WindowGroup(") != 1:
         failures.append({
             "code": "duplicate_settings_scene_present",
-            "detail": "Blocks must expose one singleton main settings Window and no duplicate Settings or WindowGroup scene.",
+            "detail": "Blocks must expose one value-identified main WindowGroup and no duplicate Settings scene.",
         })
     print(json.dumps({
         "ok": not failures,

@@ -33,7 +33,7 @@ OLD_REGION = APP / "Services/RegionSelectionController.swift"
 OLD_WINDOW = APP / "Services/WindowSelectionController.swift"
 OLD_CAPTURE = APP / "Services/ScreenshotCaptureService.swift"
 HOME = APP / "Views/ScreenshotHomeView.swift"
-MENU = APP / "Views/MenuBarCommandsView.swift"
+MENU = APP / "App/MenuBarController.swift"
 
 
 def rel(path: Path) -> str:

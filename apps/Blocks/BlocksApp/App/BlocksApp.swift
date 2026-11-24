@@ -1,6 +1,12 @@
 import BlocksScreenshotCore
 import SwiftUI
 
+/// Give every open request the same value so the WindowGroup can reuse the
+/// settings window without making its closure an application termination.
+enum MainWindowIdentity: String, Codable, Hashable {
+    case singleton
+}
+
 @main
 struct BlocksApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
@@ -9,7 +15,7 @@ struct BlocksApp: App {
     @StateObject private var appUpdates = AppUpdateCoordinator.shared
 
     var body: some Scene {
-        Window(L10n.string("app.name"), id: "main") {
+        WindowGroup(L10n.string("app.name"), id: "main", for: MainWindowIdentity.self) { _ in
             ContentView(
                 initialSection:
                     verificationSettingsMode?.appSection
@@ -39,7 +45,7 @@ struct BlocksApp: App {
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
                 }
-        }
+        } defaultValue: { .singleton }
         .defaultSize(width: 980, height: 680)
         .commands {
             SettingsSidebarCommands()
@@ -83,18 +89,6 @@ struct BlocksApp: App {
                 .disabled(!appModel.featureAvailabilityStore.screenshotEnabled)
             }
         }
-
-        MenuBarExtra(L10n.string("app.name"), systemImage: "sparkles.rectangle.stack") {
-            MenuBarCommandsView()
-                .environmentObject(appModel)
-                .environmentObject(appModel.clipboardStore)
-                .environmentObject(appModel.translationStore)
-                .environmentObject(appModel.translationPluginManager)
-                .environmentObject(appModel.pluginRuntimeCoordinator)
-                .environmentObject(appearanceStore)
-                .blocksDefaultFont()
-        }
-
     }
 
     private var verificationSettingsMode: SettingsViewMode? {
