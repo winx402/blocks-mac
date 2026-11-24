@@ -27,10 +27,11 @@ final class AppAppearanceTests: XCTestCase {
 
     func testMenuBarStatusItemCanBeRemovedAndRestoredWithoutQuitting() async throws {
         let controller = MenuBarController()
-        controller.install(autosaveName: nil)
+        let testName = NSStatusItem.AutosaveName("BlocksMenuBarTests.\(UUID())")
+        controller.install(autosaveName: testName)
         defer { controller.uninstall() }
         let item = try XCTUnwrap(controller.statusItem)
-        controller.install(autosaveName: nil)
+        controller.install(autosaveName: testName)
         XCTAssertTrue(controller.statusItem === item)
         XCTAssertTrue(item.behavior.contains(.removalAllowed))
         XCTAssertFalse(item.behavior.contains(.terminationOnRemoval))
@@ -50,6 +51,31 @@ final class AppAppearanceTests: XCTestCase {
         XCTAssertTrue(item.isVisible)
         XCTAssertTrue(controller.isVisible)
         XCTAssertTrue(controller.statusItem === item)
+    }
+
+    func testMenuBarVisibilitySwitchHasNativeLabelAndDoesNotWriteOnRefresh() throws {
+        var visible = true
+        var writes = 0
+        let controlView = MenuBarVisibilitySwitch(label: "Show menu bar icon", isOn: Binding(
+            get: { visible }, set: { visible = $0; writes += 1 }
+        ))
+        let coordinator = controlView.makeCoordinator()
+        let control = controlView.makeControl(coordinator: coordinator)
+        XCTAssertEqual(control.accessibilityLabel(), "Show menu bar icon")
+        XCTAssertEqual(control.accessibilityIdentifier(), "settings.menuBar.showIcon")
+        XCTAssertEqual(control.state, .on)
+
+        visible = false // e.g. an external menu bar visibility change
+        controlView.updateControl(control, coordinator: coordinator)
+        XCTAssertEqual(control.state, .off)
+        XCTAssertEqual(writes, 0)
+
+        control.state = .on
+        XCTAssertTrue(NSApplication.shared.sendAction(try XCTUnwrap(control.action), to: control.target, from: control))
+        XCTAssertTrue(visible)
+        XCTAssertEqual(writes, 1)
+        coordinator.toggle(control)
+        XCTAssertEqual(writes, 1)
     }
 
     func testMissingPreferenceDefaultsToFollowingSystem() {

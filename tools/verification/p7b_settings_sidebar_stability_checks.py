@@ -74,7 +74,7 @@ def main() -> int:
         "retired_settings_scene_absent": not SETTINGS_VIEW.exists() and "Settings {" not in swift_code_only(blocks_app),
         "single_main_window_uses_content_shell": (
             'WindowGroup(L10n.string("app.name"), id: "main", for: MainWindowIdentity.self)' in blocks_app
-            and 'openWindow(id: "main", value: MainWindowIdentity.singleton)' in content
+            and 'presentWindow(id: "main", value: MainWindowIdentity.singleton)' in content
             and "ContentView(" in blocks_app
             and "SettingsNavigationShell(initialSection: initialSection)" in code
         ),

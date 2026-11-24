@@ -73,7 +73,7 @@ def main() -> int:
         "openMainWindow(.translationSettings, from:",
         "await Task.yield()",
         'WindowGroup(L10n.string("app.name"), id: "main", for: MainWindowIdentity.self)',
-        'openWindow(id: "main", value: MainWindowIdentity.singleton)',
+        'presentWindow(id: "main", value: MainWindowIdentity.singleton)',
         "CommandGroup(replacing: .appSettings)",
     ]
     missing = [item for item in required if item not in combined]

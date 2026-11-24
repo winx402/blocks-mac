@@ -1,5 +1,7 @@
 import AppKit
 import BlocksCore
+import Combine
+import OSLog
 import SwiftUI
 
 /// Coordinates one recovery presentation for the restored main window. SwiftUI
@@ -42,6 +44,8 @@ final class MainWindowPresentationCoordinator {
     private let isUnitTestHost: () -> Bool
     private let isApplicationActive: @MainActor () -> Bool
     private var attachedMainWindow: Attachment?
+    private var closeObservation: AnyCancellable?
+    private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "app.blocks.app", category: "MainWindowLifecycle")
     private var didFinishLaunching = false
     private var didBecomeActive = false
     private var didFinishRestoringWindows = false
@@ -75,6 +79,15 @@ final class MainWindowPresentationCoordinator {
     }
 
     func attachMainWindow(_ window: NSWindow) {
+        let logger = self.logger
+        let identity = ObjectIdentifier(window)
+        // Don't let a diagnostic subscription extend the SwiftUI window's lifetime.
+        closeObservation = NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)
+            .sink { notification in
+                guard let closed = notification.object as? NSWindow, ObjectIdentifier(closed) == identity else { return }
+                logger.notice("stage=main-window-close")
+            }
+        logger.notice("stage=main-window-attach")
         attachMainWindow(Attachment(window: window))
     }
 
@@ -88,6 +101,18 @@ final class MainWindowPresentationCoordinator {
             return
         }
         attachedMainWindow = nil
+        closeObservation = nil
+    }
+
+    /// Once a Blocks scene has provided its opener, a reopen AppleEvent with
+    /// no visible window should request that exact window value. Let AppKit
+    /// handle normal activation and early launch before the opener exists.
+    func shouldHandleReopenUsingAppKit(hasVisibleWindows: Bool, openMainWindow: () -> Bool) -> Bool {
+        logger.info("stage=main-window-reopen-event hasVisibleWindows=\(hasVisibleWindows, privacy: .public)")
+        guard !isUnitTestHost(), !hasVisibleWindows, attachedMainWindow?.isMiniaturized() != true else { return true }
+        let requested = openMainWindow()
+        logger.notice("stage=main-window-reopen requested=\(requested, privacy: .public)")
+        return !requested
     }
 
     private func resolveInitialPresentationIfReady() {

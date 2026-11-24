@@ -83,12 +83,16 @@ struct GeneralSettingsPane: View {
 
             SettingsRowDivider()
 
-            SettingsToggleRow(
+            SettingsFormRow(
                 title: L10n.string("settings.menuBar.showIcon"),
-                detail: L10n.string("settings.menuBar.showIcon.detail"),
-                isOn: Binding(get: { menuBar.isVisible }, set: { menuBar.setVisible($0) })
-            )
-            .accessibilityIdentifier("settings.menuBar.showIcon")
+                detail: L10n.string("settings.menuBar.showIcon.detail")
+            ) {
+                MenuBarVisibilitySwitch(
+                    label: L10n.string("settings.menuBar.showIcon"),
+                    isOn: Binding(get: { menuBar.isVisible }, set: { menuBar.setVisible($0) })
+                )
+                .fixedSize()
+            }
         }
     }
 
@@ -209,6 +213,52 @@ struct GeneralSettingsPane: View {
             L10n.string("release.channel.directBetaDetail")
         case .appStoreBeta:
             L10n.string("release.channel.appStoreBetaDetail")
+        }
+    }
+}
+
+/// Use a single native accessibility element for this control. Avoid a
+/// SwiftUI label override spanning both the row and its AppKit-backed switch.
+@MainActor
+struct MenuBarVisibilitySwitch: NSViewRepresentable {
+    let label: String
+    @Binding var isOn: Bool
+
+    func makeCoordinator() -> Coordinator { Coordinator(isOn: $isOn) }
+
+    func makeNSView(context: Context) -> NSSwitch {
+        makeControl(coordinator: context.coordinator)
+    }
+
+    func updateNSView(_ control: NSSwitch, context: Context) {
+        updateControl(control, coordinator: context.coordinator)
+    }
+
+    func makeControl(coordinator: Coordinator) -> NSSwitch {
+        let control = NSSwitch()
+        control.target = coordinator
+        control.action = #selector(Coordinator.toggle(_:))
+        control.setAccessibilityIdentifier("settings.menuBar.showIcon")
+        control.setAccessibilityLabel(label)
+        updateControl(control, coordinator: coordinator)
+        return control
+    }
+
+    func updateControl(_ control: NSSwitch, coordinator: Coordinator) {
+        coordinator.isOn = $isOn
+        let state: NSControl.StateValue = isOn ? .on : .off
+        if control.state != state { control.state = state }
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        var isOn: Binding<Bool>
+
+        init(isOn: Binding<Bool>) { self.isOn = isOn }
+
+        @objc func toggle(_ control: NSSwitch) {
+            let value = control.state == .on
+            if isOn.wrappedValue != value { isOn.wrappedValue = value }
         }
     }
 }

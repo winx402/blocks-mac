@@ -391,7 +391,7 @@ final class ActionBrokerUpdateSafetyTests: XCTestCase {
         }
     }
 
-    func testAppOwnedPreferenceImportsIntentOnlyOnce() throws {
+    func testAppOwnedPreferenceImportsIntentOnlyOnce() async throws {
         let suite = "AppOwnedCLI.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -400,7 +400,9 @@ final class ActionBrokerUpdateSafetyTests: XCTestCase {
         try control.unregister()
         let relaunched = ActionBrokerServiceControl.appOwned(defaults: defaults, inheritedIntent: true)
         XCTAssertEqual(relaunched.status(), .notRegistered)
-        try relaunched.register()
+        let registration = try await relaunched.registerAndReadStatus(.userEnable)
+        XCTAssertNil(registration.error)
+        XCTAssertEqual(registration.status, .enabled)
         XCTAssertEqual(control.status(), .enabled)
     }
 
@@ -1427,8 +1429,138 @@ final class ActionBrokerUpdateSafetyTests: XCTestCase {
         XCTAssertNil(try fixture.journal.load())
         XCTAssertTrue(access.isEnabled(.clipboard))
         manager.setEnabled(true)
+        await manager.serviceChangeTask?.value
         XCTAssertEqual(fixture.registerCount, 1)
         XCTAssertEqual(manager.state, .enabled)
+    }
+
+    func testSuspendedEnableKeepsAdmissionAndSerializesTogglesAndRefresh() async throws {
+        defer { ApplicationOperationAdmissionGate.resumeAll() }
+        let suite = "BrokerEnable.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let modules = CLIModuleAccessPolicy(defaults: defaults)
+        modules.setEnabled(false, for: .clipboard)
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.status = .notRegistered
+        fixture.processes = []
+        let entered = expectation(description: "registration entered")
+        let barrier = BrokerFixtureStartBarrier()
+        fixture.onRegister = {
+            XCTAssertTrue(Thread.isMainThread, "fixture stays on MainActor")
+            entered.fulfill()
+            await barrier.wait()
+        }
+        let manager = fixture.makeManager(moduleAccess: modules)
+        manager.setEnabled(true)
+        let operation = manager.serviceChangeTask
+        await fulfillment(of: [entered], timeout: 1)
+        XCTAssertTrue(manager.isRegisteringService)
+        XCTAssertEqual(manager.state, .connecting)
+        XCTAssertFalse(manager.isEnabled)
+        XCTAssertThrowsError(try ApplicationOperationAdmissionGate.pauseAllIfIdle()) { error in
+            guard case ApplicationOperationAdmissionGate.AdmissionError.busy = error else {
+                return XCTFail("expected in-flight registration admission, got \(error)")
+            }
+        }
+        do {
+            try await manager.prepareForApplicationUpdate()
+            XCTFail("update must not interleave with enable")
+        } catch ActionBrokerUpdateError.invalidRecoveryState { }
+        catch { XCTFail("unexpected preparation failure: \(error)") }
+        // Simulate launchd exposing the registered status before the call
+        // returns. A settings refresh cannot publish or start it early.
+        fixture.status = .enabled
+        manager.setEnabled(false)
+        manager.setEnabled(true)
+        manager.setModuleEnabled(.clipboard, enabled: true)
+        manager.refresh()
+        manager.recheckConnection()
+        XCTAssertEqual(fixture.registerCount, 1)
+        XCTAssertEqual(fixture.unregisterCount, 0)
+        XCTAssertEqual(fixture.host.startCount, 0)
+        XCTAssertFalse(modules.isEnabled(.clipboard))
+        await barrier.open()
+        await operation?.value
+        XCTAssertNil(manager.serviceChangeTask)
+        XCTAssertFalse(manager.isRegisteringService)
+        XCTAssertEqual(manager.state, .enabled)
+        XCTAssertEqual(fixture.host.startCount, 1)
+        try ApplicationOperationAdmissionGate.pauseAllIfIdle()
+    }
+
+    func testQuitFencesSuspendedEnableWithoutReleasingAdmissionBeforeCallReturns() async throws {
+        defer { ApplicationOperationAdmissionGate.resumeAll() }
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.status = .notRegistered
+        fixture.processes = []
+        let entered = expectation(description: "registration entered")
+        let barrier = BrokerFixtureStartBarrier()
+        fixture.onRegister = {
+            entered.fulfill()
+            await barrier.wait() // Like SMAppService, ignores Task cancellation.
+        }
+        let manager = fixture.makeManager()
+        manager.setEnabled(true)
+        let operation = manager.serviceChangeTask
+        await fulfillment(of: [entered], timeout: 1)
+        manager.beginApplicationQuit()
+        XCTAssertTrue(operation?.isCancelled == true)
+        XCTAssertTrue(ApplicationOperationAdmissionGate.diagnosticSnapshot.activeGates.contains {
+            $0.gateID == "action_broker_management" && $0.activeCount == 1
+        })
+        XCTAssertEqual(manager.state, .paused)
+        await barrier.open()
+        await operation?.value
+        try await manager.prepareForApplicationUpdate(stopService: false)
+        XCTAssertEqual(fixture.registerCount, 1)
+        XCTAssertEqual(fixture.unregisterCount, 0)
+        XCTAssertEqual(fixture.host.startCount, 0)
+        XCTAssertFalse(manager.isServiceRegistered)
+        XCTAssertFalse(manager.isRegisteringService)
+        XCTAssertEqual(manager.state, .paused)
+        XCTAssertFalse(ApplicationOperationAdmissionGate.diagnosticSnapshot.activeGates.contains {
+            $0.gateID == "action_broker_management"
+        })
+    }
+
+    func testAlreadyEnabledLaunchAndModuleEnableDoNotRepeatSMRegistration() async throws {
+        let suite = "BrokerExistingEnable.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let modules = CLIModuleAccessPolicy(defaults: defaults)
+        let fixture = BrokerServiceUpdateFixture()
+        let manager = fixture.makeManager(moduleAccess: modules)
+        manager.setModuleEnabled(.clipboard, enabled: true)
+        manager.setEnabled(true)
+        await manager.serviceChangeTask?.value
+        XCTAssertTrue(modules.isEnabled(.clipboard))
+        XCTAssertEqual(fixture.registerCount, 0)
+        XCTAssertNil(manager.serviceChangeTask)
+        XCTAssertEqual(fixture.host.startCount, 1)
+        XCTAssertEqual(manager.state, .enabled)
+    }
+
+    func testEnableUsesCurrentSMStatusEvenWhenRegistrationCacheIsStale() async throws {
+        for enableModule in [false, true] {
+            let suite = "BrokerExternalRemoval.\(UUID().uuidString)"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let fixture = BrokerServiceUpdateFixture()
+            let manager = fixture.makeManager(moduleAccess: CLIModuleAccessPolicy(defaults: defaults))
+            XCTAssertTrue(manager.isServiceRegistered)
+            fixture.status = .notRegistered // external change before the next refresh
+            fixture.processes = []
+
+            if enableModule { manager.setModuleEnabled(.clipboard, enabled: true) }
+            else { manager.setEnabled(true) }
+            await manager.serviceChangeTask?.value
+
+            XCTAssertEqual(fixture.registerCount, 1)
+            XCTAssertEqual(fixture.unregisterCount, 0)
+            XCTAssertTrue(manager.isServiceRegistered)
+            XCTAssertEqual(manager.state, .enabled)
+        }
     }
 
     func testExplicitDisableRefusesBusyOrUnverifiablePeerWithoutUnregistering() async throws {
@@ -1711,6 +1843,117 @@ final class ActionBrokerUpdateSafetyTests: XCTestCase {
         XCTAssertEqual(fixture.host.localResumeCount, 0)
     }
 
+    func testQuitDuringRecoveryRegistrationPreservesTicketAndDoesNotResumePeer() async throws {
+        let fixture = BrokerServiceUpdateFixture()
+        let manager = fixture.makeManager()
+        try await manager.prepareForApplicationUpdate()
+        let ticket = try XCTUnwrap(fixture.journal.load())
+        let startedBeforeRecovery = fixture.host.startCount
+        let entered = expectation(description: "update recovery registration entered")
+        let barrier = BrokerFixtureStartBarrier()
+        fixture.onRegister = {
+            entered.fulfill()
+            await barrier.wait()
+        }
+        let operation = Task { await manager.resumeAfterCancelledApplicationUpdate() }
+        await fulfillment(of: [entered], timeout: 1)
+        XCTAssertTrue(manager.isRegisteringService)
+        XCTAssertTrue(fixture.host.resumeTokens.isEmpty)
+        manager.beginApplicationQuit()
+        await barrier.open()
+        await operation.value
+        XCTAssertEqual(fixture.registerCount, 1)
+        XCTAssertEqual(fixture.unregisterCount, 1, "only the original update stopped the service")
+        XCTAssertEqual(fixture.host.startCount, startedBeforeRecovery)
+        XCTAssertEqual(fixture.host.localResumeCount, 0)
+        XCTAssertTrue(fixture.host.resumeTokens.isEmpty)
+        // The OS can finish re-registering; quit must leave the durable token
+        // untouched so the next app can safely resume the peer.
+        XCTAssertEqual(fixture.status, .enabled)
+        XCTAssertEqual(try fixture.journal.load()?.token, ticket.token)
+        XCTAssertEqual(manager.state, .paused)
+        XCTAssertFalse(manager.isRegisteringService)
+    }
+
+    func testLifecycleQuitWaitsForCancelledUpdateRegistrationThenDrainsNormally() async throws {
+        defer { ApplicationOperationAdmissionGate.resumeAll() }
+        let fixture = BrokerServiceUpdateFixture()
+        let manager = fixture.makeManager()
+        let quitEntered = expectation(description: "Quit reaches the lifecycle while recovery is suspended")
+        let lifecycle = ApplicationLifecycleCoordinator(requiredParticipantIDs: ["app", "actionBroker", "database"]) { event in
+            if event == .started(.quit) { quitEntered.fulfill() }
+        }
+        var earlyProducerResumes = 0
+        var databaseFenced = false
+        var databaseDrains = 0
+        try lifecycle.register(.init(id: "app", pauseAndDrain: {}, resume: { earlyProducerResumes += 1 }))
+        try lifecycle.register(.init(id: "actionBroker", pauseAndDrain: { [unowned lifecycle] in
+            try await manager.prepareForApplicationUpdate(stopService: lifecycle.intent != .quit)
+        }, resume: { await manager.resumeAfterCancelledApplicationUpdate() }))
+        try lifecycle.register(.init(id: "database", pauseAndDrain: {
+            XCTAssertFalse(databaseFenced, "a second drain cannot run while storage is still fenced")
+            databaseFenced = true
+            databaseDrains += 1
+        }, resume: { databaseFenced = false }))
+        try await lifecycle.prepareForUpdate {}
+        let ticket = try XCTUnwrap(fixture.journal.load())
+        let entered = expectation(description: "register during cancelled update recovery")
+        let barrier = BrokerFixtureStartBarrier()
+        fixture.onRegister = { entered.fulfill(); await barrier.wait() }
+        let recovery = Task { await lifecycle.resumeAfterCancelledUpdate() }
+        await fulfillment(of: [entered], timeout: 1)
+        XCTAssertEqual(lifecycle.state, .resuming)
+        XCTAssertFalse(databaseFenced)
+
+        lifecycle.beginQuit()
+        manager.beginApplicationQuit()
+        let quit = Task { try await lifecycle.prepare(for: .quit) }
+        await fulfillment(of: [quitEntered], timeout: 1)
+        XCTAssertEqual(lifecycle.state, .resuming)
+        XCTAssertEqual(databaseDrains, 1)
+        XCTAssertTrue(ApplicationOperationAdmissionGate.diagnosticSnapshot.globallyPaused)
+        await barrier.open()
+        await recovery.value
+        try await quit.value
+
+        XCTAssertEqual(lifecycle.state, .prepared)
+        XCTAssertEqual(lifecycle.intent, .quit)
+        XCTAssertEqual(databaseDrains, 2)
+        XCTAssertEqual(earlyProducerResumes, 0)
+        XCTAssertTrue(fixture.host.resumeTokens.isEmpty)
+        XCTAssertEqual(try fixture.journal.load(), ticket)
+        XCTAssertTrue(ApplicationOperationAdmissionGate.diagnosticSnapshot.globallyPaused)
+    }
+
+    func testQuitWaitsForStartupRecoveryRegistrationBeforeDrainingHost() async throws {
+        let fixture = BrokerServiceUpdateFixture()
+        fixture.status = .notRegistered
+        fixture.processes = []
+        let ticket = ActionBrokerUpdateRecoveryTicket(processID: 77)
+        try fixture.journal.save(ticket)
+        let entered = expectation(description: "startup recovery registration entered")
+        let barrier = BrokerFixtureStartBarrier()
+        fixture.onRegister = { entered.fulfill(); await barrier.wait() }
+        let manager = fixture.makeManager()
+        await fulfillment(of: [entered], timeout: 1)
+        manager.beginApplicationQuit()
+        let prematureDrain = expectation(description: "no drain before native registration completes")
+        prematureDrain.isInverted = true
+        var canFinish = false
+        let quit = Task {
+            try await manager.prepareForApplicationUpdate(stopService: false)
+            if !canFinish { prematureDrain.fulfill() }
+        }
+        await fulfillment(of: [prematureDrain], timeout: 0.05)
+        XCTAssertEqual(fixture.host.drainCount, 0)
+        canFinish = true
+        await barrier.open()
+        try await quit.value
+        XCTAssertEqual(fixture.host.drainCount, 1)
+        XCTAssertTrue(fixture.host.resumeTokens.isEmpty)
+        XCTAssertEqual(try fixture.journal.load(), ticket)
+    }
+
     func testDisabledPreferenceAndOrdinaryOfficialQuitDoNotToggleRegistration() async throws {
         let disabled = BrokerServiceUpdateFixture()
         disabled.status = .notRegistered
@@ -1769,6 +2012,7 @@ private final class BrokerServiceUpdateFixture {
     var registerCount = 0
     var unregisterCount = 0
     var registrationRequiresApproval = false
+    var onRegister: (@MainActor () async -> Void)?
     var unregister: (() async throws -> Void)?
     var legacyStatus: SMAppService.Status = .notRegistered
     var legacyProcesses: [Int32] = []
@@ -1805,6 +2049,7 @@ private final class BrokerServiceUpdateFixture {
         self.legacyStatus = legacyStatus
         let control = ActionBrokerServiceControl(status: { self.status }, register: {
             self.registerCount += 1
+            await self.onRegister?()
             if self.registrationRequiresApproval {
                 self.status = .requiresApproval
                 throw ActionBrokerUpdateError.requiresApproval

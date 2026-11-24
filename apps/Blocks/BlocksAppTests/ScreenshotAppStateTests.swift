@@ -10809,12 +10809,13 @@ final class ScreenshotAppStateTests: XCTestCase {
         )
     }
 
-    func testActionBrokerRegisterFailureStillStartsHostWhenServiceIsEnabled() {
+    func testActionBrokerRegisterFailureStillStartsHostWhenServiceIsEnabled() async {
         let fixture = makeActionBrokerManagerFixture(initialServiceStatus: .notRegistered)
         fixture.service.registerError = TestFailure.expected
         fixture.service.registersBeforeThrowing = true
 
         fixture.manager.setEnabled(true)
+        await fixture.manager.serviceChangeTask?.value
 
         XCTAssertTrue(fixture.manager.isEnabled)
         XCTAssertEqual(fixture.host.startCount, 1)
@@ -10827,7 +10828,7 @@ final class ScreenshotAppStateTests: XCTestCase {
         XCTAssertEqual(fixture.manager.state, .enabled)
     }
 
-    func testActionBrokerRegisterFailureDoesNotOverwriteSynchronousHostRecovery() {
+    func testActionBrokerRegisterFailureDoesNotOverwriteSynchronousHostRecovery() async {
         let service = ActionBrokerServiceTestDouble()
         service.status = .notRegistered
         service.registerError = TestFailure.expected
@@ -10836,6 +10837,7 @@ final class ScreenshotAppStateTests: XCTestCase {
         let manager = makeActionBrokerManager(service: service, host: host)
 
         manager.setEnabled(true)
+        await manager.serviceChangeTask?.value
 
         XCTAssertTrue(manager.isEnabled)
         XCTAssertEqual(host.startCount, 1)
@@ -10858,7 +10860,7 @@ final class ScreenshotAppStateTests: XCTestCase {
         XCTAssertEqual(manager.state, .failed(TestFailure.expected.localizedDescription))
     }
 
-    func testActionBrokerRegisterFailureWithoutRegistrationRemainsDisabled() {
+    func testActionBrokerRegisterFailureWithoutRegistrationRemainsDisabled() async {
         let service = ActionBrokerServiceTestDouble()
         service.status = .notRegistered
         service.registerError = TestFailure.expected
@@ -10866,6 +10868,7 @@ final class ScreenshotAppStateTests: XCTestCase {
         let manager = makeActionBrokerManager(service: service, host: host)
 
         manager.setEnabled(true)
+        await manager.serviceChangeTask?.value
 
         XCTAssertFalse(manager.isEnabled)
         XCTAssertEqual(host.startCount, 0)
@@ -10875,6 +10878,8 @@ final class ScreenshotAppStateTests: XCTestCase {
     func testActionBrokerSettingsPresentationSeparatesRegistrationFromReadiness() {
         let fixture = makeActionBrokerManagerFixture()
         XCTAssertTrue(fixture.manager.isEnabled)
+        XCTAssertEqual(ActionBrokerSettingsStatePresentation.detail(for: .connecting, isRegistering: true),
+            L10n.string("settings.agentCLI.actionBroker.registering"))
         XCTAssertEqual(
             ActionBrokerSettingsStatePresentation.detail(for: fixture.manager.state),
             L10n.string("settings.agentCLI.actionBroker.connecting")

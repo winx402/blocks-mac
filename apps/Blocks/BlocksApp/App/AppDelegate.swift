@@ -125,4 +125,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
     }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        guard !AppTerminationCoordinator.shared.isQuitting else { return false }
+        return mainWindowPresentationCoordinator.shouldHandleReopenUsingAppKit(hasVisibleWindows: hasVisibleWindows) {
+            Self.menuBarController.appModel?.reopenMainWindowIfConfigured() ?? false
+        }
+    }
 }

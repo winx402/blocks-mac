@@ -4,6 +4,31 @@ import XCTest
 
 @MainActor
 final class MainWindowPresentationCoordinatorTests: XCTestCase {
+    func testReopenUsesSceneOpenerOnlyWhenNoVisibleOrMiniaturizedWindow() {
+        let coordinator = MainWindowPresentationCoordinator(isUnitTestHost: { false })
+        var openCount = 0
+        let open = { openCount += 1; return true }
+        XCTAssertTrue(coordinator.shouldHandleReopenUsingAppKit(hasVisibleWindows: true, openMainWindow: open))
+        let minimized = MainWindowPresentationWindowSpy(state: .miniaturized)
+        coordinator.attachMainWindow(minimized.makeAttachment())
+        XCTAssertTrue(coordinator.shouldHandleReopenUsingAppKit(hasVisibleWindows: false, openMainWindow: open))
+        XCTAssertEqual(openCount, 0)
+
+        minimized.state = .hidden
+        XCTAssertFalse(coordinator.shouldHandleReopenUsingAppKit(hasVisibleWindows: false, openMainWindow: open))
+        XCTAssertEqual(openCount, 1)
+    }
+
+    func testReopenFallsBackToAppKitBeforeSceneProvidesAnOpener() {
+        let coordinator = MainWindowPresentationCoordinator(isUnitTestHost: { false })
+        XCTAssertTrue(coordinator.shouldHandleReopenUsingAppKit(hasVisibleWindows: false) { false })
+        let testHost = MainWindowPresentationCoordinator(isUnitTestHost: { true })
+        XCTAssertTrue(testHost.shouldHandleReopenUsingAppKit(hasVisibleWindows: false) {
+            XCTFail("the isolated test host must not open a window")
+            return true
+        })
+    }
+
     func testPresentsOnceWhenActivationPrecedesMainWindowAttachment() {
         var isActive = false
         let window = MainWindowPresentationWindowSpy()

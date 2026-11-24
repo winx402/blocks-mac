@@ -1582,6 +1582,13 @@ final class AppModel: ObservableObject {
 
     func configureMainWindowOpener(_ opener: @escaping () -> Void) { mainWindowOpener = opener }
 
+    /// Reopening from the Dock/Finder must not navigate away from the current section.
+    func reopenMainWindowIfConfigured() -> Bool {
+        guard let mainWindowOpener else { return false }
+        mainWindowOpener()
+        return true
+    }
+
     func openMainWindow(section: AppSection) {
         selectedSection = section
         mainWindowNavigationGeneration &+= 1

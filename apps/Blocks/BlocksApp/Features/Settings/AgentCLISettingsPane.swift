@@ -48,6 +48,7 @@ private struct AgentCLISettingsContent: View {
                         }
                     )
                 )
+                .disabled(manager.isRegisteringService)
             }
             SettingsSectionNote(text: L10n.string("settings.agentCLI.modules.offline"))
         }
@@ -2933,7 +2934,9 @@ private struct ActionBrokerSettingsSection: View {
                     kind: ActionBrokerSettingsStatePresentation.feedbackKind(for: manager.state),
                     message: manager.usesAppOwnedService && manager.state == .enabled
                         ? L10n.string("settings.agentCLI.appOwned.ready")
-                        : ActionBrokerSettingsStatePresentation.detail(for: manager.state)
+                        : ActionBrokerSettingsStatePresentation.detail(
+                            for: manager.state, isRegistering: manager.isRegisteringService
+                        )
                 )
             ) {
                 if manager.state == .recoveryRequired {
@@ -2945,6 +2948,7 @@ private struct ActionBrokerSettingsSection: View {
                     get: { manager.isEnabled },
                     set: manager.setEnabled
                 ))
+                .disabled(manager.isRegisteringService)
             }
             if manager.hasLegacyServiceRegistration {
                 SettingsSectionNote(text: L10n.string("settings.agentCLI.appOwned.legacy"))
@@ -2956,8 +2960,9 @@ private struct ActionBrokerSettingsSection: View {
 }
 
 enum ActionBrokerSettingsStatePresentation {
-    static func detail(for state: ActionBrokerServiceManager.State) -> String {
-        switch state {
+    static func detail(for state: ActionBrokerServiceManager.State, isRegistering: Bool = false) -> String {
+        if isRegistering { return L10n.string("settings.agentCLI.actionBroker.registering") }
+        return switch state {
         case .disabled:
             L10n.string("settings.agentCLI.actionBroker.disabled")
         case .requiresApproval:

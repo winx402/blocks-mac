@@ -87,6 +87,7 @@ final class ApplicationLifecycleCoordinator {
     private var participants: [Participant] = []
     private var pausedParticipants: [Participant] = []
     private var recoveryTask: Task<Void, Never>?
+    private var recoveringUpdateProducers = false
     private var pendingUpdatePreparationID: UUID?
     private var usesOwnedUpdateAdmission = false
     private var updateAdmission: ApplicationOperationAdmissionGate.UpdatePause?
@@ -153,6 +154,20 @@ final class ApplicationLifecycleCoordinator {
         record(.started(requestedIntent))
         if requestedIntent == .quit {
             beginQuit()
+            if state == .resuming, intent == .update, recoveringUpdateProducers {
+                // A producer may still be in an uncancellable OS call when
+                // quit commits. Wait for that recovery to unwind before a
+                // second drain. Storage has already resumed at this stage;
+                // retrying its preparation while it is still fenced is invalid.
+                await recoveryTask?.value
+                if state == .resuming, intent == .update, recoveringUpdateProducers {
+                    recoveringUpdateProducers = false
+                    usesOwnedUpdateAdmission = false
+                    updateAdmission = nil
+                    state = .active
+                    intent = nil
+                }
+            }
         } else if quitCommitted {
             record(.failed(requestedIntent, .preparationInProgress))
             throw SafetyError.preparationInProgress
@@ -308,11 +323,13 @@ final class ApplicationLifecycleCoordinator {
         } else {
             ApplicationOperationAdmissionGate.resumeAll()
         }
+        recoveringUpdateProducers = true
         for participant in toResume where participant.id != "database" {
             guard !quitCommitted else { return }
             await participant.resume()
         }
         guard !quitCommitted else { return }
+        recoveringUpdateProducers = false
         state = .active
         intent = nil
         usesOwnedUpdateAdmission = false

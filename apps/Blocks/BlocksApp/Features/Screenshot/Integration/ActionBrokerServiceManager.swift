@@ -41,6 +41,67 @@ struct ActionBrokerEmbeddedServiceValidator {
     }
 }
 
+enum ActionBrokerRegistrationSource: String, Sendable {
+    case userEnable = "user-enable"
+    case updateRecovery = "update-recovery"
+}
+
+struct ActionBrokerRegistrationResult: Sendable {
+    let status: SMAppService.Status
+    let error: Error?
+}
+
+private enum ActionBrokerNativeRegistration {
+    private static let queue = DispatchQueue(label: "app.blocks.action-broker.registration", qos: .userInitiated)
+    private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "app.blocks.app",
+                                       category: "ActionBrokerRegistration")
+
+    private final class StartPermission: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+
+        // This check is the point of no return. A cancellation after it
+        // cannot interrupt ServiceManagement or release the caller's lease.
+        func claim() -> Bool { lock.withLock { !cancelled } }
+        func cancel() { lock.withLock { cancelled = true } }
+    }
+
+    static func run(plistName: String, source: ActionBrokerRegistrationSource) async throws -> ActionBrokerRegistrationResult {
+        let permission = StartPermission()
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                queue.async {
+                    // Transport only the plist name. Keep the native instance
+                    // and both registration-related status reads on this worker.
+                    let service = SMAppService.agent(plistName: plistName)
+                    let status = service.status
+                    guard permission.claim() else {
+                        continuation.resume(throwing: CancellationError())
+                        return
+                    }
+                    if status == .enabled {
+                        continuation.resume(returning: .init(status: status, error: nil))
+                        return
+                    }
+                    let start = ContinuousClock.now
+                    let mainThread = Thread.isMainThread
+                    logger.info("stage=register-begin source=\(source.rawValue, privacy: .public) mainThread=\(mainThread, privacy: .public)")
+                    let error: Error?
+                    do { try service.register(); error = nil }
+                    catch let registrationError { error = registrationError }
+                    let elapsed = start.duration(to: .now).components
+                    let elapsedMS = Double(elapsed.seconds) * 1_000 + Double(elapsed.attoseconds) / 1e15
+                    let outcome = error == nil ? "success" : "failure"
+                    logger.info("stage=register-end source=\(source.rawValue, privacy: .public) mainThread=\(mainThread, privacy: .public) elapsedMS=\(elapsedMS, privacy: .public) outcome=\(outcome, privacy: .public)")
+                    continuation.resume(returning: .init(status: service.status, error: error))
+                }
+            }
+        } onCancel: {
+            permission.cancel()
+        }
+    }
+}
+
 @MainActor
 struct ActionBrokerServiceControl {
     static let appOwnedPreferenceKey = "blocks.dev.cli.appOwnedEnabled"
@@ -56,13 +117,14 @@ struct ActionBrokerServiceControl {
         )
     }
     let status: () -> SMAppService.Status
-    let register: () throws -> Void
+    let registerAndReadStatus: @MainActor (ActionBrokerRegistrationSource) async throws -> ActionBrokerRegistrationResult
     let unregister: () throws -> Void
     let unregisterAndWait: () async throws -> Void
 
-    init(service: SMAppService) {
+    init(agentPlistName: String) {
+        let service = SMAppService.agent(plistName: agentPlistName)
         status = { service.status }
-        register = { try service.register() }
+        registerAndReadStatus = { try await ActionBrokerNativeRegistration.run(plistName: agentPlistName, source: $0) }
         unregister = { try service.unregister() }
         // The async SMAppService variant completes after the running job has
         // been killed; the synchronous variant explicitly does not wait.
@@ -71,12 +133,20 @@ struct ActionBrokerServiceControl {
 
     init(
         status: @escaping () -> SMAppService.Status,
-        register: @escaping () throws -> Void,
+        register: @escaping @MainActor () async throws -> Void,
         unregister: @escaping () throws -> Void,
         unregisterAndWait: (() async throws -> Void)? = nil
     ) {
         self.status = status
-        self.register = register
+        self.registerAndReadStatus = { _ in
+            try Task.checkCancellation()
+            let priorStatus = status()
+            if priorStatus == .enabled { return .init(status: priorStatus, error: nil) }
+            let error: Error?
+            do { try await register(); error = nil }
+            catch let registrationError { error = registrationError }
+            return .init(status: status(), error: error)
+        }
         self.unregister = unregister
         self.unregisterAndWait = unregisterAndWait ?? { try unregister() }
     }
@@ -400,13 +470,15 @@ final class ActionBrokerServiceManager: ObservableObject {
 
     @Published private(set) var state: State = .disabled
     @Published private(set) var isServiceRegistered = false
+    @Published private(set) var isRegisteringService = false
     @Published private(set) var enabledModules: Set<CLIModule> = []
     let moduleAccess: CLIModuleAccessPolicy
 
     func isModuleEnabled(_ module: CLIModule) -> Bool { moduleAccess.isEnabled(module) }
 
     func setModuleEnabled(_ module: CLIModule, enabled: Bool) {
-        guard !isQuitting, !applicationUpdatePaused, serviceChangeTask == nil else { return }
+        guard !isQuitting, !applicationUpdatePaused, serviceChangeTask == nil, updateRecoveryTask == nil,
+              !isRestoringOfficialService, applicationManagementGate.isAcceptingOperations else { return }
         moduleAccess.setEnabled(enabled, for: module)
         enabledModules = Set(CLIModule.allCases.filter(moduleAccess.isEnabled))
         if enabled { setEnabled(true) }
@@ -457,6 +529,8 @@ final class ActionBrokerServiceManager: ObservableObject {
     private let processHasExited: (Int32) -> Bool
     private var updateRecoveryTicket: ActionBrokerUpdateRecoveryTicket?
     private var updateRecoveryTask: Task<Void, Never>?
+    private var recoveryRegistration: Task<ActionBrokerRegistrationResult, Error>?
+    private var isRestoringOfficialService = false
     private(set) var serviceChangeTask: Task<Void, Never>?
     private var updateRecoveryFailureMessage: String?
     private var isQuitting = false
@@ -475,6 +549,7 @@ final class ActionBrokerServiceManager: ObservableObject {
         applicationUpdatePaused = true
         cancelHealthChecks()
         state = .paused
+        isRegisteringService = false
         reconnectTask?.cancel()
         reconnectTask = nil
         hostAttempt &+= 1
@@ -483,8 +558,14 @@ final class ActionBrokerServiceManager: ObservableObject {
 
     func prepareForApplicationUpdate(stopService: Bool = true) async throws {
         // The update coordinator must not resume or consume an explicit
-        // disable transaction that is currently awaiting the remote peer.
-        if stopService, serviceChangeTask != nil { throw ActionBrokerUpdateError.invalidRecoveryState }
+        // service transaction that is currently awaiting the OS or a peer.
+        if stopService, serviceChangeTask != nil || isRestoringOfficialService {
+            throw ActionBrokerUpdateError.invalidRecoveryState
+        }
+        // Startup recovery may be running outside the main lifecycle's
+        // cancelled-update phase. Don't exit in the middle of its OS call;
+        // this waits only for registration, not for unrelated peer recovery.
+        if !stopService, let recoveryRegistration { _ = await recoveryRegistration.result }
         try await prepareServiceRemoval(stopService: stopService)
     }
 
@@ -543,7 +624,7 @@ final class ActionBrokerServiceManager: ObservableObject {
     }
 
     func resumeAfterCancelledApplicationUpdate() async {
-        guard serviceChangeTask == nil else { return }
+        guard serviceChangeTask == nil, updateRecoveryTask == nil else { return }
         await restoreServiceAfterUpdate()
     }
 
@@ -557,20 +638,20 @@ final class ActionBrokerServiceManager: ObservableObject {
         let moduleAccess = CLIModuleAccessPolicy()
         self.moduleAccess = moduleAccess
         enabledModules = Set(CLIModule.allCases.filter(moduleAccess.isEnabled))
-        let legacy = SMAppService.agent(plistName: BlocksActionBrokerXPC.launchAgentPlistName)
-        legacyService = ActionBrokerServiceControl(service: legacy)
+        let legacy = ActionBrokerServiceControl(agentPlistName: BlocksActionBrokerXPC.launchAgentPlistName)
+        legacyService = legacy
         legacyLaunchdJobsAreAbsent = Self.currentLegacyLaunchdJobsAreAbsent
         #if BLOCKS_LOCAL_DEVELOPMENT
         usesAppOwnedService = true
         let storageForIntent = try? StorageEnvironment.appSupport()
         let oldJournal = ActionBrokerUpdateRecoveryJournal(url: storageForIntent?.rootDirectory
             .appendingPathComponent("ActionBrokerUpdateRecovery.json"))
-        service = .appOwned(inheritedIntent: legacy.status == .enabled || legacy.status == .requiresApproval
+        service = .appOwned(inheritedIntent: legacy.status() == .enabled || legacy.status() == .requiresApproval
             || (try? oldJournal.load()) != nil)
         embeddedServiceAvailable = true
         #else
         usesAppOwnedService = false
-        service = ActionBrokerServiceControl(service: legacy)
+        service = legacy
         embeddedServiceAvailable = ActionBrokerEmbeddedServiceValidator().isAvailable()
         #endif
         host = ScreenshotActionHost(
@@ -701,8 +782,8 @@ final class ActionBrokerServiceManager: ObservableObject {
             guard let ticket = try updateRecoveryJournal.load() else { return false }
             updateRecoveryTicket = ticket
             state = .recovering
-            // Main-actor synchronous journal/register mutations cannot interleave
-            // with quit. The remote wait must not hold a business admission lease.
+            // Recovery owns the saved intent. Its callbacks must revalidate
+            // the generation after the OS or the peer suspends the actor.
             updateRecoveryTask = Task { @MainActor [weak self] in
                 await self?.restoreServiceAfterUpdate()
                 self?.updateRecoveryTask = nil
@@ -715,7 +796,7 @@ final class ActionBrokerServiceManager: ObservableObject {
     }
 
     private func restoreServiceAfterUpdate() async {
-        guard !isQuitting else { return }
+        guard !isQuitting, !AppTerminationCoordinator.shared.isQuitting else { return }
         if usesAppOwnedService {
             let generation = recoveryGeneration
             do {
@@ -733,22 +814,37 @@ final class ActionBrokerServiceManager: ObservableObject {
             // revoke the very work that made disabling unsafe. If preparation
             // did stop it, refresh() observes hostIsActive == false and restarts.
             host.resumeAfterCancelledApplicationUpdate()
-            refresh()
+            refresh(using: nil)
             if let updateRecoveryFailureMessage { state = .failed(updateRecoveryFailureMessage) }
             else if isServiceRegistered, hostIsActive, successfulHostAttempt == hostAttempt { state = .enabled }
             return
         }
+        guard !isRestoringOfficialService else { return }
+        isRestoringOfficialService = true
+        defer { isRestoringOfficialService = false }
         let generation = recoveryGeneration
+        var failedRegistrationStatus: SMAppService.Status?
         do {
             let recoveredTicket: ActionBrokerUpdateRecoveryTicket?
             if let updateRecoveryTicket { recoveredTicket = updateRecoveryTicket }
             else { recoveredTicket = try updateRecoveryJournal.load() }
             if let ticket = recoveredTicket {
                 updateRecoveryTicket = ticket
-                if service.status() != .enabled { try service.register() }
-                guard service.status() == .enabled else { throw ActionBrokerUpdateError.requiresApproval }
+                isRegisteringService = true
+                let registration = try await resolveRecoveryRegistration()
+                guard isCurrentRecoveryGeneration(generation) else { return }
+                isRegisteringService = false
+                try Task.checkCancellation()
+                if let error = registration.error {
+                    failedRegistrationStatus = registration.status
+                    throw error
+                }
+                guard registration.status == .enabled else {
+                    failedRegistrationStatus = registration.status
+                    throw ActionBrokerUpdateError.requiresApproval
+                }
                 try await host.resumeBrokerAfterCancelledApplicationUpdate(token: ticket.token)
-                guard !isQuitting, recoveryGeneration == generation else { return }
+                guard isCurrentRecoveryGeneration(generation) else { return }
                 try Task.checkCancellation()
                 try updateRecoveryJournal.clear()
                 updateRecoveryTicket = nil
@@ -760,20 +856,40 @@ final class ActionBrokerServiceManager: ObservableObject {
             // requests; refresh probes it, or starts only if preparation did
             // actually stop it or a connection loss made it inactive.
             host.resumeAfterCancelledApplicationUpdate()
-            refresh()
+            refresh(using: nil)
         } catch {
-            guard !isQuitting, recoveryGeneration == generation else { return }
+            guard isCurrentRecoveryGeneration(generation) else { return }
+            isRegisteringService = false
             updateRecoveryFailureMessage = error.localizedDescription
             applicationUpdatePaused = false
             applicationManagementGate.resume()
             host.resumeAfterCancelledApplicationUpdate()
-            isServiceRegistered = service.status() == .enabled
+            let status = failedRegistrationStatus ?? service.status()
+            isServiceRegistered = status == .enabled
             // A failed update must not needlessly disable the old, still
             // registered CLI host. Keep it usable while retaining the error
             // and recovery ticket; this does not declare the update complete.
-            if isServiceRegistered { refresh() }
-            state = service.status() == .requiresApproval ? .requiresApproval : .failed(error.localizedDescription)
+            if isServiceRegistered { refresh(using: status) }
+            state = status == .requiresApproval ? .requiresApproval : .failed(error.localizedDescription)
             // Keep the recovery ticket and enabled intent for a later retry.
+        }
+    }
+
+    private func isCurrentRecoveryGeneration(_ generation: Int) -> Bool {
+        !isQuitting && !AppTerminationCoordinator.shared.isQuitting && recoveryGeneration == generation
+    }
+
+    private func resolveRecoveryRegistration() async throws -> ActionBrokerRegistrationResult {
+        try Task.checkCancellation()
+        let registration = Task { @MainActor [service] in
+            try await service.registerAndReadStatus(.updateRecovery)
+        }
+        recoveryRegistration = registration
+        defer { recoveryRegistration = nil }
+        return try await withTaskCancellationHandler {
+            try await registration.value
+        } onCancel: {
+            registration.cancel()
         }
     }
 
@@ -1170,7 +1286,8 @@ final class ActionBrokerServiceManager: ObservableObject {
     }
 
     func setEnabled(_ enabled: Bool) {
-        guard !isQuitting, !applicationUpdatePaused, serviceChangeTask == nil, updateRecoveryTask == nil else { return }
+        guard !isQuitting, !applicationUpdatePaused, serviceChangeTask == nil, updateRecoveryTask == nil,
+              !isRestoringOfficialService else { return }
         if !enabled, embeddedServiceAvailable {
             // A user disabling CLI integration has not authorized interrupting
             // a write. Reuse the authenticated idle proof and async SM removal.
@@ -1182,20 +1299,49 @@ final class ActionBrokerServiceManager: ObservableObject {
             return
         }
         guard let lease = applicationManagementGate.begin() else { return }
-        defer { lease.release() }
         guard embeddedServiceAvailable else {
+            defer { lease.release() }
             cancelReconnectAndStopHost()
             isServiceRegistered = false
             state = .unavailable
             return
         }
+        // Launch Services may have removed the job since our last probe.
+        // Only the worker's current status (not the UI cache) can skip register.
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        cancelHealthChecks()
+        let generation = recoveryGeneration
+        let previousState = state
+        serviceChangeTask = Task { @MainActor [weak self] in
+            // The synchronous native call cannot be interrupted. Update/quit
+            // may proceed only after it has really returned, even if canceled.
+            defer { lease.release() }
+            guard let self else { return }
+            defer { self.serviceChangeTask = nil }
+            await self.finishEnablingService(generation: generation, previousState: previousState)
+        }
+        isRegisteringService = true
+        if !isServiceRegistered { state = .connecting }
+    }
+
+    private func finishEnablingService(generation: Int, previousState: State) async {
+        guard isCurrentRecoveryGeneration(generation) else { return }
         do {
-            if enabled {
-                try service.register()
-                refresh()
+            try Task.checkCancellation()
+            let registration = try await service.registerAndReadStatus(.userEnable)
+            guard isCurrentRecoveryGeneration(generation) else { return }
+            try Task.checkCancellation()
+            isRegisteringService = false
+            if let error = registration.error {
+                recoverAfterRegisterFailure(error, status: registration.status)
+            } else {
+                refresh(using: registration.status)
             }
         } catch {
-            recoverAfterRegisterFailure(error)
+            guard isCurrentRecoveryGeneration(generation) else { return }
+            isRegisteringService = false
+            state = previousState
         }
     }
 
@@ -1258,7 +1404,14 @@ final class ActionBrokerServiceManager: ObservableObject {
     }
 
     func refresh() {
-        guard !isQuitting, !applicationUpdatePaused,
+        // An onAppear/wake during startup recovery must not bring up an
+        // endpoint before the saved ticket's remote resume has completed.
+        guard updateRecoveryTask == nil, !isRestoringOfficialService else { return }
+        refresh(using: nil)
+    }
+
+    private func refresh(using observedStatus: SMAppService.Status?) {
+        guard !isQuitting, !applicationUpdatePaused, !isRegisteringService,
               applicationManagementGate.isAcceptingOperations else { return }
         guard embeddedServiceAvailable else {
             cancelReconnectAndStopHost()
@@ -1267,7 +1420,7 @@ final class ActionBrokerServiceManager: ObservableObject {
             return
         }
 
-        switch service.status() {
+        switch observedStatus ?? service.status() {
         case .enabled:
             isServiceRegistered = true
             if hostIsActive, successfulHostAttempt == hostAttempt {
@@ -1298,7 +1451,8 @@ final class ActionBrokerServiceManager: ObservableObject {
     /// clears recovery intent, or asks launchd to terminate the old process.
     func recheckConnection() {
         guard !isQuitting, !applicationUpdatePaused, serviceChangeTask == nil,
-              updateRecoveryTask == nil, applicationManagementGate.isAcceptingOperations else { return }
+              updateRecoveryTask == nil, !isRestoringOfficialService,
+              applicationManagementGate.isAcceptingOperations else { return }
         guard embeddedServiceAvailable, service.status() == .enabled else {
             refresh()
             return
@@ -1500,9 +1654,9 @@ final class ActionBrokerServiceManager: ObservableObject {
         host.stop()
     }
 
-    private func recoverAfterRegisterFailure(_ error: Error) {
-        guard service.status() == .enabled else {
-            refresh()
+    private func recoverAfterRegisterFailure(_ error: Error, status: SMAppService.Status) {
+        guard status == .enabled else {
+            refresh(using: status)
             return
         }
 
