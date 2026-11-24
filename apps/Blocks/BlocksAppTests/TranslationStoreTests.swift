@@ -10261,8 +10261,12 @@ final class TranslationStoreTests: XCTestCase {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [TranslationOfficialURLProtocolFixture.self]
         let oversized = BlocksNativePluginNetworkPolicy.maximumResponseBytes + 1
+        let stopped = expectation(description: "oversized header request stopped")
         TranslationOfficialURLProtocolFixture.setMode(
-            .oversizedHeaderOnly(contentLength: oversized)
+            .oversizedHeaderOnly(
+                contentLength: oversized,
+                stopped: TranslationTestExpectationSignal(stopped)
+            )
         )
         let operation = NativeURLSessionOpenAIOperation(
             sessionConfiguration: configuration,
@@ -10278,6 +10282,8 @@ final class TranslationStoreTests: XCTestCase {
                 return XCTFail("Unexpected error: \(error)")
             }
         }
+        // The operation can deliver its rejection before Foundation calls stopLoading.
+        await fulfillment(of: [stopped], timeout: 2)
         XCTAssertEqual(TranslationOfficialURLProtocolFixture.bodySendCount, 0)
         XCTAssertEqual(TranslationOfficialURLProtocolFixture.stopCount, 1)
     }
@@ -18711,7 +18717,7 @@ private final class TranslationOfficialURLProtocolFixture:
         case success
         case delayedSuccess(delay: Duration)
         case oversized(contentLength: Int)
-        case oversizedHeaderOnly(contentLength: Int)
+        case oversizedHeaderOnly(contentLength: Int, stopped: TranslationTestExpectationSignal? = nil)
         case redirect
     }
 
@@ -18846,6 +18852,7 @@ private final class TranslationOfficialURLProtocolFixture:
     private var delayedResponseTask: Task<Void, Never>?
     private var redirectWorkItem: DispatchWorkItem?
     private var redirectState: RedirectState?
+    private var oversizedHeaderStopped: TranslationTestExpectationSignal?
 
     static var startCount: Int {
         stateLock.lock()
@@ -18951,6 +18958,9 @@ private final class TranslationOfficialURLProtocolFixture:
         Self.stateLock.lock()
         let mode = Self.mode
         Self.storedStartCount += 1
+        if case let .oversizedHeaderOnly(_, stopped) = mode {
+            oversizedHeaderStopped = stopped
+        }
         Self.stateLock.unlock()
         if let state = Self.redirectState(for: request.url) {
             if state.isSourceURL(request.url) {
@@ -19033,7 +19043,7 @@ private final class TranslationOfficialURLProtocolFixture:
                 didLoad: Data(repeating: 0, count: contentLength)
             )
             client?.urlProtocolDidFinishLoading(self)
-        case let .oversizedHeaderOnly(contentLength):
+        case let .oversizedHeaderOnly(contentLength, _):
             client?.urlProtocol(
                 self,
                 didReceive: HTTPURLResponse(
@@ -19046,6 +19056,8 @@ private final class TranslationOfficialURLProtocolFixture:
                 )!,
                 cacheStoragePolicy: .notAllowed
             )
+            // Foundation can buffer this synthetic header until the protocol
+            // finishes. Finish without sending any body bytes.
             client?.urlProtocolDidFinishLoading(self)
         case .redirect:
             client?.urlProtocol(
@@ -19121,7 +19133,9 @@ private final class TranslationOfficialURLProtocolFixture:
         redirectState = nil
         Self.stateLock.lock()
         Self.storedStopCount += 1
+        let oversizedHeaderStopped = self.oversizedHeaderStopped
         Self.stateLock.unlock()
+        oversizedHeaderStopped?.fulfill()
     }
 }
 
